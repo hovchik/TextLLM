@@ -1,0 +1,7 @@
+__pycache__/
+data/raw/
+data/bin/
+runs/
+checkpoints/
+tokenizer/bpe.json
+*.pt

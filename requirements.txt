@@ -1,0 +1,15 @@
+torch
+tokenizers
+numpy
+tqdm
+requests
+datasets
+transformers
+peft
+accelerate
+gradio
+pandas
+pypdf
+python-docx
+trafilatura
+beautifulsoup4

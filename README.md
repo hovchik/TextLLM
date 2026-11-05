@@ -7,23 +7,27 @@ A small GPT-style model trained on public-domain books (Project Gutenberg) and o
 pip install -r requirements.txt
 ```
 
-## Easiest: the web app
+## Easiest: Text LLM Studio (web app)
 ```bash
 python app.py        # open http://127.0.0.1:7860
 ```
-The app has five tabs:
-1. **Data:** download books, train the tokenizer and encode the corpus, with live status.
-2. **Your texts:** upload PDF, DOC, DOCX, TXT, MD or HTML files, paste links, or point at a folder.
-   *Teach a trained model now* downloads and extracts the texts, trains the model on them, then deletes them.
-   *Add to training data* keeps them in `data/raw/custom/` for the next full training.
-3. **Train:** choose "From scratch" or "Fine-tune open model", set the size and steps, then Start or Stop. You can resume a stopped from-scratch run.
-4. **Stats:** a live progress bar with ETA, train and validation loss chart, perplexity, speed, and a rough quality **level**:
-   1 random letters, 2 real words, 3 short phrases, 4 grammatical sentences, 5 fluent paragraphs, 6 stays on topic.
-5. **Chat:** pick any trained model and send requests. A fine-tuned model follows instructions; a from-scratch model continues your text.
+| Page | What it does |
+|---|---|
+| **Dashboard** | KPIs, learning curves, setup checklist and your models at a glance |
+| **Training** | New model wizard (from scratch or fine-tune), data preparation, *Your texts* (upload PDF/DOC/DOCX/TXT/MD/HTML, links, folders → learn → delete), and all runs with live progress, ETA, loss chart, level and log |
+| **Chat** | Conversations with any trained model, streaming answers, ★ ratings, *Improve* (write the answer you wanted), *Try again* |
+| **Analytics** | Validation loss across models, ratings per day, rating distribution, whether feedback training helped, leaderboard, job history |
+| **Feedback** | Every rated answer, "Train now" per model, and automatic learning after N new ratings |
 
-Every run lives in `runs/<name>/` (log.txt, metrics.jsonl, checkpoint or LoRA adapter).
+![dashboard](docs/studio-dashboard.png)
+![chat](docs/studio-chat.png)
 
-![stats tab](docs/stats-screenshot.png)
+### How ratings train the model
+`feedback_train.py` (run from the Feedback page, or automatically after 10 new ratings by default):
+- **Fine-tuned models:** answers rated 4–5★ and your corrections are trained on directly. A liked or corrected answer paired with a disliked answer to the same prompt is trained with a DPO preference loss. A disliked answer with nothing better is pushed below its previous likelihood.
+- **From-scratch models:** these only continue text, so they re-read prompts with their liked answers.
+- **No double training:** feedback that has been used is marked "learned" and isn't trained on again.
+- **Storage:** chats and ratings are stored in `runs/studio.db` (SQLite).
 
 ## Train on your own files and links
 ```bash

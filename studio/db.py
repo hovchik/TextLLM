@@ -111,7 +111,8 @@ def history(conv_id, before_id=None):
 
 def rate(msg_id, rating=None, comment=None, correction=None):
     ex("UPDATE messages SET rating=COALESCE(?, rating), comment=COALESCE(?, comment), "
-       "correction=COALESCE(?, correction), rated_at=? WHERE id=? AND role='assistant'",
+       "correction=COALESCE(?, correction), rated_at=?, trained_in=NULL "  # new feedback → learn it again
+       "WHERE id=? AND role='assistant'",
        (rating, comment, correction or None, time.time(), msg_id))
     return q("SELECT * FROM messages WHERE id=? AND role='assistant'", (msg_id,), one=True)
 

@@ -436,7 +436,7 @@ pages.chat = async () => {
   const input = $("#input");
   input.oninput = () => { input.style.height = "auto"; input.style.height = Math.min(input.scrollHeight, 200) + "px"; };
   input.onkeydown = (e) => { if (e.key === "Enter" && !e.shiftKey) { e.preventDefault(); send(); } };
-  $("#send").onclick = send;
+  $("#send").onclick = () => send();
   $("#newchat").onclick = () => { C.conv = null; drawConvs(); drawThread([]); input.focus(); };
   await drawConvs();
   if (C.conv) openConv(C.conv); else drawThread([]);

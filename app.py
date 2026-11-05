@@ -41,6 +41,13 @@ def run_dir(name):
 @app.get("/api/status")
 def status():
     s = db.get_settings()
+    if s["auto_train"] and not jobs.running():  # ratings that arrived while another job ran
+        for m in {r["model"] for r in db.q("SELECT DISTINCT model FROM messages WHERE role='assistant' "
+                                           "AND trained_in IS NULL AND (rating IS NOT NULL OR correction IS NOT NULL)")}:
+            failed = [j for j in jobs.history(20) if j["kind"] == "feedback" and j["run"] == m
+                      and j["exit"] not in (0, None) and time.time() - j["ended"] < 900]
+            if m and not failed and os.path.isdir(os.path.join(RUNS, m)) and maybe_auto_train(m):
+                break
     return {"job": jobs.status(), "data": jobs.data_status(), "settings": s,
             "pending_feedback": db.pending_feedback()}
 
@@ -188,7 +195,9 @@ def engine(name):
         err(f"Model {name} isn't trained yet.", 404)
     d = models[name]
     w = os.path.join(d, "ckpt.pt") if os.path.exists(os.path.join(d, "ckpt.pt")) else os.path.join(d, "adapter")
-    stamp = os.path.getmtime(w)
+    # adapter dirs: overwriting a file inside doesn't change the dir's mtime, so look at the files
+    files = [os.path.join(w, f) for f in os.listdir(w)] if os.path.isdir(w) else [w]
+    stamp = max(os.path.getmtime(f) for f in files)
     with _engine_lock:
         cached = ENGINES.get(name)
         if not cached or cached[0] != stamp:  # reload after (feedback) training

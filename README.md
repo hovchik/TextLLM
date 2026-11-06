@@ -86,6 +86,12 @@ python train.py --preset cpu --vocab 8192 --batch 16 --grad-accum 4 --max-steps 
 # stop any time with Ctrl+C; continue later with the same command plus --resume
 python generate.py --prompt "The old captain looked at the sea and" --tokens 300
 ```
+**If the download keeps disconnecting** (`WinError 10054`, "Server disconnected"): just run the same
+`build_corpus.py` command again. It skips Gutenberg if it finished, and FineWeb-Edu continues from
+`data/raw/fineweb/progress.json` (saved after every chunk; shards from older versions are picked up too).
+Each request is retried up to `--retries 30` times with backoff of up to 2 minutes. On a very unstable connection, add
+`--fineweb-mode download` to save whole parquet files (about 2 GB each, resumable) to `data/cache/fineweb` first.
+
 It saves a checkpoint every 250 steps (about 20 minutes on 4 cores, sooner on more), so you can try `generate.py` while it trains.
 Expect grammatical, book-flavoured prose that drifts after a few sentences. It won't produce coherent stories or follow instructions.
 

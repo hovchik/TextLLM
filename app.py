@@ -14,8 +14,9 @@ from fastapi.responses import FileResponse, JSONResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
-from chat_engine import ROOT, RUNS, Engine, list_models
-from studio import auth, db, feedback, jobs
+from chat_engine import ROOT, RUNS, Engine, gguf_path, list_models, weights_stamp
+from studio import auth, db, feedback, gate, jobs
+from writing import formats as F
 
 PY = jobs.PY
 WEB = os.path.join(ROOT, "web")
@@ -48,7 +49,7 @@ PUBLIC_ROUTES = {("GET", "/api/auth/state"), ("POST", "/api/auth/login"), ("POST
 USER_ROUTES = [(m, re.compile(p)) for m, p in [
     ("GET", r"/api/me"), ("POST", r"/api/me"), ("GET", r"/api/status"), ("GET", r"/api/models"),
     ("GET", r"/api/conversations"), ("GET", r"/api/conversations/\d+"), ("DELETE", r"/api/conversations/\d+"),
-    ("POST", r"/api/chat"), ("POST", r"/api/messages/\d+/rate"),
+    ("POST", r"/api/chat"), ("POST", r"/api/messages/\d+/rate"), ("GET", r"/api/formats"),
 ]]
 
 
@@ -236,6 +237,7 @@ class DataReq(BaseModel):
     books: int = 3000
     web_gb: float = 0.3
     vocab: int = 8192
+    hf_sets: bool = True
 
 
 @app.post("/api/data")
@@ -244,6 +246,8 @@ def data(r: DataReq):
         "download": [PY, "data/build_corpus.py", "--gutenberg-max", str(r.books), "--fineweb-gb", str(r.web_gb)],
         "tokenizer": [PY, "tokenizer/train_tokenizer.py", "--vocab", str(r.vocab)],
         "encode": [PY, "tokenizer/train_tokenizer.py", "--encode"],
+        # writing instructions for fine-tuning: posts, stories, essays (rights-cleared sources only)
+        "instructions": [PY, "data/build_instructions.py", "--from-studio"] + (["--hf-sets"] if r.hf_sets else []),
     }
     if r.step not in cmds:
         err("unknown step")
@@ -266,9 +270,14 @@ class TrainReq(BaseModel):
     batch: int = 16
     accum: int = 4
     lr: float = 1e-3
-    base: str = "Qwen/Qwen2.5-0.5B-Instruct"
+    base: str = "Qwen/Qwen3-0.6B"
     examples: int = 4000
     seq: int = 512
+    instructions: bool = True     # use data/instructions/train.jsonl if it exists
+    book_share: float = 0.2       # share of book-continuation examples in the mix
+    lora_r: int = 8
+    epochs: float = 0             # > 0: train this many passes instead of a fixed number of steps
+    gguf: bool = True             # make a fast quantized CPU copy after training
 
 
 @app.post("/api/train")
@@ -288,12 +297,20 @@ def train(r: TrainReq):
             cmd.append("--resume")
     else:
         import glob
-        if not glob.glob(os.path.join(ROOT, "data/raw/**/*.txt"), recursive=True):
-            err("Add some text first: download books (Training → Data) or add your own texts.")
+        inst = os.path.join(ROOT, "data/instructions/train.jsonl")
+        use_inst = r.instructions and os.path.exists(inst)
+        if not use_inst and not glob.glob(os.path.join(ROOT, "data/raw/**/*.txt"), recursive=True):
+            err("Add some text first: build writing instructions or download books (Training → Data).")
         cmd = [PY, "finetune/finetune_lora.py", "--out", out, "--base", r.base, "--examples", str(r.examples),
                "--seq", str(r.seq), "--batch", str(r.batch), "--grad-accum", str(r.accum), "--lr", str(r.lr),
-               "--max-steps", str(r.steps), "--eval-every", str(max(5, r.steps // 20)),
-               "--save-every", str(max(5, r.steps // 10))]
+               "--max-steps", "0" if r.epochs > 0 else str(r.steps), "--eval-every", str(max(5, r.steps // 20)),
+               "--save-every", str(max(5, r.steps // 10)), "--lora-r", str(r.lora_r)]
+        if r.epochs > 0:
+            cmd += ["--epochs", str(r.epochs)]
+        if use_inst:
+            cmd += ["--instructions", inst, "--book-share", str(r.book_share)]
+        if r.gguf:
+            cmd += ["--gguf"]
     mp = os.path.join(out, "metrics.jsonl")
     if not r.resume and os.path.exists(mp):
         os.rename(mp, os.path.join(out, f"metrics.{int(time.time())}.jsonl"))
@@ -373,10 +390,7 @@ def engine(name):
     if name not in models:
         err(f"Model {name} isn't trained yet.", 404)
     d = models[name]
-    w = os.path.join(d, "ckpt.pt") if os.path.exists(os.path.join(d, "ckpt.pt")) else os.path.join(d, "adapter")
-    # adapter dirs: overwriting a file inside doesn't change the dir's mtime, so look at the files
-    files = [os.path.join(w, f) for f in os.listdir(w)] if os.path.isdir(w) else [w]
-    stamp = max(os.path.getmtime(f) for f in files)
+    stamp = weights_stamp(d)  # changes after (feedback) training or a new GGUF copy
     with _engine_lock:
         cached = ENGINES.get(name)
         if not cached or cached[0] != stamp:  # reload after (feedback) training
@@ -387,15 +401,17 @@ def engine(name):
 
 @app.get("/api/models")
 def models(request: Request):
-    out = []
+    out, default = [], db.get_settings().get("default_model")
     for label, d in list_models().items():
         s = jobs.run_summary(d)
         stats = db.q("SELECT COUNT(rating) n, AVG(rating) avg FROM messages WHERE model=? AND rating IS NOT NULL",
                      (s["name"],), one=True)
         out.append({**s, "label": label, "ratings": stats["n"], "avg_rating": stats["avg"],
-                    "pending_feedback": db.pending_feedback(s["name"])})
+                    "pending_feedback": db.pending_feedback(s["name"]), "default": s["name"] == default,
+                    "fast": bool(gguf_path(d))})
+    out.sort(key=lambda m: not m["default"])
     if not is_admin(request):  # chat only needs to pick a model
-        keep = ("name", "type", "label", "level", "ratings", "avg_rating")
+        keep = ("name", "type", "label", "level", "ratings", "avg_rating", "default")
         out = [{k: m.get(k) for k in keep} for m in out]
     return out
 
@@ -427,8 +443,15 @@ class ChatReq(BaseModel):
     message: str = ""
     conversation_id: int | None = None
     regenerate: int | None = None     # user message id to answer again
-    temperature: float = 0.8
-    max_tokens: int = 300
+    format: str = "free"              # writing/formats.json id
+    fields: dict | None = None        # the format's form (tone, audience, ...)
+    temperature: float | None = None  # None = the format's default
+    max_tokens: int | None = None
+
+
+@app.get("/api/formats")
+def formats_list():
+    return F.public_list()
 
 
 @app.post("/api/chat")
@@ -438,28 +461,37 @@ def chat(r: ChatReq, request: Request):
         um = db.q("SELECT * FROM messages WHERE id=? AND role='user'", (r.regenerate,), one=True) or err("not found", 404)
         own_conversation(request, um["conversation_id"])
         cid, uid, text = um["conversation_id"], um["id"], um["content"]
+        fmt = um.get("format") or "free"
+        fields = json.loads(um["fields"]) if um.get("fields") else None
     else:
         text = r.message.strip() or err("Empty message")
         if r.conversation_id:
             own_conversation(request, r.conversation_id)
+        fmt = r.format if r.format in F.formats() else "free"
+        fields = {k: str(v)[:300] for k, v in (r.fields or {}).items() if str(v).strip()} or None
         cid = r.conversation_id or db.new_conversation(text, r.model, me(request)["id"])
-        uid = db.add_message(cid, "user", text)
+        uid = db.add_message(cid, "user", text, fmt=fmt, fields=fields)
     hist = db.history(cid, before_id=uid)
+    samp = {"temperature": r.temperature, "max_tokens": r.max_tokens}
 
     def gen():
-        yield json.dumps({"type": "start", "conversation_id": cid, "user_id": uid}) + "\n"
-        sent, full = "", ""
+        yield json.dumps({"type": "start", "conversation_id": cid, "user_id": uid, "format": fmt}) + "\n"
+        full, score = "", None
         try:
-            for full in eng.stream(hist, text, r.max_tokens, r.temperature):
-                if eng.meta["type"] == "scratch" and full.startswith(text):
-                    full = full[len(text):]
-                if len(full) > len(sent):
-                    yield json.dumps({"type": "delta", "text": full[len(sent):]}) + "\n"
-                    sent = full
+            for ev in eng.write(fmt, text, fields, hist, samp):
+                if ev["type"] == "text":
+                    full = ev["text"]
+                    yield json.dumps({"type": "text", "text": full}) + "\n"
+                elif ev["type"] == "final":
+                    full, score = ev["text"], ev["check"]["score"]
+                    yield json.dumps({"type": "check", "check": ev["check"]}) + "\n"
+                else:  # status, outline
+                    yield json.dumps(ev) + "\n"
         except Exception as e:  # report instead of breaking the stream
             yield json.dumps({"type": "error", "error": str(e)}) + "\n"
         finally:  # also runs if the browser stops the stream: keep what was written
-            mid = db.add_message(cid, "assistant", full.strip() or "…", model=r.model, prompt_id=uid)
+            mid = db.add_message(cid, "assistant", full.strip() or "…", model=r.model, prompt_id=uid,
+                                 fmt=fmt, check_score=score)
         yield json.dumps({"type": "done", "message_id": mid}) + "\n"
 
     return StreamingResponse(gen(), media_type="application/x-ndjson")
@@ -492,7 +524,8 @@ def maybe_auto_train(model):
         return False
     try:
         d = os.path.join(RUNS, model)
-        jobs.launch("feedback", model, [PY, "feedback_train.py", "--run", d], os.path.join(d, "log.txt"), run=model)
+        cmd = [PY, "feedback_train.py", "--run", d] + (["--gate"] if s.get("gate_on_feedback", True) else [])
+        jobs.launch("feedback", model, cmd, os.path.join(d, "log.txt"), run=model)
         return True
     except RuntimeError:
         return False
@@ -531,6 +564,7 @@ def feedback_train(r: FeedbackTrainReq):
 class SettingsReq(BaseModel):
     auto_train: bool | None = None
     auto_threshold: int | None = None
+    gate_on_feedback: bool | None = None
 
 
 @app.post("/api/settings")
@@ -554,6 +588,10 @@ def analytics():
     # Ratings before vs after each feedback training, to show whether it helped.
     trend = db.q("SELECT model, trained_in, AVG(rating) avg, COUNT(*) n FROM messages "
                  "WHERE rating IS NOT NULL GROUP BY model, trained_in")
+    per_format = db.q("SELECT COALESCE(format, 'free') format, COUNT(*) answers, COUNT(rating) rated, "
+                      "AVG(rating) avg, AVG(check_score) checks, "
+                      "SUM(CASE WHEN correction IS NOT NULL THEN 1 ELSE 0 END) corrected "
+                      "FROM messages WHERE role='assistant' GROUP BY COALESCE(format, 'free')")
     counts = db.q("SELECT (SELECT COUNT(*) FROM conversations) chats, "
                   "(SELECT COUNT(*) FROM messages WHERE role='assistant') answers, "
                   "(SELECT COUNT(rating) FROM messages) rated, (SELECT AVG(rating) FROM messages) avg_rating",
@@ -564,10 +602,125 @@ def analytics():
         curves[r["name"]] = [{"step": x["step"], "loss": x["loss"]} for x in rows if x["kind"] == "val"]
     return {
         "runs": rs, "counts": counts, "rating_distribution": dist, "daily": daily, "per_model": per_model,
-        "trend": trend, "val_curves": curves, "jobs": jobs.history(30),
+        "trend": trend, "val_curves": curves, "per_format": per_format, "jobs": jobs.history(30),
         "train_hours": sum(r["train_seconds"] for r in rs) / 3600,
         "pending_feedback": db.pending_feedback(),
     }
+
+
+# ---------------------------------------------------------------- evaluation, A/B votes, promotion
+class EvalReq(BaseModel):
+    model: str
+    quick: bool = False
+    max_tokens: int = 0
+
+
+@app.post("/api/eval")
+def eval_start(r: EvalReq):
+    d = run_dir(r.model)
+    cmd = [PY, "evaluate.py", "--run", d] + (["--quick"] if r.quick else []) + \
+          (["--max-tokens", str(r.max_tokens)] if r.max_tokens else [])
+    return _launch("eval", r.model, cmd, os.path.join(d, "log.txt"), run=r.model)
+
+
+@app.get("/api/eval")
+def eval_overview():
+    out = []
+    for m in jobs.runs():
+        h = os.path.join(RUNS, m["name"], "eval", "history.jsonl")
+        if os.path.exists(h):
+            rows = [r for r in (json.loads(l) for l in open(h) if l.strip()) if not r.get("partial")]
+            if rows:
+                out.append({"model": m["name"], "latest": rows[-1], "history": rows[-20:]})
+    s = db.get_settings()
+    return {"evals": out, "pairs": db.pair_stats(), "default_model": s.get("default_model"),
+            "formats": {f["id"]: f["label"] for f in F.public_list()}}
+
+
+@app.get("/api/eval/{name}/latest")
+def eval_latest(name: str):
+    d = run_dir(name)
+    h = os.path.join(d, "eval", "history.jsonl")
+    if not os.path.exists(h):
+        err("No evaluation yet.", 404)
+    last = [json.loads(l) for l in open(h) if l.strip()][-1]
+    return json.load(open(os.path.join(d, "eval", last["file"])))
+
+
+class PairsReq(BaseModel):
+    candidate: str
+    current: str
+    judge: str = ""
+    quick: bool = False
+
+
+@app.post("/api/pairs")
+def pairs_make(r: PairsReq):
+    a, b = run_dir(r.candidate), run_dir(r.current)
+    if a == b:
+        err("Pick two different models.")
+    cmd = [PY, "evaluate.py", "--pairs", a, b] + (["--judge", r.judge] if r.judge.strip() else []) + \
+          (["--quick"] if r.quick else [])
+    return _launch("eval", f"{r.candidate} vs {r.current}", cmd, os.path.join(RUNS, "_data", "log.txt"))
+
+
+def _flip(pid):  # which side the candidate is shown on; stable per pair, not obvious to voters
+    return (pid * 2654435761 >> 7) % 2 == 1
+
+
+@app.get("/api/pairs/next")
+def pairs_next():
+    p = db.next_pair()
+    if not p:
+        return {"pair": None, "left": db.q("SELECT COUNT(*) n FROM pairs WHERE vote IS NULL", one=True)["n"]}
+    fl = _flip(p["id"])
+    return {"pair": {"id": p["id"], "format": p["format"], "prompt": p["prompt"],
+                     "left": p["text_b"] if fl else p["text_a"], "right": p["text_a"] if fl else p["text_b"]},
+            "left": db.q("SELECT COUNT(*) n FROM pairs WHERE vote IS NULL", one=True)["n"]}
+
+
+class VoteReq(BaseModel):
+    choice: str  # left | right | tie
+
+
+@app.post("/api/pairs/{pid}/vote")
+def pairs_vote(pid: int, r: VoteReq, request: Request):
+    if r.choice not in ("left", "right", "tie"):
+        err("choice must be left, right or tie")
+    fl = _flip(pid)
+    v = "tie" if r.choice == "tie" else ("a" if (r.choice == "left") != fl else "b")
+    db.vote_pair(pid, v, me(request)["username"])
+    return pairs_next()
+
+
+@app.get("/api/gate")
+def gate_check(candidate: str, current: str = ""):
+    run_dir(candidate)
+    cur = current or db.get_settings().get("default_model") or ""
+    return {"candidate": candidate, "current": cur or None,
+            **gate.decide(candidate, cur if cur and cur != candidate else None)}
+
+
+class PromoteReq(BaseModel):
+    model: str
+    force: bool = False
+
+
+@app.post("/api/promote")
+def promote(r: PromoteReq):
+    run_dir(r.model)
+    cur = db.get_settings().get("default_model")
+    g = gate.decide(r.model, cur if cur and cur != r.model else None)
+    if not g["pass"] and not r.force:
+        err("The gate did not pass: " + " ".join(g["reasons"]), 409)
+    db.set_settings(default_model=r.model)
+    return {"default_model": r.model, "gate": g}
+
+
+@app.post("/api/runs/{name}/gguf")
+def make_gguf(name: str):
+    d = run_dir(name)
+    return _launch("export", name, [PY, "export_gguf.py", "--run", d], os.path.join(d, "log.txt"), run=name)
 
 
 # ---------------------------------------------------------------- web

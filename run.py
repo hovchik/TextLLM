@@ -8,14 +8,18 @@
     python run.py --reinstall        # reinstall the Python packages
     python run.py --gpu              # install the CUDA build of PyTorch instead of the CPU build
     python run.py --no-venv          # use the current Python instead of .venv
+    python run.py --no-fast          # skip llama-cpp-python (fast quantized chat on CPU)
 
 What it does:
   1. Creates a virtual environment in .venv (first run only).
   2. Installs requirements.txt into it. On Linux and Windows it installs the CPU build of
      PyTorch, which is much smaller than the default CUDA build. Packages are only
      reinstalled when requirements.txt changes.
-  3. Creates the folders the app writes to (runs/, data/raw/, data/bin/).
-  4. Starts the web app (app.py) and opens it in your browser. If the port is busy it
+  3. Tries once to install llama-cpp-python (prebuilt CPU wheel), which makes chat with
+     fine-tuned models several times faster through 4-bit GGUF copies. If it can't be
+     installed, everything still works, just slower.
+  4. Creates the folders the app writes to (runs/, data/raw/, data/bin/).
+  5. Starts the web app (app.py) and opens it in your browser. If the port is busy it
      uses the next free one.
 Stop it with Ctrl+C.
 
@@ -28,6 +32,8 @@ VENV = os.path.join(ROOT, ".venv")
 REQS = os.path.join(ROOT, "requirements.txt")
 STAMP = os.path.join(VENV, ".requirements.sha256")
 TORCH_CPU_INDEX = "https://download.pytorch.org/whl/cpu"
+LLAMA_CPU_INDEX = "https://abetlen.github.io/llama-cpp-python/whl/cpu"
+FAST_STAMP = os.path.join(VENV, ".fast-attempted")
 
 
 def say(msg):
@@ -108,6 +114,23 @@ def ensure_packages(py, reinstall=False, gpu=False):
             f.write(want)
 
 
+def ensure_fast(py, skip=False):
+    """Best effort: llama-cpp-python for fast GGUF chat. Tried once; never fails the setup."""
+    if skip or has_module(py, "llama_cpp"):
+        return
+    stamp = FAST_STAMP if py == venv_python() else None
+    if stamp and os.path.exists(stamp):
+        return
+    say("Installing llama-cpp-python for fast CPU chat (optional) ...")
+    ok = pip(py, "llama-cpp-python", "--only-binary", "llama-cpp-python", "--extra-index-url", LLAMA_CPU_INDEX,
+             "--retries", "1", required=False)
+    if not ok:
+        say("No prebuilt llama-cpp-python for this system; chat will use PyTorch (slower). "
+            "To build it yourself: pip install llama-cpp-python")
+    if stamp:
+        open(stamp, "w").write("ok" if ok else "failed")
+
+
 def ensure_dirs():
     for d in ("runs", os.path.join("data", "raw"), os.path.join("data", "bin")):
         os.makedirs(os.path.join(ROOT, d), exist_ok=True)
@@ -157,6 +180,7 @@ def main():
     ap.add_argument("--reinstall", action="store_true", help="reinstall the Python packages")
     ap.add_argument("--gpu", action="store_true", help="install the default (CUDA) PyTorch build")
     ap.add_argument("--no-venv", action="store_true", help="use the current Python instead of .venv")
+    ap.add_argument("--no-fast", action="store_true", help="don't install llama-cpp-python")
     a = ap.parse_args()
 
     if sys.version_info < (3, 9):
@@ -165,6 +189,7 @@ def main():
 
     py = sys.executable if a.no_venv else ensure_venv()
     ensure_packages(py, reinstall=a.reinstall, gpu=a.gpu)
+    ensure_fast(py, skip=a.no_fast)
     ensure_dirs()
 
     port = pick_port(a.host, a.port)

@@ -4,8 +4,11 @@ numpy
 tqdm
 requests
 datasets
-transformers
+transformers>=4.51
 peft
+safetensors
+sentencepiece
+protobuf
 accelerate
 pypdf
 python-docx

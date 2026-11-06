@@ -2,6 +2,7 @@
 import json
 
 from studio import db
+from writing import formats as F
 
 GOOD, BAD = 4, 2  # stars: >= GOOD is liked, <= BAD is disliked
 
@@ -23,7 +24,13 @@ def build(model):
         prompt = db.q("SELECT * FROM messages WHERE id=?", (pid,), one=True)
         if not prompt:
             continue
-        ctx = db.history(prompt["conversation_id"], before_id=pid) + [{"role": "user", "content": prompt["content"]}]
+        hist = db.history(prompt["conversation_id"], before_id=pid)
+        if prompt.get("format") and prompt["format"] != "free":
+            # train with the same system prompt and filled-in template Chat used
+            fields = json.loads(prompt["fields"]) if prompt.get("fields") else None
+            ctx = F.messages(prompt["format"], prompt["content"], fields, hist)
+        else:
+            ctx = hist + [{"role": "user", "content": prompt["content"]}]
         chosen, rejected = [], []
         for a in answers:
             if a["correction"]:
@@ -35,10 +42,11 @@ def build(model):
             elif a["rating"] is not None and a["rating"] <= BAD:
                 rejected.append(a["content"])
         for i, c in enumerate(chosen):
-            examples.append({"messages": ctx, "chosen": c, "rejected": rejected[i % len(rejected)] if rejected else None})
+            examples.append({"messages": ctx, "chosen": c, "rejected": rejected[i % len(rejected)] if rejected else None,
+                             "format": prompt.get("format") or "free"})
         if not chosen:
             for r in rejected:  # only negatives: still useful for preference training
-                examples.append({"messages": ctx, "chosen": None, "rejected": r})
+                examples.append({"messages": ctx, "chosen": None, "rejected": r, "format": prompt.get("format") or "free"})
     return examples, ids
 
 
@@ -51,3 +59,22 @@ def write_jsonl(examples, path):
 def mark_trained(ids, tag):
     for i in ids:
         db.ex("UPDATE messages SET trained_in=? WHERE id=?", (tag, i))
+
+
+def export_liked(path, models=None):
+    """Write liked or corrected answers as instruction examples (for data/build_instructions.py)."""
+    sql = ("SELECT a.content, a.correction, a.rating, u.content prompt, u.format, u.fields FROM messages a "
+           "JOIN messages u ON u.id=a.prompt_id WHERE a.role='assistant' "
+           "AND (a.correction IS NOT NULL OR a.rating >= ?)")
+    rows = db.q(sql, (GOOD,))
+    n = 0
+    with open(path, "w", encoding="utf-8") as f:
+        for r in rows:
+            fmt = r["format"] or "free"
+            fields = json.loads(r["fields"]) if r["fields"] else None
+            f.write(json.dumps({"format": fmt, "system": F.system_prompt(fmt, fields),
+                                "prompt": F.user_prompt(fmt, r["prompt"], fields),
+                                "response": r["correction"] or r["content"],
+                                "source": "studio-ratings", "license": "own"}, ensure_ascii=False) + "\n")
+            n += 1
+    return n

@@ -30,9 +30,17 @@ CREATE TABLE IF NOT EXISTS messages (
 );
 CREATE INDEX IF NOT EXISTS idx_msg_conv ON messages(conversation_id);
 CREATE TABLE IF NOT EXISTS settings (key TEXT PRIMARY KEY, value TEXT);
+CREATE TABLE IF NOT EXISTS pairs (          -- blind A/B comparisons (evaluate.py --pairs)
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    prompt_key TEXT, format TEXT, prompt TEXT,
+    run_a TEXT NOT NULL, run_b TEXT NOT NULL,   -- run_a = the candidate, run_b = the current model
+    text_a TEXT, text_b TEXT,
+    vote TEXT,                                  -- a | b | tie | NULL (not voted yet)
+    voter TEXT, created REAL NOT NULL, voted_at REAL
+);
 """
 
-DEFAULT_SETTINGS = {"auto_train": True, "auto_threshold": 10}
+DEFAULT_SETTINGS = {"auto_train": True, "auto_threshold": 10, "default_model": None, "gate_on_feedback": True}
 
 
 def conn():
@@ -47,6 +55,10 @@ with conn() as _c:
     _c.executescript(SCHEMA)
     if "user_id" not in [r["name"] for r in _c.execute("PRAGMA table_info(conversations)")]:
         _c.execute("ALTER TABLE conversations ADD COLUMN user_id INTEGER")  # owner (studio/auth.py)
+    _cols = [r["name"] for r in _c.execute("PRAGMA table_info(messages)")]
+    for _col, _type in (("format", "TEXT"), ("fields", "TEXT"), ("check_score", "REAL")):
+        if _col not in _cols:  # writing format of a request/answer, its form fields (JSON), automatic score
+            _c.execute(f"ALTER TABLE messages ADD COLUMN {_col} {_type}")
 
 
 def q(sql, args=(), one=False):
@@ -88,10 +100,12 @@ def new_conversation(title, model, user_id=None):
               (title[:80], model, now, now, user_id))
 
 
-def add_message(conv_id, role, content, model=None, prompt_id=None):
+def add_message(conv_id, role, content, model=None, prompt_id=None, fmt=None, fields=None, check_score=None):
     ex("UPDATE conversations SET updated=?, model=COALESCE(?, model) WHERE id=?", (time.time(), model, conv_id))
-    return ex("INSERT INTO messages(conversation_id, role, content, model, prompt_id, created) VALUES(?,?,?,?,?,?)",
-              (conv_id, role, content, model, prompt_id, time.time()))
+    return ex("INSERT INTO messages(conversation_id, role, content, model, prompt_id, created, format, fields, "
+              "check_score) VALUES(?,?,?,?,?,?,?,?,?)",
+              (conv_id, role, content, model, prompt_id, time.time(), fmt,
+               json.dumps(fields) if fields else None, check_score))
 
 
 def history(conv_id, before_id=None):
@@ -132,3 +146,44 @@ def pending_feedback(model=None):
         sql += " AND model=?"
         args = (model,)
     return q(sql, args, one=True)["n"]
+
+
+# ---------------------------------------------------------------- blind A/B pairs
+def add_pair(prompt_key, fmt, prompt, run_a, run_b, text_a, text_b):
+    return ex("INSERT INTO pairs(prompt_key, format, prompt, run_a, run_b, text_a, text_b, created) "
+              "VALUES(?,?,?,?,?,?,?,?)", (prompt_key, fmt, prompt, run_a, run_b, text_a, text_b, time.time()))
+
+
+def vote_pair(pid, vote, voter):
+    if vote not in ("a", "b", "tie"):
+        raise ValueError("vote must be a, b or tie")
+    ex("UPDATE pairs SET vote=?, voter=?, voted_at=? WHERE id=?", (vote, voter, time.time(), pid))
+
+
+def next_pair():
+    return q("SELECT * FROM pairs WHERE vote IS NULL ORDER BY RANDOM() LIMIT 1", one=True)
+
+
+def pair_stats(run_a=None, run_b=None, since=0):
+    """Wins of run_a (candidate) over run_b; ties count half. since = ignore pairs made before."""
+    sql = ("SELECT run_a, run_b, format, SUM(vote='a') a, SUM(vote='b') b, SUM(vote='tie') t, "
+           "SUM(vote IS NULL) open FROM pairs WHERE created >= ?")
+    args = (since,)
+    if run_a and run_b:
+        sql += " AND run_a=? AND run_b=?"
+        args = (since, run_a, run_b)
+    rows = q(sql + " GROUP BY run_a, run_b, format", args)
+    out = {}
+    for r in rows:
+        k = (r["run_a"], r["run_b"])
+        o = out.setdefault(k, {"run_a": r["run_a"], "run_b": r["run_b"], "a": 0, "b": 0, "tie": 0, "open": 0,
+                               "per_format": {}})
+        for x, y in (("a", "a"), ("b", "b"), ("t", "tie"), ("open", "open")):
+            o[y] += r[x] or 0
+        n = (r["a"] or 0) + (r["b"] or 0) + (r["t"] or 0)
+        o["per_format"][r["format"]] = round(((r["a"] or 0) + 0.5 * (r["t"] or 0)) / n, 3) if n else None
+    for o in out.values():
+        n = o["a"] + o["b"] + o["tie"]
+        o["votes"] = n
+        o["win_rate"] = round((o["a"] + 0.5 * o["tie"]) / n, 3) if n else None
+    return list(out.values())

@@ -62,6 +62,21 @@ def pip(py, *args, required=True):
     return ok
 
 
+def requirements_met(py):
+    """True if every package in requirements.txt is installed for this Python."""
+    names = [l.split("#")[0].strip() for l in open(REQS)]
+    code = ("import sys, importlib.metadata as m\n"
+            "for n in sys.argv[1:]:\n"
+            "    m.version(n.split('[')[0].split('=')[0].split('<')[0].split('>')[0].strip())")
+    return subprocess.call([py, "-c", code, *[n for n in names if n]], cwd=ROOT,
+                           stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL) == 0
+
+
+def torch_has_cuda_build(py):
+    return subprocess.call([py, "-c", "import torch, sys; sys.exit(0 if torch.version.cuda else 1)"], cwd=ROOT,
+                           stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL) == 0
+
+
 def has_module(py, name):
     return subprocess.call([py, "-c", f"import {name}"], cwd=ROOT,
                            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL) == 0
@@ -75,8 +90,8 @@ def ensure_packages(py, reinstall=False, gpu=False):
         with open(stamp) as f:
             if f.read().strip() == want:
                 return
-    if not stamp and not reinstall and all(has_module(py, m) for m in ("torch", "fastapi", "uvicorn")):
-        return  # --no-venv and the main packages are already there
+    if not stamp and not reinstall and not gpu and requirements_met(py):
+        return  # --no-venv and everything in requirements.txt is already there
     say("Installing Python packages (first run takes a few minutes) ...")
     pip(py, "--upgrade", "pip")
     # The default PyTorch wheel on Linux/Windows bundles CUDA (several GB). This app trains on CPU,
@@ -84,6 +99,9 @@ def ensure_packages(py, reinstall=False, gpu=False):
     if not gpu and sys.platform != "darwin" and not has_module(py, "torch"):
         if not pip(py, "torch", "--index-url", TORCH_CPU_INDEX, "--retries", "1", required=False):
             say("Could not reach the PyTorch CPU index, installing the regular PyTorch build instead.")
+    elif gpu and sys.platform != "darwin" and has_module(py, "torch") and not torch_has_cuda_build(py):
+        say("Replacing the CPU build of PyTorch with the CUDA build ...")
+        pip(py, "--force-reinstall", "torch")
     pip(py, "-r", REQS)
     if stamp:
         with open(stamp, "w") as f:

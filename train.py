@@ -7,7 +7,6 @@ Continue:     add --resume (same --out). The model size comes from the checkpoin
               another PC after copying the run folder (see transfer.py).
 """
 import argparse, json, math, os, time
-from contextlib import nullcontext
 from dataclasses import asdict
 
 import numpy as np
@@ -15,6 +14,7 @@ import torch
 import torch.distributed as dist
 from torch.nn.parallel import DistributedDataParallel as DDP
 
+import devices
 from model.gpt import GPT, GPTConfig, PRESETS
 
 
@@ -33,7 +33,7 @@ def get_args():
     ap.add_argument("--weight-decay", type=float, default=0.1)
     ap.add_argument("--eval-every", type=int, default=1000)
     ap.add_argument("--eval-iters", type=int, default=50)
-    ap.add_argument("--device", default="cuda" if torch.cuda.is_available() else "cpu")
+    ap.add_argument("--device", default="auto", help="auto (GPU if there is one), cuda, mps, xpu or cpu")
     ap.add_argument("--compile", action="store_true")
     ap.add_argument("--resume", action="store_true")
     return ap.parse_args()
@@ -49,7 +49,7 @@ class Loader:
         ix = self.rng.integers(0, len(self.data) - self.block - 1, self.batch)
         x = torch.from_numpy(np.stack([self.data[i : i + self.block].astype(np.int64) for i in ix]))
         y = torch.from_numpy(np.stack([self.data[i + 1 : i + 1 + self.block].astype(np.int64) for i in ix]))
-        if self.device.startswith("cuda"):
+        if devices.kind(self.device) == "cuda":
             return x.pin_memory().to(self.device, non_blocking=True), y.pin_memory().to(self.device, non_blocking=True)
         return x.to(self.device), y.to(self.device)
 
@@ -71,21 +71,26 @@ def main():
         torch.cuda.set_device(a.device)
     else:
         rank, world = 0, 1
+        a.device = devices.pick(a.device)
     master = rank == 0
     torch.manual_seed(1337 + rank)
     torch.backends.cuda.matmul.allow_tf32 = True
 
-    cuda = a.device.startswith("cuda")
-    dtype = torch.bfloat16 if cuda and torch.cuda.is_bf16_supported() else torch.float32
-    autocast = torch.autocast("cuda", dtype=dtype) if cuda else nullcontext()
+    cuda = devices.kind(a.device) == "cuda"
+    dtype = devices.train_dtype(a.device)
+    autocast = devices.autocast(a.device, dtype)
+    scaler = devices.grad_scaler(a.device, dtype)  # only active for fp16 (older NVIDIA GPUs)
+    if master:
+        print(f"device {a.device}: {devices.describe(a.device)} · {str(dtype).split('.')[-1]}")
 
     cfg = GPTConfig(vocab_size=a.vocab, **PRESETS[a.preset])
     step, best = 0, float("inf")
     ckpt_path = os.path.join(a.out, "ckpt.pt")
     ck = None
     if a.resume and os.path.exists(ckpt_path):
-        # map_location: a checkpoint saved on a GPU machine loads on a CPU one and the other way round
-        ck = torch.load(ckpt_path, map_location=a.device, weights_only=False)
+        # Load on the CPU first: a checkpoint saved on a GPU machine loads on a CPU one and the other
+        # way round, and the GPU doesn't hold two copies of the weights while loading.
+        ck = torch.load(ckpt_path, map_location="cpu", weights_only=False)
         cfg = GPTConfig(**ck["config"])  # the saved size wins over --preset/--vocab
     elif a.resume and master:
         print(f"no checkpoint at {ckpt_path}; starting from step 0")
@@ -99,7 +104,9 @@ def main():
     )
     if ck is not None:
         model.load_state_dict(ck["model"])
-        opt.load_state_dict(ck["opt"])
+        opt.load_state_dict(ck["opt"])  # moves the optimizer state to the parameters' device
+        if ck.get("scaler") and scaler.is_enabled():
+            scaler.load_state_dict(ck["scaler"])
         step, best = ck["step"], ck["best_val"]
         if master:
             print(f"resumed at step {step} (best val {best:.3f})")
@@ -120,7 +127,7 @@ def main():
         # Pick up the random batch sampling where it stopped instead of replaying the first batches.
         train.rng.bit_generator.state = ck["rng"]["train"]
         val.rng.bit_generator.state = ck["rng"]["val"]
-        torch.set_rng_state(ck["rng"]["torch"].cpu())  # map_location may have moved it
+        torch.set_rng_state(ck["rng"]["torch"].cpu())
     ck = None  # free the memory
 
     def save():
@@ -131,6 +138,7 @@ def main():
                     "step": step, "best_val": best,
                     "rng": {"train": train.rng.bit_generator.state, "val": val.rng.bit_generator.state,
                             "torch": torch.get_rng_state()},
+                    "scaler": scaler.state_dict() if scaler.is_enabled() else None,
                     "args": vars(a)}, tmp)
         os.replace(tmp, ckpt_path)
 
@@ -164,9 +172,11 @@ def main():
             with autocast:
                 loss = model(x, y)[1] / a.grad_accum
             x, y = train.next()
-            loss.backward()
+            scaler.scale(loss).backward()
+        scaler.unscale_(opt)
         torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
-        opt.step()
+        scaler.step(opt)
+        scaler.update()
         opt.zero_grad(set_to_none=True)
         step += 1
 

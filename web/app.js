@@ -167,6 +167,7 @@ pages.dashboard = async () => {
   main.innerHTML = `<div class="page">
     <div class="page-head"><div><h1>Welcome back</h1><p>Train writing models on books and your own texts, chat with them, and rate their answers so they keep improving.</p></div>
       <div class="row"><a class="btn" href="#/chat">${I.chat} Open chat</a><a class="btn primary" href="#/training/new">${I.plus} New model</a></div></div>
+    ${deviceNote(S.status.device)}
     ${liveCard(running)}
     <div class="grid g5">
       ${kpi("Models ready", models.length, I.model, `${a.runs.length} runs in total`)}
@@ -190,6 +191,7 @@ pages.dashboard = async () => {
   $$("[data-run]").forEach((b) => (b.onclick = () => openRun(b.dataset.run)));
   S.onStatus = (s) => { if (!!s.job.running !== !!$("#live")) route(); };
 };
+const deviceNote = (dv) => !dv ? "" : `<div class="hint">${dv.gpu ? "⚡ Training and chat run on the GPU" : "Training and chat run on the CPU"}: <b>${esc(dv.name)}</b>${dv.hint ? ` · ${esc(dv.hint)}` : ""}</div>`;
 const kpi = (l, v, ic, sub) => `<div class="card kpi"><div class="ic">${ic}</div><div class="l">${l}</div><div class="v">${v}</div><div class="sub">${sub || ""}</div></div>`;
 const modelCard = (m) => `<div class="card model-card">
   <div class="row" style="justify-content:space-between"><div class="name">${esc(m.name)}</div>${typePill(m.type)}</div>

@@ -14,6 +14,7 @@ from fastapi.responses import FileResponse, JSONResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
+import devices
 from chat_engine import ROOT, RUNS, Engine, gguf_path, list_models, weights_stamp
 from studio import auth, db, feedback, gate, jobs
 from writing import formats as F
@@ -216,6 +217,16 @@ def remove_user(uid: int, request: Request):
 
 
 # ---------------------------------------------------------------- status / data
+_DEVICE = None
+
+
+def device_info():
+    global _DEVICE
+    if _DEVICE is None:
+        _DEVICE = devices.info()  # doesn't change while the app runs
+    return _DEVICE
+
+
 @app.get("/api/status")
 def status(request: Request):
     s = db.get_settings()
@@ -228,7 +239,7 @@ def status(request: Request):
                 break
     if not is_admin(request):  # users don't see jobs, data or the feedback queue
         return {"user": me(request)}
-    return {"job": jobs.status(), "data": jobs.data_status(), "settings": s,
+    return {"job": jobs.status(), "data": jobs.data_status(), "settings": s, "device": device_info(),
             "pending_feedback": db.pending_feedback(), "user": me(request)}
 
 

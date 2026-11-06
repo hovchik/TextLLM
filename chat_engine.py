@@ -13,6 +13,7 @@ import torch
 ROOT = os.path.dirname(os.path.abspath(__file__))
 RUNS = os.path.join(ROOT, "runs")
 
+import devices  # noqa: E402
 from writing import formats as F  # noqa: E402
 from writing import hf  # noqa: E402
 
@@ -81,7 +82,7 @@ class Engine:
     def __init__(self, run_dir, backend=None):
         self.run_dir = run_dir
         self.meta = json.load(open(os.path.join(run_dir, "meta.json")))
-        self.device = "cuda" if torch.cuda.is_available() else "cpu"
+        self.device = devices.pick()
         self.lock = threading.Lock()  # one generation at a time per model
         hf.set_threads()
         g = gguf_path(run_dir) if self.meta["type"] != "scratch" else None
@@ -94,7 +95,7 @@ class Engine:
             from model.gpt import GPT, GPTConfig
 
             self.tok = Tokenizer.from_file(tokenizer_path(run_dir, self.meta))
-            ck = torch.load(os.path.join(run_dir, "ckpt.pt"), map_location=self.device)
+            ck = torch.load(os.path.join(run_dir, "ckpt.pt"), map_location="cpu")
             self.model = GPT(GPTConfig(**ck["config"])).to(self.device).eval()
             self.model.load_state_dict(ck["model"])
             self.step = ck.get("step")
@@ -109,7 +110,10 @@ class Engine:
 
             ad = os.path.join(run_dir, "adapter")
             self.tok = hf.load_tokenizer(ad)
-            dtype = torch.bfloat16 if self.device == "cpu" and hf.cpu_bf16_ok() else None
+            if self.device == "cpu":
+                dtype = torch.bfloat16 if hf.cpu_bf16_ok() else None
+            else:
+                dtype = devices.infer_dtype(self.device)  # half precision on a GPU: half the memory
             base = hf.load_causal_lm(self.meta["base"], dtype)
             self.model = PeftModel.from_pretrained(base, ad).to(self.device).eval()
 

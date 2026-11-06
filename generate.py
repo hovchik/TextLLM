@@ -7,6 +7,7 @@ import argparse
 import torch
 from tokenizers import Tokenizer
 
+import devices
 from model.gpt import GPT, GPTConfig
 
 ap = argparse.ArgumentParser()
@@ -18,11 +19,12 @@ ap.add_argument("--temperature", type=float, default=0.8)
 ap.add_argument("--top-k", type=int, default=50)
 ap.add_argument("--top-p", type=float, default=0.95)
 ap.add_argument("--samples", type=int, default=1)
-ap.add_argument("--device", default="cuda" if torch.cuda.is_available() else "cpu")
+ap.add_argument("--device", default="auto", help="auto (GPU if there is one), cuda, mps, xpu or cpu")
 a = ap.parse_args()
+a.device = devices.pick(a.device)
 
 tok = Tokenizer.from_file(a.tok)
-ck = torch.load(a.ckpt, map_location=a.device)
+ck = torch.load(a.ckpt, map_location="cpu")
 model = GPT(GPTConfig(**ck["config"])).to(a.device).eval()
 model.load_state_dict(ck["model"])
 

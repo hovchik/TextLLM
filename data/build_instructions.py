@@ -165,8 +165,10 @@ def load_writer(name):
     import torch
 
     tok = hf.load_tokenizer(name)
-    dev = "cuda" if torch.cuda.is_available() else "cpu"
-    model = hf.load_causal_lm(name, torch.bfloat16 if dev == "cuda" else None).to(dev).eval()
+    import devices
+
+    dev = devices.pick()
+    model = hf.load_causal_lm(name, devices.infer_dtype(dev)).to(dev).eval()
 
     def gen(msgs, max_new=400, temp=0.9):
         ids = tok(hf.chat_text(tok, msgs), return_tensors="pt", add_special_tokens=False).to(dev)

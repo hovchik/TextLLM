@@ -23,6 +23,7 @@ from peft import LoraConfig, get_peft_model
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, ROOT)
+import devices  # noqa: E402
 from writing import hf  # noqa: E402
 
 EOT = "<|endoftext|>"
@@ -60,7 +61,7 @@ def args():
     ap.add_argument("--step-offset", type=int, default=0, help="added to logged steps (continued runs)")
     ap.add_argument("--resume", action="store_true",
                     help="continue from <out>/adapter + <out>/train_state.pt (optimizer, step, schedule)")
-    ap.add_argument("--device", default="cuda" if torch.cuda.is_available() else "cpu")
+    ap.add_argument("--device", default="auto", help="auto (GPU if there is one), cuda, mps, xpu or cpu")
     return ap.parse_args()
 
 
@@ -161,13 +162,25 @@ def main():
     val, train = data[:n_val], data[n_val:]
     print(f"{len(train)} train / {len(val)} val examples")
 
-    dtype = torch.bfloat16 if a.device.startswith("cuda") and torch.cuda.is_bf16_supported() else torch.float32
+    a.device = devices.pick(a.device)
+    amp = devices.train_dtype(a.device)
+    # GPUs with bf16 (RTX 30xx and newer) keep the frozen base weights in bf16 (half the memory).
+    # Older NVIDIA GPUs keep fp32 weights and run matmuls in fp16 with loss scaling; Apple GPUs use fp32.
+    dtype = torch.bfloat16 if amp == torch.bfloat16 else torch.float32
     model = hf.load_causal_lm(a.base, dtype).to(a.device)
     # On CPU the weights stay fp32 (LoRA needs fp32 master weights) and matmuls run in bf16 when
     # the CPU has native bf16 instructions; otherwise plain fp32.
     cpu_bf16 = a.device == "cpu" and hf.cpu_bf16_ok()
-    autocast = (lambda: torch.autocast("cpu", dtype=torch.bfloat16)) if cpu_bf16 else contextlib.nullcontext
-    print(f"device {a.device} · {threads} threads · {'bf16 autocast' if cpu_bf16 else str(dtype).split('.')[-1]}")
+    if cpu_bf16:
+        autocast = lambda: torch.autocast("cpu", dtype=torch.bfloat16)
+    elif amp == torch.float16:
+        autocast = lambda: devices.autocast(a.device, amp)
+    else:
+        autocast = contextlib.nullcontext
+    scaler = devices.grad_scaler(a.device, amp)
+    prec = "bf16 autocast" if cpu_bf16 else ("fp16 autocast" if amp == torch.float16 else str(dtype).split(".")[-1])
+    where = devices.describe(a.device) if a.device != "cpu" else f"{threads} threads"
+    print(f"device {a.device} · {where} · {prec}")
     state_p = os.path.join(a.out, "train_state.pt")
     state = None
     if a.resume and os.path.exists(state_p) and os.path.isdir(os.path.join(a.out, "adapter")):
@@ -199,6 +212,8 @@ def main():
             for k, v in st.items():
                 if torch.is_tensor(v) and k != "step":
                     st[k] = v.to(a.device)
+        if state.get("scaler") and scaler.is_enabled():
+            scaler.load_state_dict(state["scaler"])
         start = state["step"]
         steps = max(steps, state["steps"]) if not a.max_steps else a.max_steps  # keep the same LR schedule
         torch.set_rng_state(state["torch_rng"].cpu())
@@ -230,7 +245,8 @@ def main():
         model.save_pretrained(tmp)
         tok.save_pretrained(tmp)
         torch.save({"opt": opt.state_dict(), "step": step, "steps": steps, "batches": step * a.grad_accum,
-                    "torch_rng": torch.get_rng_state(), "base": a.base}, state_p + ".tmp")
+                    "torch_rng": torch.get_rng_state(), "base": a.base,
+                    "scaler": scaler.state_dict() if scaler.is_enabled() else None}, state_p + ".tmp")
         shutil.rmtree(ad, ignore_errors=True)
         os.replace(tmp, ad)
         os.replace(state_p + ".tmp", state_p)
@@ -252,10 +268,12 @@ def main():
             model_tokens += int(m.sum())
             with autocast():
                 loss = model(input_ids=x.to(a.device), attention_mask=m.to(a.device), labels=y.to(a.device)).loss
-            (loss / a.grad_accum).backward()
+            scaler.scale(loss / a.grad_accum).backward()
             total += loss.item() / a.grad_accum
+        scaler.unscale_(opt)
         torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
-        opt.step()
+        scaler.step(opt)
+        scaler.update()
         opt.zero_grad(set_to_none=True)
         dt = time.time() - t0
         t0 = time.time()

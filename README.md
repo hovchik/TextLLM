@@ -10,9 +10,29 @@ The fine-tuned path is the one to use for writing; see [Phase 2](#phase-2-a-writ
 run.bat              # Windows (or double-click it)
 python run.py        # any OS
 ```
-The first run creates a virtual environment in `.venv`, installs the packages (the CPU build of PyTorch on Linux and Windows), and creates the data folders. Then it starts the Studio and opens http://127.0.0.1:7860 in your browser. Later runs skip the install unless `requirements.txt` changed. Stop it with Ctrl+C.
+The first run creates a virtual environment in `.venv`, installs the packages, and creates the data folders. Then it starts the Studio and opens http://127.0.0.1:7860 in your browser. Later runs skip the install unless `requirements.txt` or the PyTorch build changed. Stop it with Ctrl+C.
 
-Options: `--port 8000`, `--host 0.0.0.0` (other devices on your network), `--no-browser`, `--reinstall`, `--gpu` (CUDA PyTorch), `--no-venv` (use your current Python). If the port is busy it uses the next free one.
+Options: `--port 8000`, `--host 0.0.0.0` (other devices on your network), `--no-browser`, `--reinstall`, `--gpu` / `--cpu` / `--torch-index cu128` (pick the PyTorch build, see below), `--no-venv` (use your current Python). If the port is busy it uses the next free one.
+
+## Using your GPU (laptop or desktop)
+Training and chat use the GPU automatically when there is one; nothing to set in the Studio. The Dashboard shows which device is in use.
+
+| GPU | What happens |
+|---|---|
+| **NVIDIA** (GeForce GTX 10xx and newer, RTX, laptop GPUs) | `run.bat` / `run.sh` finds it with `nvidia-smi` and installs the CUDA build of PyTorch (CUDA 13 or 12.8 depending on the driver, 11.8 for very old drivers). If you installed the CPU build earlier, the next run swaps it (a ~2.5 GB download). RTX 30xx and newer train in bf16, older cards in fp16 with loss scaling. |
+| **Apple Silicon Mac** | Uses the Apple GPU (MPS) with the normal install. |
+| **Intel Arc** | `run.py --torch-index xpu` (experimental). |
+| **AMD Radeon / Intel integrated** | No PyTorch GPU support on Windows, so it trains on the CPU. On Linux, AMD works with `--torch-index rocm6.2`. |
+
+If the GPU isn't used: update the NVIDIA driver (https://www.nvidia.com/Download/index.aspx), then `run.bat --reinstall`. On laptops with two GPUs, plug in the charger and set Windows *Settings → Display → Graphics* to "High performance" for Python. To force the CPU, use `run.bat --cpu` or set `TEXTLLM_DEVICE=cpu`; every script also takes `--device cuda|mps|cpu`.
+
+**What fits in laptop GPU memory (VRAM):**
+- 4 GB: from scratch with the `cpu` size (fast, minutes per 1,000 steps); LoRA on `Qwen/Qwen3-0.6B` with batch 2, seq 512.
+- 6–8 GB: from scratch with `small` (110M) using batch 4, grad-accum 32; LoRA on Qwen3-0.6B batch 8, or Qwen3-1.7B batch 2.
+- 12 GB+: `small` with batch 8–16; LoRA on Qwen3-1.7B batch 8.
+If you see "CUDA out of memory", halve the batch and double the gradient accumulation (same tokens per step).
+
+Runs move freely between GPU and CPU PCs: checkpoints load on the CPU first and then move to whatever device the new PC has, so **Resume** and **Import** work in both directions.
 
 ## Manual setup
 ```bash

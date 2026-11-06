@@ -43,6 +43,7 @@ async function api(path, opts = {}) {
   const o = { ...opts };
   if (o.json) { o.method = o.method || "POST"; o.headers = { "Content-Type": "application/json" }; o.body = JSON.stringify(o.json); }
   const r = await fetch(path, o);
+  if (r.status === 401 && !path.startsWith("/api/auth/")) { showAuth(); throw new Error("Please sign in."); }
   if (!r.ok) {
     let msg = r.statusText;
     try { msg = (await r.json()).detail || msg; } catch {}
@@ -88,10 +89,14 @@ const typePill = (t) => (t === "lora" ? '<span class="pill accent">Fine-tuned</s
 })();
 
 // ---------------------------------------------------------------- status polling
-const S = { status: null, page: null, onStatus: null };
+const S = { status: null, page: null, onStatus: null, user: null, timer: null };
+const isAdmin = () => S.user?.role === "admin";
 async function poll() {
+  if (!S.user) return;
   try {
     S.status = await api("/api/status");
+    if (S.status.user) setUser(S.status.user);
+    if (!isAdmin()) return;
     const j = S.status.job;
     const pill = $("#jobpill");
     pill.classList.toggle("on", j.running);
@@ -103,17 +108,23 @@ async function poll() {
   } catch {}
 }
 const labelKind = (k) => ({ training: "Training", data: "Preparing data", texts: "Learning texts", feedback: "Learning from ratings" }[k] || k);
-setInterval(poll, 3000);
 $("#jobpill").onclick = () => (location.hash = "#/training/live");
 
 // ---------------------------------------------------------------- router
 const pages = {};
+const USER_PAGES = ["chat", "settings"];  // all a regular user can open
 function route() {
-  const [page = "dashboard", sub] = location.hash.replace(/^#\/?/, "").split("/");
+  if (!S.user) return;
+  let [page = "", sub] = location.hash.replace(/^#\/?/, "").split("/");
+  if (!isAdmin() && !USER_PAGES.includes(page)) {
+    if (location.hash !== "#/chat") return void (location.hash = "#/chat");
+    page = "chat";
+  }
+  if (!pages[page]) page = isAdmin() ? "dashboard" : "chat";
   S.onStatus = null;
   $("#modal-root").innerHTML = "";
   $$("#nav a").forEach((a) => a.classList.toggle("active", a.dataset.page === page));
-  (pages[page] || pages.dashboard)(sub);
+  pages[page](sub);
 }
 window.addEventListener("hashchange", route);
 
@@ -406,7 +417,7 @@ const SUGGEST = [
   ["Describe a place", "a rainy harbour town at dawn, in the style of a 19th-century novel"],
   ["Continue this opening", "\"It was the last train of the night, and only two passengers remained.\""],
 ];
-const C = { conv: null, models: [], busy: false, temp: 0.8, max: 300 };
+const C = { conv: null, models: [], busy: false, temp: 0.8, max: 300, prefsFor: null };
 
 pages.chat = async () => {
   main.innerHTML = `<div class="chat">
@@ -421,7 +432,7 @@ pages.chat = async () => {
         <div class="note">Rate answers with ★ — each rating teaches the model what you like.</div></div>
     </div></div>`;
   C.models = await api("/api/models").catch(() => []);
-  const pref = (() => { try { return localStorage.getItem("chatModel"); } catch { return null; } })();
+  const pref = (() => { try { return localStorage.getItem("chatModel"); } catch { return null; } })() || S.user.prefs.model;
   $("#model").innerHTML = C.models.length ? C.models.map((m) => `<option value="${esc(m.name)}" ${m.name === pref ? "selected" : ""}>${esc(m.name)} · ${m.type === "lora" ? "fine-tuned" : "from scratch"}</option>`).join("") : `<option value="">No trained models yet</option>`;
   const modelInfo = () => {
     const m = C.models.find((x) => x.name === $("#model").value);
@@ -636,9 +647,9 @@ pages.feedback = async () => {
       <div id="fb-table"></div></div></div>`;
   const draw = (f) => {
     const rows = list.filter((r) => f === "all" || (f === "liked" && r.rating >= 4) || (f === "disliked" && r.rating <= 2) || (f === "corrected" && r.correction) || (f === "pending" && !r.trained_in));
-    $("#fb-table").innerHTML = rows.length ? `<table><thead><tr><th style="width:24%">Prompt</th><th>Answer</th><th>Rating</th><th>Model</th><th>Status</th></tr></thead><tbody>
+    $("#fb-table").innerHTML = rows.length ? `<table><thead><tr><th style="width:24%">Prompt</th><th>Answer</th><th>Rating</th><th>Model</th><th>From</th><th>Status</th></tr></thead><tbody>
       ${rows.map((r) => `<tr class="click" data-conv="${r.conversation_id}"><td><div class="clamp">${esc(r.prompt)}</div></td><td><div class="clamp">${esc(r.content)}</div>${r.correction ? `<div class="hint" style="color:var(--good)">✎ corrected</div>` : ""}${r.comment ? `<div class="hint">“${esc(r.comment)}”</div>` : ""}</td>
-        <td style="white-space:nowrap;color:var(--star)">${r.rating ? "★".repeat(r.rating) + '<span class="faint">' + "★".repeat(5 - r.rating) + "</span>" : "—"}</td><td>${esc(r.model)}</td>
+        <td style="white-space:nowrap;color:var(--star)">${r.rating ? "★".repeat(r.rating) + '<span class="faint">' + "★".repeat(5 - r.rating) + "</span>" : "—"}</td><td>${esc(r.model)}</td><td class="muted">${esc(r.author || "—")}</td>
         <td>${r.trained_in ? `<span class="pill good" title="${esc(r.trained_in)}">learned</span>` : '<span class="pill warn">waiting</span>'}</td></tr>`).join("")}</tbody></table>`
       : `<div class="empty"><div class="big">⭐</div>Nothing here yet. Rate answers in <a href="#/chat"><u>Chat</u></a>.</div>`;
     $$("tr[data-conv]").forEach((t) => (t.onclick = () => { C.conv = +t.dataset.conv; location.hash = "#/chat"; }));
@@ -652,4 +663,141 @@ pages.feedback = async () => {
   }));
 };
 
-poll().then(route);
+// ================================================================ SETTINGS (everyone)
+pages.settings = async () => {
+  const u = S.user, p = u.prefs;
+  const models = await api("/api/models").catch(() => []);
+  main.innerHTML = `<div class="page" style="max-width:980px">
+    <div class="page-head"><div><h1>Settings</h1><p>Your account and how Chat behaves for you.</p></div></div>
+    <div class="settings-grid">
+      <div class="card"><h2>Profile</h2>
+        <div class="row"><div class="avatar-sm" style="width:44px;height:44px;font-size:16px">${esc(initial(u))}</div>
+          <div><b>${esc(u.username)}</b><div class="hint">${u.role === "admin" ? "Admin · full access" : "User · Chat and Settings"}</div></div></div>
+        <label class="field">Display name<input class="input" id="s-name" value="${esc(u.display_name)}" maxlength="60"></label>
+        <div class="row end"><button class="btn primary sm" id="s-save-name">Save</button></div></div>
+      <div class="card"><h2>Chat defaults</h2>
+        <label class="field">Model<select class="input" id="s-model"><option value="">First available</option>${models.map((m) => `<option value="${esc(m.name)}" ${m.name === p.model ? "selected" : ""}>${esc(m.name)}</option>`).join("")}</select></label>
+        <label class="field"><span>Creativity <b id="s-tv">${p.temperature}</b></span><input type="range" id="s-temp" min="0" max="1.5" step="0.05" value="${p.temperature}"><span class="hint">Low = focused and predictable · high = surprising</span></label>
+        <label class="field"><span>Max length <b id="s-mv">${p.max_tokens}</b> tokens</span><input type="range" id="s-max" min="32" max="1024" step="16" value="${p.max_tokens}"></label>
+        <div class="row end"><button class="btn primary sm" id="s-save-chat">Save</button></div></div>
+      <div class="card"><h2>Password</h2>
+        <label class="field">Current password<input class="input" type="password" id="s-cur" autocomplete="current-password"></label>
+        <label class="field">New password<input class="input" type="password" id="s-new" autocomplete="new-password"><span class="hint">At least 6 characters. Other devices get signed out.</span></label>
+        <label class="field">Repeat new password<input class="input" type="password" id="s-new2" autocomplete="new-password"></label>
+        <div class="row end"><button class="btn primary sm" id="s-save-pw">Change password</button></div></div>
+    </div></div>`;
+  $("#s-temp").oninput = (e) => ($("#s-tv").textContent = e.target.value);
+  $("#s-max").oninput = (e) => ($("#s-mv").textContent = e.target.value);
+  const save = async (body, msg) => { try { setUser(await api("/api/me", { json: body })); toast(msg, "ok"); return true; } catch (e) { fail(e); } };
+  $("#s-save-name").onclick = () => save({ display_name: $("#s-name").value }, "Saved");
+  $("#s-save-chat").onclick = async () => {
+    if (await save({ prefs: { model: $("#s-model").value, temperature: +$("#s-temp").value, max_tokens: +$("#s-max").value } }, "Chat defaults saved")) {
+      C.temp = S.user.prefs.temperature; C.max = S.user.prefs.max_tokens;
+      try { localStorage.removeItem("chatModel"); } catch {}
+    }
+  };
+  $("#s-save-pw").onclick = async () => {
+    if ($("#s-new").value !== $("#s-new2").value) return toast("The new passwords don't match.", "err");
+    if (await save({ current_password: $("#s-cur").value, new_password: $("#s-new").value }, "Password changed")) $$("input[type=password]").forEach((i) => (i.value = ""));
+  };
+};
+
+// ================================================================ USERS (admin)
+pages.users = async () => {
+  let list;
+  try { list = await api("/api/users"); } catch (e) { return fail(e); }
+  main.innerHTML = `<div class="page">
+    <div class="page-head"><div><h1>Users</h1><p>Admins see everything. Users only see Chat and their own Settings; their ratings still teach the models.</p></div>
+      <button class="btn primary" id="u-add">${I.plus} Add user</button></div>
+    <div class="card"><table><thead><tr><th>User</th><th>Role</th><th>Chats</th><th>Ratings</th><th>Last sign-in</th><th></th></tr></thead><tbody>
+      ${list.map((u) => `<tr data-uid="${u.id}"><td><div class="row" style="gap:10px;flex-wrap:nowrap"><div class="avatar-sm">${esc(initial(u))}</div><div><b>${esc(u.display_name)}</b><div class="hint">${esc(u.username)}${u.id === S.user.id ? " · you" : ""}</div></div></div></td>
+        <td><select class="input role-select" data-role ${u.id === S.user.id ? "disabled" : ""}><option value="user" ${u.role === "user" ? "selected" : ""}>User</option><option value="admin" ${u.role === "admin" ? "selected" : ""}>Admin</option></select></td>
+        <td>${num(u.chats)}</td><td>${num(u.ratings)}</td><td class="muted">${u.last_login ? ago(u.last_login) : "never"}</td>
+        <td style="text-align:right;white-space:nowrap"><button class="btn sm" data-pw>Reset password</button> ${u.id === S.user.id ? "" : `<button class="btn sm danger" data-del>${I.trash}</button>`}</td></tr>`).join("")}
+    </tbody></table></div></div>`;
+  const row = (el) => list.find((u) => u.id === +el.closest("tr").dataset.uid);
+  $$("[data-role]").forEach((s) => (s.onchange = async () => {
+    const u = row(s);
+    try { await api(`/api/users/${u.id}`, { method: "PATCH", json: { role: s.value } }); toast(`${esc(u.display_name)} is now ${s.value === "admin" ? "an admin" : "a user"}`, "ok"); } catch (e) { fail(e); }
+    pages.users();
+  }));
+  $$("[data-del]").forEach((b) => (b.onclick = async () => {
+    const u = row(b);
+    if (!confirm(`Delete ${u.username} and their ${u.chats} chats?`)) return;
+    try { await api(`/api/users/${u.id}`, { method: "DELETE" }); toast("Deleted", "ok"); } catch (e) { fail(e); }
+    pages.users();
+  }));
+  $$("[data-pw]").forEach((b) => (b.onclick = () => {
+    const u = row(b);
+    modal(`<h2>New password for ${esc(u.username)}</h2><label class="field">Password<input class="input" type="password" id="m-pw" autocomplete="new-password"><span class="hint">They'll be signed out and can sign in with this password.</span></label>
+      <div class="row end"><button class="btn ghost" id="m-cancel">Cancel</button><button class="btn primary" id="m-ok">Set password</button></div>`, (m, close) => {
+      $("#m-pw", m).focus();
+      $("#m-cancel", m).onclick = close;
+      $("#m-ok", m).onclick = async () => { try { await api(`/api/users/${u.id}`, { method: "PATCH", json: { password: $("#m-pw", m).value } }); toast("Password set", "ok"); close(); } catch (e) { fail(e); } };
+    });
+  }));
+  $("#u-add").onclick = () => modal(`<h2>Add user</h2>
+      <label class="field">Username<input class="input" id="m-user" autocomplete="off"></label>
+      <label class="field">Display name<input class="input" id="m-name" placeholder="optional"></label>
+      <label class="field">Password<input class="input" type="password" id="m-pw" autocomplete="new-password"><span class="hint">At least 6 characters. They can change it in Settings.</span></label>
+      <label class="field">Role<select class="input" id="m-role"><option value="user">User · Chat and Settings only</option><option value="admin">Admin · everything</option></select></label>
+      <div class="row end"><button class="btn ghost" id="m-cancel">Cancel</button><button class="btn primary" id="m-ok">Add user</button></div>`, (m, close) => {
+    $("#m-user", m).focus();
+    $("#m-cancel", m).onclick = close;
+    $("#m-ok", m).onclick = async () => {
+      try { await api("/api/users", { json: { username: $("#m-user", m).value, display_name: $("#m-name", m).value, password: $("#m-pw", m).value, role: $("#m-role", m).value } }); toast("User added", "ok"); close(); pages.users(); } catch (e) { fail(e); }
+    };
+  });
+};
+
+// ================================================================ SIGN IN
+const initial = (u) => (u.display_name || u.username || "?").trim().charAt(0);
+function setUser(u) {
+  S.user = u;
+  document.body.classList.toggle("role-user", u.role !== "admin");
+  $("#user-initial").textContent = initial(u);
+  $("#user-name").textContent = u.display_name;
+  $("#user-role").textContent = u.role;
+}
+function startApp(u) {
+  setUser(u);
+  if (C.prefsFor !== u.id) { C.prefsFor = u.id; C.conv = null; C.temp = u.prefs.temperature; C.max = u.prefs.max_tokens; }
+  $("#auth-root").innerHTML = "";
+  $("#shell").hidden = false;
+  clearInterval(S.timer);
+  S.timer = setInterval(poll, 3000);
+  poll().then(route);
+}
+async function showAuth(err = "") {
+  S.user = null;
+  clearInterval(S.timer);
+  $("#shell").hidden = true;
+  $("#modal-root").innerHTML = "";
+  let st = { needs_setup: false };
+  try { st = await (await fetch("/api/auth/state")).json(); } catch {}
+  const setup = st.needs_setup;
+  $("#auth-root").innerHTML = `<div class="auth"><form class="card auth-card" id="auth-form">
+    <div class="logo">${I.logo}</div>
+    <h1>${setup ? "Create the admin account" : "Sign in to Text LLM Studio"}</h1>
+    <p>${setup ? "This is the first account. It can train models, see analytics and add other people." : "Use the account your admin gave you."}</p>
+    <label class="field">Username<input class="input" id="a-user" autocomplete="username" required></label>
+    ${setup ? '<label class="field">Display name<input class="input" id="a-name" placeholder="optional"></label>' : ""}
+    <label class="field">Password<input class="input" type="password" id="a-pw" autocomplete="${setup ? "new-password" : "current-password"}" required>${setup ? '<span class="hint">At least 6 characters.</span>' : ""}</label>
+    <div class="auth-err" id="a-err">${esc(err)}</div>
+    <button class="btn primary" type="submit">${setup ? "Create account" : "Sign in"}</button>
+  </form></div>`;
+  $("#a-user").focus();
+  $("#auth-form").onsubmit = async (e) => {
+    e.preventDefault();
+    const body = { username: $("#a-user").value, password: $("#a-pw").value };
+    if (setup) body.display_name = $("#a-name").value;
+    try {
+      const u = await api(setup ? "/api/auth/setup" : "/api/auth/login", { json: body });
+      if (!location.hash) location.hash = u.role === "admin" ? "#/dashboard" : "#/chat";
+      startApp(u);
+    } catch (e) { $("#a-err").textContent = e.message; }
+  };
+}
+$("#logout").onclick = async () => { await fetch("/api/auth/logout", { method: "POST" }).catch(() => {}); C.prefsFor = null; showAuth(); };
+
+fetch("/api/auth/state").then((r) => r.json()).then((st) => (st.user ? startApp(st.user) : showAuth())).catch(() => showAuth("Can't reach the server."));

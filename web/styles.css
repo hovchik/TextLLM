@@ -228,6 +228,25 @@ tr.click { cursor: pointer; } tr.click:hover td { background: var(--surface2); }
 .legend i { display: inline-block; width: 10px; height: 10px; border-radius: 3px; margin-right: 6px; vertical-align: -1px; }
 .tip { position: absolute; pointer-events: none; background: var(--surface2); border: 1px solid var(--border2); border-radius: 8px; padding: 6px 9px; font-size: 12px; white-space: nowrap; box-shadow: var(--shadow); transform: translate(-50%, -110%); }
 
+/* accounts */
+.role-user [data-admin] { display: none !important; }
+.userchip { display: flex; align-items: center; gap: 10px; padding: 10px 8px 0; border-top: 1px solid var(--border); }
+.userchip .who { flex: 1; min-width: 0; display: flex; flex-direction: column; line-height: 1.25; }
+.userchip .who b { font-size: 13px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.userchip .who span { font-size: 11.5px; color: var(--muted); text-transform: capitalize; }
+.avatar-sm { width: 32px; height: 32px; border-radius: 50%; display: grid; place-items: center; flex: none; font-weight: 700; font-size: 13px;
+  background: var(--accent-soft); color: var(--accent); text-transform: uppercase; }
+.auth { min-height: 100vh; display: grid; place-items: center; padding: 24px 16px; background:
+  radial-gradient(600px 300px at 50% 0%, var(--accent-soft), transparent), var(--bg); }
+.auth-card { width: 100%; max-width: 380px; display: flex; flex-direction: column; gap: 14px; padding: 28px; }
+.auth-card .logo { margin: 0 auto 4px; width: 48px; height: 48px; border-radius: 14px; }
+.auth-card h1 { font-size: 22px; text-align: center; }
+.auth-card p { margin: 0; text-align: center; color: var(--muted); }
+.auth-err { color: var(--bad); font-size: 13px; min-height: 18px; text-align: center; }
+.settings-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 16px; align-items: start; }
+.settings-grid .card { display: flex; flex-direction: column; gap: 14px; }
+.role-select { width: auto; padding: 5px 8px; font-size: 13px; }
+
 @media (max-width: 1100px) { .g5 { grid-template-columns: repeat(3, 1fr); } .g4 { grid-template-columns: repeat(2, 1fr); } }
 @media (max-width: 860px) {
   .shell { grid-template-columns: 1fr; grid-template-rows: auto 1fr; }
@@ -235,6 +254,8 @@ tr.click { cursor: pointer; } tr.click:hover td { background: var(--surface2); }
   .brand-sub, .brand > div:last-child, .sidebar-foot .jobpill { display: none; }
   nav { flex-direction: row; } nav a span { display: none; }
   .sidebar-foot { margin: 0 0 0 auto; }
+  .userchip { border: 0; padding: 0; } .userchip .who, .userchip .avatar-sm { display: none; }
+  .settings-grid { grid-template-columns: 1fr; }
   .g4, .g5 { grid-template-columns: 1fr 1fr; } .g2, .g3 { grid-template-columns: 1fr; } .span2 { grid-column: auto; }
   .page { padding: 18px 16px 40px; }
   .chat { grid-template-columns: 1fr; height: calc(100vh - 56px); } .convs { display: none; }

@@ -3,16 +3,19 @@
     pip install -r requirements.txt
     python app.py                 # then open http://127.0.0.1:7860
     python app.py --port 8000 --host 0.0.0.0
-"""
-import argparse, json, os, shutil, threading, time
 
-from fastapi import FastAPI, File, Form, HTTPException, UploadFile
+Sign-in is required. The first visit creates the admin account; admins add more people on the
+Users page (or with `python -m studio.auth add NAME`). Regular users only see Chat and Settings.
+"""
+import argparse, json, os, re, shutil, threading, time
+
+from fastapi import FastAPI, File, Form, HTTPException, Request, Response, UploadFile
 from fastapi.responses import FileResponse, JSONResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
 from chat_engine import ROOT, RUNS, Engine, list_models
-from studio import db, feedback, jobs
+from studio import auth, db, feedback, jobs
 
 PY = jobs.PY
 WEB = os.path.join(ROOT, "web")
@@ -37,9 +40,183 @@ def run_dir(name):
     return d
 
 
+# ---------------------------------------------------------------- accounts & roles
+# Every /api route needs a signed-in user. Admins can call all of them; regular users only
+# the ones below (Chat and their own Settings). New routes are admin-only unless listed here.
+PUBLIC_ROUTES = {("GET", "/api/auth/state"), ("POST", "/api/auth/login"), ("POST", "/api/auth/setup"),
+                 ("POST", "/api/auth/logout")}
+USER_ROUTES = [(m, re.compile(p)) for m, p in [
+    ("GET", r"/api/me"), ("POST", r"/api/me"), ("GET", r"/api/status"), ("GET", r"/api/models"),
+    ("GET", r"/api/conversations"), ("GET", r"/api/conversations/\d+"), ("DELETE", r"/api/conversations/\d+"),
+    ("POST", r"/api/chat"), ("POST", r"/api/messages/\d+/rate"),
+]]
+
+
+@app.middleware("http")
+async def require_login(request: Request, call_next):
+    path, method = request.url.path, request.method
+    if not path.startswith("/api/") or (method, path) in PUBLIC_ROUTES:
+        return await call_next(request)
+    user = auth.user_for_token(request.cookies.get(auth.COOKIE))
+    if not user:
+        return JSONResponse({"detail": "Please sign in."}, status_code=401)
+    if user["role"] != "admin" and not any(m == method and p.fullmatch(path) for m, p in USER_ROUTES):
+        return JSONResponse({"detail": "Only admins can do that."}, status_code=403)
+    request.state.user = user
+    return await call_next(request)
+
+
+def me(request: Request):
+    return request.state.user
+
+
+def is_admin(request):
+    return me(request)["role"] == "admin"
+
+
+def own_conversation(request, cid):
+    """The conversation if the signed-in user may see it (their own, or any for admins)."""
+    c = db.q("SELECT * FROM conversations WHERE id=?", (cid,), one=True)
+    if not c or (c["user_id"] != me(request)["id"] and not is_admin(request)):
+        err("not found", 404)
+    return c
+
+
+def _set_cookie(resp, token):
+    resp.set_cookie(auth.COOKIE, token, max_age=auth.SESSION_DAYS * 86400, httponly=True, samesite="lax")
+
+
+class LoginReq(BaseModel):
+    username: str
+    password: str
+    display_name: str | None = None
+
+
+@app.get("/api/auth/state")
+def auth_state(request: Request):
+    return {"needs_setup": auth.count_users() == 0,
+            "user": auth.user_for_token(request.cookies.get(auth.COOKIE))}
+
+
+@app.post("/api/auth/setup")
+def auth_setup(r: LoginReq, response: Response):
+    """First run only: create the admin account."""
+    if auth.count_users():  # quick answer; create_user re-checks atomically
+        err("Accounts already exist. Sign in instead.", 409)
+    try:
+        auth.create_user(r.username, r.password, "admin", r.display_name, only_if_first=True)
+    except auth.NotFirst:
+        err("Accounts already exist. Sign in instead.", 409)
+    except ValueError as e:
+        err(str(e))
+    token, user = auth.login(r.username, r.password)
+    _set_cookie(response, token)
+    return user
+
+
+@app.post("/api/auth/login")
+def auth_login(r: LoginReq, response: Response):
+    token, user = auth.login(r.username, r.password)
+    if not token:
+        err("Wrong username or password.", 401)
+    _set_cookie(response, token)
+    return user
+
+
+@app.post("/api/auth/logout")
+def auth_logout(request: Request, response: Response):
+    auth.logout(request.cookies.get(auth.COOKIE))
+    response.delete_cookie(auth.COOKIE)
+    return {"ok": True}
+
+
+@app.get("/api/me")
+def get_me(request: Request):
+    return me(request)
+
+
+class MeReq(BaseModel):
+    display_name: str | None = None
+    prefs: dict | None = None
+    current_password: str | None = None
+    new_password: str | None = None
+
+
+@app.post("/api/me")
+def update_me(r: MeReq, request: Request, response: Response):
+    u = me(request)
+    if r.prefs is not None:
+        p = r.prefs
+        try:
+            if "temperature" in p:
+                p["temperature"] = min(1.5, max(0.0, float(p["temperature"])))
+            if "max_tokens" in p:
+                p["max_tokens"] = min(1024, max(16, int(p["max_tokens"])))
+            if "model" in p:
+                p["model"] = str(p["model"])[:200]
+        except (TypeError, ValueError):
+            err("Invalid settings.")
+    if r.new_password is not None:
+        if not auth.check_password(r.current_password or "", auth.get_user(u["id"])["pw_hash"]):
+            err("Your current password isn't right.")
+    try:
+        out = auth.update_user(u["id"], display_name=r.display_name, prefs=r.prefs, password=r.new_password)
+    except ValueError as e:
+        err(str(e))
+    if r.new_password is not None:  # changing the password signs out other sessions; keep this one
+        token, _ = auth.login(u["username"], r.new_password)
+        _set_cookie(response, token)
+    return out
+
+
+@app.get("/api/users")
+def users():
+    return auth.list_users()
+
+
+class UserReq(BaseModel):
+    username: str = ""
+    password: str | None = None
+    role: str | None = None
+    display_name: str | None = None
+
+
+@app.post("/api/users")
+def add_user(r: UserReq):
+    try:
+        return auth.create_user(r.username, r.password or "", r.role or "user", r.display_name)
+    except ValueError as e:
+        err(str(e))
+
+
+@app.patch("/api/users/{uid}")
+def edit_user(uid: int, r: UserReq, request: Request):
+    if uid == me(request)["id"] and r.role and r.role != "admin":
+        err("You can't remove your own admin role.")
+    try:
+        return auth.update_user(uid, role=r.role, password=r.password or None, display_name=r.display_name)
+    except LookupError as e:
+        err(str(e), 404)
+    except ValueError as e:
+        err(str(e))
+
+
+@app.delete("/api/users/{uid}")
+def remove_user(uid: int, request: Request):
+    if uid == me(request)["id"]:
+        err("You can't delete your own account.")
+    try:
+        auth.delete_user(uid)
+    except LookupError as e:
+        err(str(e), 404)
+    except ValueError as e:
+        err(str(e))
+    return {"ok": True}
+
+
 # ---------------------------------------------------------------- status / data
 @app.get("/api/status")
-def status():
+def status(request: Request):
     s = db.get_settings()
     if s["auto_train"] and not jobs.running():  # ratings that arrived while another job ran
         for m in {r["model"] for r in db.q("SELECT DISTINCT model FROM messages WHERE role='assistant' "
@@ -48,8 +225,10 @@ def status():
                       and j["exit"] not in (0, None) and time.time() - j["ended"] < 900]
             if m and not failed and os.path.isdir(os.path.join(RUNS, m)) and maybe_auto_train(m):
                 break
+    if not is_admin(request):  # users don't see jobs, data or the feedback queue
+        return {"user": me(request)}
     return {"job": jobs.status(), "data": jobs.data_status(), "settings": s,
-            "pending_feedback": db.pending_feedback()}
+            "pending_feedback": db.pending_feedback(), "user": me(request)}
 
 
 class DataReq(BaseModel):
@@ -207,7 +386,7 @@ def engine(name):
 
 
 @app.get("/api/models")
-def models():
+def models(request: Request):
     out = []
     for label, d in list_models().items():
         s = jobs.run_summary(d)
@@ -215,23 +394,29 @@ def models():
                      (s["name"],), one=True)
         out.append({**s, "label": label, "ratings": stats["n"], "avg_rating": stats["avg"],
                     "pending_feedback": db.pending_feedback(s["name"])})
+    if not is_admin(request):  # chat only needs to pick a model
+        keep = ("name", "type", "label", "level", "ratings", "avg_rating")
+        out = [{k: m.get(k) for k in keep} for m in out]
     return out
 
 
 @app.get("/api/conversations")
-def conversations():
+def conversations(request: Request):
+    """The signed-in user's own chats."""
     return db.q("SELECT c.*, (SELECT COUNT(*) FROM messages m WHERE m.conversation_id=c.id) n "
-                "FROM conversations c ORDER BY updated DESC LIMIT 200")
+                "FROM conversations c WHERE c.user_id=? ORDER BY updated DESC LIMIT 200", (me(request)["id"],))
 
 
 @app.get("/api/conversations/{cid}")
-def conversation(cid: int):
-    c = db.q("SELECT * FROM conversations WHERE id=?", (cid,), one=True) or err("not found", 404)
-    return {**c, "messages": db.q("SELECT * FROM messages WHERE conversation_id=? ORDER BY id", (cid,))}
+def conversation(cid: int, request: Request):
+    c = own_conversation(request, cid)
+    return {**c, "messages": db.q("SELECT * FROM messages WHERE conversation_id=? ORDER BY id", (cid,)),
+            "mine": c["user_id"] == me(request)["id"]}
 
 
 @app.delete("/api/conversations/{cid}")
-def delete_conversation(cid: int):
+def delete_conversation(cid: int, request: Request):
+    own_conversation(request, cid)
     db.ex("DELETE FROM messages WHERE conversation_id=?", (cid,))
     db.ex("DELETE FROM conversations WHERE id=?", (cid,))
     return {"ok": True}
@@ -247,14 +432,17 @@ class ChatReq(BaseModel):
 
 
 @app.post("/api/chat")
-def chat(r: ChatReq):
+def chat(r: ChatReq, request: Request):
     eng = engine(r.model)
     if r.regenerate:
         um = db.q("SELECT * FROM messages WHERE id=? AND role='user'", (r.regenerate,), one=True) or err("not found", 404)
+        own_conversation(request, um["conversation_id"])
         cid, uid, text = um["conversation_id"], um["id"], um["content"]
     else:
         text = r.message.strip() or err("Empty message")
-        cid = r.conversation_id or db.new_conversation(text, r.model)
+        if r.conversation_id:
+            own_conversation(request, r.conversation_id)
+        cid = r.conversation_id or db.new_conversation(text, r.model, me(request)["id"])
         uid = db.add_message(cid, "user", text)
     hist = db.history(cid, before_id=uid)
 
@@ -285,12 +473,15 @@ class RateReq(BaseModel):
 
 
 @app.post("/api/messages/{mid}/rate")
-def rate(mid: int, r: RateReq):
+def rate(mid: int, r: RateReq, request: Request):
     if r.rating is not None and not 1 <= r.rating <= 5:
         err("rating must be 1–5")
+    m = db.q("SELECT conversation_id FROM messages WHERE id=?", (mid,), one=True) or err("not found", 404)
+    own_conversation(request, m["conversation_id"])
     m = db.rate(mid, r.rating, r.comment, r.correction) or err("not found", 404)
     auto = maybe_auto_train(m["model"])
-    return {"message": m, "auto_training": auto, "pending": db.pending_feedback(m["model"])}
+    return {"message": m, "auto_training": auto,
+            "pending": db.pending_feedback(m["model"]) if is_admin(request) else None}
 
 
 def maybe_auto_train(model):
@@ -309,8 +500,10 @@ def maybe_auto_train(model):
 
 @app.get("/api/feedback")
 def feedback_list(model: str = "", only: str = "all"):
-    sql = ("SELECT a.*, u.content prompt, c.title FROM messages a JOIN messages u ON u.id=a.prompt_id "
-           "JOIN conversations c ON c.id=a.conversation_id WHERE a.role='assistant' "
+    sql = ("SELECT a.*, u.content prompt, c.title, COALESCE(us.display_name, us.username) author "
+           "FROM messages a JOIN messages u ON u.id=a.prompt_id "
+           "JOIN conversations c ON c.id=a.conversation_id LEFT JOIN users us ON us.id=c.user_id "
+           "WHERE a.role='assistant' "
            "AND (a.rating IS NOT NULL OR a.correction IS NOT NULL)")
     args = []
     if model:
@@ -394,4 +587,7 @@ if __name__ == "__main__":
     ap.add_argument("--port", type=int, default=7860)
     a = ap.parse_args()
     print(f"Text LLM Studio → http://{a.host}:{a.port}")
+    if not auth.count_users():
+        print("No accounts yet: open the link to create the admin account "
+              "(or run: python -m studio.auth add NAME --admin).")
     uvicorn.run(app, host=a.host, port=a.port, log_level="warning")

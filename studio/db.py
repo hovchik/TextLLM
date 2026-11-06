@@ -45,6 +45,8 @@ def conn():
 
 with conn() as _c:
     _c.executescript(SCHEMA)
+    if "user_id" not in [r["name"] for r in _c.execute("PRAGMA table_info(conversations)")]:
+        _c.execute("ALTER TABLE conversations ADD COLUMN user_id INTEGER")  # owner (studio/auth.py)
 
 
 def q(sql, args=(), one=False):
@@ -58,6 +60,11 @@ def ex(sql, args=()):
     with _lock, conn() as c:
         cur = c.execute(sql, args)
         return cur.lastrowid
+
+
+def ex_script(sql):
+    with _lock, conn() as c:
+        c.executescript(sql)
 
 
 def get_settings():
@@ -75,10 +82,10 @@ def set_settings(**kw):
 
 
 # ---------------------------------------------------------------- conversations
-def new_conversation(title, model):
+def new_conversation(title, model, user_id=None):
     now = time.time()
-    return ex("INSERT INTO conversations(title, model, created, updated) VALUES(?,?,?,?)",
-              (title[:80], model, now, now))
+    return ex("INSERT INTO conversations(title, model, created, updated, user_id) VALUES(?,?,?,?,?)",
+              (title[:80], model, now, now, user_id))
 
 
 def add_message(conv_id, role, content, model=None, prompt_id=None):

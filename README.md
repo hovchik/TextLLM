@@ -18,9 +18,28 @@ python app.py        # open http://127.0.0.1:7860
 | **Chat** | Conversations with any trained model, streaming answers, ★ ratings, *Improve* (write the answer you wanted), *Try again* |
 | **Analytics** | Validation loss across models, ratings per day, rating distribution, whether feedback training helped, leaderboard, job history |
 | **Feedback** | Every rated answer, "Train now" per model, and automatic learning after N new ratings |
+| **Users** | Add people, set their role (admin or user), reset passwords, remove accounts |
+| **Settings** | Your display name, password and chat defaults (model, creativity, length) |
 
 ![dashboard](docs/studio-dashboard.png)
 ![chat](docs/studio-chat.png)
+
+### Accounts and roles
+Everyone signs in. The first time you open the app it asks you to create the **admin** account.
+- **Admin:** every page above, including Users.
+- **User:** only **Chat** (their own conversations) and **Settings**. Their ratings and corrections still teach the models.
+
+Admins add people on the Users page, or from the command line:
+```bash
+python -m studio.auth add alice --admin   # asks for a password
+python -m studio.auth add bob             # regular user
+python -m studio.auth passwd bob          # new password
+python -m studio.auth role bob admin      # promote
+python -m studio.auth list
+```
+Passwords are stored as salted PBKDF2 hashes in `runs/studio.db`; the server checks the role on every API call, not only in the page. Chats from before accounts existed belong to the first admin.
+
+![users](docs/studio-users.png)
 
 ### How ratings train the model
 `feedback_train.py` (run from the Feedback page, or automatically after 10 new ratings by default):

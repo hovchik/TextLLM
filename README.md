@@ -107,10 +107,31 @@ python train.py --preset cpu --vocab 8192 --batch 16 --grad-accum 4 --max-steps 
 python generate.py --prompt "The old captain looked at the sea and" --tokens 300
 ```
 **If the download keeps disconnecting** (`WinError 10054`, "Server disconnected"): just run the same
-`build_corpus.py` command again. It skips Gutenberg if it finished, and FineWeb-Edu continues from
-`data/raw/fineweb/progress.json` (saved after every chunk; shards from older versions are picked up too).
+`build_corpus.py` command again. Every source continues from its own `data/raw/<source>/progress.json`
+(saved after every small chunk; FineWeb-Edu shards from older versions are picked up too).
 Each request is retried up to `--retries 30` times with backoff of up to 2 minutes. On a very unstable connection, add
-`--fineweb-mode download` to save whole parquet files (about 2 GB each, resumable) to `data/cache/fineweb` first.
+`--hf-mode download` to save whole parquet files (resumable) to `data/cache/` first.
+
+### More book sources
+All of these are off by default (0 = skip). Pick them in the Studio under Training → Data → "More book sources", or on the command line:
+
+| Flag | Source | License |
+|---|---|---|
+| `--gutenberg-method harvest` | Gutenberg's official robot harvest (zip files) instead of the mirror in catalog order | public domain (US) |
+| `--pg19-books N` | [PG-19](https://huggingface.co/datasets/deepmind/pg19), 28,752 Gutenberg books from before 1919, read from DeepMind's public bucket. Books Gutenberg already saved are skipped. | Apache 2.0 |
+| `--standard-ebooks N` | [Standard Ebooks](https://standardebooks.org), ~1,400 proofread classics. Read from their GitHub repos, or from the Patrons feed if `STANDARD_EBOOKS_EMAIL` is set. `GITHUB_TOKEN` avoids GitHub's hourly limit. | CC0 |
+| `--common-corpus-gb G` | [Common Corpus](https://huggingface.co/datasets/PleIAs/common_corpus), only the "Open Culture" part (public-domain books and newspapers, OCR). `--common-corpus-lang en` or `all`. | public domain |
+| `--archive-books N` | Internet Archive scans published before 1931 (americana, toronto, europeanlibraries collections; never the lending library). OCR text, keep it a small share. | public domain (US) |
+| `--cosmopedia-gb G` | [Cosmopedia](https://huggingface.co/datasets/HuggingFaceTB/cosmopedia) synthetic text by Mixtral. `--cosmopedia-subsets stories,wikihow,...` | Apache 2.0 |
+
+```bash
+python data/build_corpus.py --gutenberg-max 3000 --pg19-books 3000 --standard-ebooks 500 \
+    --cosmopedia-gb 0.3 --fineweb-gb 0.3
+```
+Left out on purpose: **BookCorpus** and **BookCorpusOpen** (copyrighted Smashwords books copied without permission),
+**The Pile** (contains Books3, taken down after a DMCA notice), **RedPajama's book subset** (PG-19 plus Books3),
+and **Open Library dumps** (catalog metadata only, no book text). **Dolma's book subset** and
+`open-thoughts/gutenberg` are Project Gutenberg again, so they would only duplicate the books above.
 
 It saves a checkpoint every 250 steps (about 20 minutes on 4 cores, sooner on more), so you can try `generate.py` while it trains.
 Expect grammatical, book-flavoured prose that drifts after a few sentences. It won't produce coherent stories or follow instructions.

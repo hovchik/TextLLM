@@ -94,17 +94,26 @@ def list_users():
     return [{**public(r), "chats": r["chats"], "ratings": r["ratings"]} for r in rows]
 
 
-def create_user(username, password, role="user", display_name=None):
+class NotFirst(Exception):
+    """create_user(only_if_first=True) found that accounts already exist."""
+
+
+def create_user(username, password, role="user", display_name=None, only_if_first=False):
     username = validate(username, password)
     if role not in ROLES:
         raise ValueError("Role must be admin or user.")
-    if db.q("SELECT id FROM users WHERE username=?", (username,), one=True):
-        raise ValueError(f"The username {username} is taken.")
-    first = count_users() == 0
-    uid = db.ex("INSERT INTO users(username, display_name, pw_hash, role, created) VALUES(?,?,?,?,?)",
-                (username, (display_name or "").strip() or None, hash_password(password), role, time.time()))
-    if first and role == "admin":  # chats from before accounts existed belong to the first admin
-        db.ex("UPDATE conversations SET user_id=? WHERE user_id IS NULL", (uid,))
+    pw_hash = hash_password(password)  # slow: do it before taking the lock
+    # Check and insert in one locked transaction, so two first-run setups can't both create an admin.
+    with db._lock, db.conn() as c:
+        first = c.execute("SELECT COUNT(*) FROM users").fetchone()[0] == 0
+        if only_if_first and not first:
+            raise NotFirst()
+        if c.execute("SELECT id FROM users WHERE username=?", (username,)).fetchone():
+            raise ValueError(f"The username {username} is taken.")
+        uid = c.execute("INSERT INTO users(username, display_name, pw_hash, role, created) VALUES(?,?,?,?,?)",
+                        (username, (display_name or "").strip() or None, pw_hash, role, time.time())).lastrowid
+        if first and role == "admin":  # chats from before accounts existed belong to the first admin
+            c.execute("UPDATE conversations SET user_id=? WHERE user_id IS NULL", (uid,))
     return public(get_user(uid))
 
 

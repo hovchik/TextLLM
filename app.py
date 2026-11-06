@@ -101,10 +101,12 @@ def auth_state(request: Request):
 @app.post("/api/auth/setup")
 def auth_setup(r: LoginReq, response: Response):
     """First run only: create the admin account."""
-    if auth.count_users():
+    if auth.count_users():  # quick answer; create_user re-checks atomically
         err("Accounts already exist. Sign in instead.", 409)
     try:
-        auth.create_user(r.username, r.password, "admin", r.display_name)
+        auth.create_user(r.username, r.password, "admin", r.display_name, only_if_first=True)
+    except auth.NotFirst:
+        err("Accounts already exist. Sign in instead.", 409)
     except ValueError as e:
         err(str(e))
     token, user = auth.login(r.username, r.password)

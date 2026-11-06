@@ -24,6 +24,7 @@ from peft import LoraConfig, get_peft_model
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, ROOT)
 import devices  # noqa: E402
+import graceful  # noqa: E402
 from writing import hf  # noqa: E402
 
 EOT = "<|endoftext|>"
@@ -139,6 +140,7 @@ def batches(data, bs, pad, seed=0, skip=0):
 
 
 def main():
+    graceful.install()
     a = args()
     rng = random.Random(0)
     os.makedirs(a.out, exist_ok=True)

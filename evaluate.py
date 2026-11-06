@@ -15,6 +15,7 @@ import argparse, json, os, random, sys, time
 
 ROOT = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, ROOT)
+import graceful  # noqa: E402
 PROMPTS = os.path.join(ROOT, "writing", "eval_prompts.jsonl")
 QUICK = ["x_post-01", "x_post-03", "threads_post-01", "linkedin_post-01", "instagram_caption-01",
          "facebook_post-01", "story-16", "essay-05"]
@@ -116,7 +117,7 @@ def latest(run, quick=None):
     h = os.path.join(d, "history.jsonl")
     if not os.path.exists(h):
         return None
-    rows = [r for r in (json.loads(l) for l in open(h) if l.strip()) if not r.get("partial")]
+    rows = [r for r in (json.loads(l) for l in open(h) if l.strip()) if not r.get("partial") and not r.get("rejected")]
     if quick is not None:
         rows = [r for r in rows if r.get("quick") == quick]
     return json.load(open(os.path.join(d, rows[-1]["file"]))) if rows else None
@@ -197,6 +198,7 @@ def make_pairs(run_a, run_b, judge=None, quick=False):
 
 
 def main():
+    graceful.install()
     ap = argparse.ArgumentParser()
     ap.add_argument("--run")
     ap.add_argument("--quick", action="store_true", help="8 prompts instead of 60")

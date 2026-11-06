@@ -22,7 +22,7 @@ def latest_eval(run, quick=None):
         return None
     since = weights_stamp(os.path.join(RUNS, run))
     rows = [r for r in (json.loads(l) for l in open(h) if l.strip())
-            if not r.get("partial") and not r.get("max_tokens") and r["time"] >= since]
+            if not r.get("partial") and not r.get("max_tokens") and not r.get("rejected") and r["time"] >= since]
     if quick is not None:
         rows = [r for r in rows if r.get("quick") == quick]
     return rows[-1] if rows else None

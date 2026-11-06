@@ -15,6 +15,7 @@ import torch.distributed as dist
 from torch.nn.parallel import DistributedDataParallel as DDP
 
 import devices
+import graceful
 from model.gpt import GPT, GPTConfig, PRESETS
 
 
@@ -62,6 +63,7 @@ def lr_at(step, a):
 
 
 def main():
+    graceful.install()
     a = get_args()
     ddp = int(os.environ.get("RANK", -1)) != -1
     if ddp:

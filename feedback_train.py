@@ -20,6 +20,7 @@ import argparse, json, math, os, random, shutil, subprocess, sys, tempfile, time
 
 ROOT = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, ROOT)
+import graceful  # noqa: E402
 
 
 def say(m):
@@ -154,6 +155,7 @@ def quick_score(run, fresh=False):
 
 
 def main():
+    graceful.install()
     ap = argparse.ArgumentParser()
     ap.add_argument("--run", required=True)
     ap.add_argument("--data", help="JSONL from studio.feedback (default: build it from the chat database)")

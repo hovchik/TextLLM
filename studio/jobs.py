@@ -1,6 +1,7 @@
 """One background job at a time (data prep, training, learning, feedback training)."""
-import glob, json, math, os, signal, subprocess, sys, threading, time
+import glob, json, math, os, subprocess, sys, threading, time
 
+import graceful
 from chat_engine import ROOT, RUNS
 
 PY = sys.executable
@@ -8,23 +9,44 @@ os.makedirs(RUNS, exist_ok=True)
 _lock = threading.Lock()
 JOB = {"proc": None, "name": None, "kind": None, "log": None, "run": None, "started": None, "cleanup": []}
 HISTORY_PATH = os.path.join(RUNS, "jobs.jsonl")
+LOCK_PATH = os.path.join(RUNS, "_job.lock")   # pid of the running job: data/crawl.py checks it
 
 
 def running():
     return JOB["proc"] is not None and JOB["proc"].poll() is None
 
 
+def external_job():
+    """A job started outside the Studio (the scheduled crawler training a model), from runs/_job.lock."""
+    try:
+        info = json.load(open(LOCK_PATH))
+    except (OSError, ValueError):
+        return None
+    if JOB["proc"] is not None and info.get("pid") == JOB["proc"].pid:
+        return None  # our own
+    from data.crawl import _alive
+
+    return info if _alive(info.get("pid")) else None
+
+
 def launch(kind, name, cmd, log_path, run=None, cleanup=()):
     with _lock:
         if running():
             raise RuntimeError(f"A job is already running ({JOB['kind']}: {JOB['name']}). Stop it first.")
+        ext = external_job()
+        if ext:
+            raise RuntimeError(f"The scheduled news crawler is training ({ext.get('name', 'crawl')}, "
+                               f"since {time.strftime('%H:%M', time.localtime(ext.get('started', 0)))}). "
+                               "Wait for it to finish.")
         os.makedirs(os.path.dirname(log_path), exist_ok=True)
         logf = open(log_path, "a")
         logf.write(f"\n$ {' '.join(cmd)}\n")
         logf.flush()
-        # own process group (POSIX), so Stop reaches the trainers a job starts, not just the job
+        # own process group, so Stop reaches the trainers a job starts, not just the job (graceful.py)
         proc = subprocess.Popen(cmd, cwd=ROOT, stdout=logf, stderr=subprocess.STDOUT,
-                                env={**os.environ, "PYTHONUNBUFFERED": "1"}, start_new_session=os.name == "posix")
+                                env={**os.environ, "PYTHONUNBUFFERED": "1"}, **graceful.popen_kwargs())
+        with open(LOCK_PATH, "w") as lk:
+            lk.write(json.dumps({"pid": proc.pid, "kind": kind, "name": name, "started": time.time()}))
         JOB.update(proc=proc, name=name, kind=kind, log=log_path, run=run, started=time.time(),
                    cleanup=list(cleanup))
         threading.Thread(target=_watch, args=(proc,), daemon=True).start()
@@ -33,6 +55,11 @@ def launch(kind, name, cmd, log_path, run=None, cleanup=()):
 
 def _watch(proc):
     rc = proc.wait()
+    try:
+        if json.load(open(LOCK_PATH)).get("pid") == proc.pid:
+            os.remove(LOCK_PATH)
+    except (OSError, ValueError):
+        pass
     for f in JOB["cleanup"]:
         try:
             os.remove(f)
@@ -43,26 +70,20 @@ def _watch(proc):
                             "ended": time.time(), "exit": rc}) + "\n")
 
 
-def _signal(p, sig):
-    """Signal the job and every process it started (they share its process group on POSIX)."""
-    try:
-        if os.name == "posix":
-            os.killpg(p.pid, sig)
-        else:
-            p.send_signal(sig)
-    except (ProcessLookupError, PermissionError):
-        pass
-
-
-def stop():
+def stop(grace=20):
+    """Stop the running job and everything it started. Works on Windows too (graceful.py)."""
     p = JOB["proc"]
     if not running():
         return status()
-    _signal(p, signal.SIGINT)
+    graceful.interrupt(p)
     try:
-        p.wait(20)
+        p.wait(grace)
     except subprocess.TimeoutExpired:
-        _signal(p, signal.SIGKILL if hasattr(signal, "SIGKILL") else signal.SIGTERM)
+        graceful.kill(p)
+        try:
+            p.wait(10)
+        except subprocess.TimeoutExpired:
+            pass
     return status()
 
 
@@ -79,7 +100,7 @@ def tail(path, n=200):
 def status():
     p = JOB["proc"]
     return {
-        "running": running(),
+        "running": running(), "external": external_job(),
         "kind": JOB["kind"], "name": JOB["name"], "run": JOB["run"], "started": JOB["started"],
         "exit": None if p is None or p.poll() is None else p.returncode,
         "log": tail(JOB["log"], 60),

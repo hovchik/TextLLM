@@ -24,6 +24,16 @@ continued with HTTP Range requests after a dropped connection, with retries and 
 Output: data/raw/news/<source>/<YYYY-MM>.txt, documents separated by <|endoftext|> like the rest
 of data/raw/, so the tokenizer, train.py and finetune_lora.py pick them up. Articles not yet
 taught to a model also go to runs/_crawler/pending.txt for --learn.
+
+Learning is checked. Before --learn trains the model its weights are copied aside; afterwards a
+quick evaluation (evaluate.py --quick) runs and, if the score fell by more than --max-drop points,
+the old weights are put back. --no-gate skips this.
+
+Languages: --languages en,hy keeps only articles in those languages (data/lang.py guesses).
+
+Without the Studio: --install-schedule 6 registers the crawl with Windows Task Scheduler (or
+cron) every 6 hours; --uninstall-schedule removes it. Only one crawl runs at a time, and the
+learn step waits while the Studio is running another job.
 """
 import argparse, hashlib, json, os, re, sqlite3, subprocess, sys, time
 import xml.etree.ElementTree as ET
@@ -33,13 +43,19 @@ from urllib.robotparser import RobotFileParser
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, ROOT)
+import graceful  # noqa: E402
 from data.ingest import EOT, clean, from_docx, from_html, from_pdf  # noqa: E402
+from data import lang as langmod  # noqa: E402
+from graceful import run_child  # noqa: E402
 
 STATE = os.path.join(ROOT, "runs", "_crawler")
 SOURCES_PATH = os.path.join(STATE, "sources.json")
 DB_PATH = os.path.join(STATE, "crawl.db")
 PENDING = os.path.join(STATE, "pending.txt")
 PARTIAL = os.path.join(STATE, "partial")
+LOCK = os.path.join(STATE, "lock")                              # one crawl at a time
+JOB_LOCK = os.path.join(ROOT, "runs", "_job.lock")              # written by the Studio while a job runs
+TASK_NAME = "TextLLM news crawler"                              # Windows Task Scheduler / crontab marker
 OUT = os.path.join(ROOT, "data", "raw", "news")
 ATTRIBUTION = os.path.join(OUT, "attribution.jsonl")
 AGENT = "textllm-crawler"
@@ -84,26 +100,6 @@ NOT_ARTICLE = re.compile(r"\.(jpe?g|png|gif|webp|svg|mp[34]|mov|avi|zip|gz|exe|c
 def say(m):
     print(m, flush=True)
 
-
-def run_child(cmd, cwd):
-    """subprocess.call, except that on Ctrl-C / Stop the child gets time to save and exit
-    (subprocess.call would kill it at once, and a grandchild trainer would be left running)."""
-    p = subprocess.Popen(cmd, cwd=cwd)
-    try:
-        return p.wait()
-    except KeyboardInterrupt:
-        # Ctrl-C and Studio's Stop already reach the whole process group, so the child has the
-        # signal too: wait for it (ignoring repeated interrupts), and only kill it if it hangs.
-        end = time.time() + 120
-        while p.poll() is None and time.time() < end:
-            try:
-                p.wait(max(0.1, end - time.time()))
-            except (KeyboardInterrupt, subprocess.TimeoutExpired):
-                pass
-        if p.poll() is None:
-            p.kill()
-            p.wait()
-        raise
 
 
 # ---------------------------------------------------------------- sources
@@ -198,6 +194,10 @@ def db():
     CREATE TABLE IF NOT EXISTS runs (id INTEGER PRIMARY KEY AUTOINCREMENT, started REAL, ended REAL,
         added INTEGER, failed INTEGER, learned TEXT);
     """)
+    for table, col, typ in (("items", "lang", "TEXT"), ("items", "excerpt", "TEXT"),
+                            ("runs", "score_before", "REAL"), ("runs", "score_after", "REAL"), ("runs", "verdict", "TEXT")):
+        if col not in [r["name"] for r in c.execute(f"PRAGMA table_info({table})")]:
+            c.execute(f"ALTER TABLE {table} ADD COLUMN {col} {typ}")
     return c
 
 
@@ -213,12 +213,36 @@ def stats():
             d[r["status"]] = r["n"]
             if r["status"] == "done":
                 d["chars"], d["last"] = r["ch"] or 0, r["last"]
-        recent = [dict(r) for r in c.execute("SELECT url, source, title, chars, fetched FROM items "
+        recent = [dict(r) for r in c.execute("SELECT url, source, title, chars, lang, fetched FROM items "
                                              "WHERE status='done' ORDER BY fetched DESC LIMIT 25")]
         runs = [dict(r) for r in c.execute("SELECT * FROM runs ORDER BY id DESC LIMIT 10")]
+        langs = {r["lang"] or "?": r["n"] for r in c.execute("SELECT lang, COUNT(*) n FROM items WHERE status='done' "
+                                                            "GROUP BY lang ORDER BY n DESC")}
+        skipped_lang = c.execute("SELECT COUNT(*) FROM items WHERE status='skipped' AND error LIKE 'language %'").fetchone()[0]
     return {"sources": per, "total": sum(d["done"] for d in per.values()),
             "queued": sum(d["queued"] for d in per.values()), "pending": pending_count(),
-            "recent": recent, "runs": runs}
+            "recent": recent, "runs": runs, "languages": langs, "skipped_language": skipped_lang,
+            "lock": crawl_lock_info(), "schedule": schedule_status()}
+
+
+def recent_articles(query="", n=5, days=7):
+    """Recent articles for the "news" chat format, best keyword matches first."""
+    if not os.path.exists(DB_PATH):
+        return []
+    words = {w for w in re.findall(r"[^\W\d_]{3,}", (query or "").lower())}
+    with db() as c:
+        rows = [dict(r) for r in c.execute(
+            "SELECT url, source, title, excerpt, lang, published, fetched FROM items WHERE status='done' "
+            "AND excerpt IS NOT NULL AND fetched > ? ORDER BY fetched DESC LIMIT 400", (time.time() - days * 86400,))]
+    names = {s["id"]: s["name"] for s in load_sources()}
+    now = time.time()
+    for r in rows:
+        text = f"{r['title']} {r['excerpt']}".lower()
+        hits = sum(text.count(w) for w in words)
+        r["score"] = hits * 10 + (1 - min(1, (now - r["fetched"]) / (days * 86400)))
+        r["source_name"] = names.get(r["source"], r["source"])
+    rows.sort(key=lambda r: -r["score"])
+    return rows[:n]
 
 
 def pending_count():
@@ -500,7 +524,7 @@ def _append(path, doc):
         os.fsync(f.fileno())
 
 
-def fetch_items(f, c, s, min_chars, limit):
+def fetch_items(f, c, s, min_chars, limit, languages=()):
     added = failed = 0
     rows = c.execute("SELECT * FROM items WHERE source=? AND status IN ('queued','failed') AND attempts < 3 "
                      "ORDER BY status DESC, found LIMIT ?", (s["id"], limit)).fetchall()
@@ -525,6 +549,12 @@ def fetch_items(f, c, s, min_chars, limit):
                           (f"only {len(text)} characters", time.time(), url))
                 c.commit()
                 continue
+            lang = langmod.detect(text)
+            if languages and lang not in languages:
+                c.execute("UPDATE items SET status='skipped', error=?, lang=?, fetched=? WHERE url=?",
+                          (f"language {lang or 'unknown'}", lang, time.time(), url))
+                c.commit()
+                continue
             h = text_hash(text)
             if c.execute("SELECT 1 FROM hashes WHERE hash=?", (h,)).fetchone():
                 c.execute("UPDATE items SET status='skipped', error='duplicate', fetched=? WHERE url=?",
@@ -539,11 +569,11 @@ def fetch_items(f, c, s, min_chars, limit):
                                              "credit": s.get("credit"), "published": r["published"],
                                              "fetched": time.strftime("%Y-%m-%d")}, ensure_ascii=False) + "\n")
             c.execute("INSERT OR IGNORE INTO hashes(hash, url) VALUES(?,?)", (h, url))
-            c.execute("UPDATE items SET status='done', chars=?, text_hash=?, fetched=?, error=NULL WHERE url=?",
-                      (len(text), h, time.time(), url))
+            c.execute("UPDATE items SET status='done', chars=?, text_hash=?, fetched=?, error=NULL, lang=?, excerpt=? "
+                      "WHERE url=?", (len(text), h, time.time(), lang, text[:1500], url))
             c.commit()
             added += 1
-            say(f"  ✓ {title[:70] or url} ({len(text):,} chars)")
+            say(f"  ✓ {title[:70] or url} ({len(text):,} chars, {langmod.name(lang)})")
         except KeyboardInterrupt:
             raise
         except Exception as e:
@@ -556,28 +586,307 @@ def fetch_items(f, c, s, min_chars, limit):
 
 
 # ---------------------------------------------------------------- learning
-def learn(run, min_docs, passes):
+WEIGHT_FILES = ("ckpt.pt", "adapter", "train_state.pt", "examples.pt", "meta.json")   # what a learn step changes
+
+
+def _requeue(batch):
+    """Put a learning batch back in front of anything new, so nothing is lost."""
+    rest = open(PENDING, encoding="utf-8").read() if os.path.exists(PENDING) else ""
+    with open(PENDING, "w", encoding="utf-8") as f:
+        f.write(open(batch, encoding="utf-8").read() + rest)
+    os.remove(batch)
+
+
+def backup_weights(run):
+    """Copy the model's weights aside, so a learn step that makes it worse can be undone."""
+    import shutil
+
+    bk = os.path.join(run, "_before_learn")
+    shutil.rmtree(bk, ignore_errors=True)
+    os.makedirs(bk)
+    for name in WEIGHT_FILES:
+        p = os.path.join(run, name)
+        if os.path.isdir(p):
+            shutil.copytree(p, os.path.join(bk, name))
+        elif os.path.exists(p):
+            shutil.copy2(p, os.path.join(bk, name))
+    return bk
+
+
+def restore_weights(run, bk):
+    import shutil
+
+    for name in WEIGHT_FILES:
+        src, dst = os.path.join(bk, name), os.path.join(run, name)
+        if not os.path.exists(src):
+            continue
+        if os.path.isdir(dst):
+            shutil.rmtree(dst)
+        elif os.path.exists(dst):
+            os.remove(dst)
+        os.replace(src, dst)
+    for stale in ("gguf",):  # a quantized copy of the undone weights would be out of date
+        shutil.rmtree(os.path.join(run, stale), ignore_errors=True)
+    shutil.rmtree(bk, ignore_errors=True)
+
+
+def quick_score(run, since=0):
+    """Latest complete quick evaluation score of the run, made after `since`."""
+    h = os.path.join(run, "eval", "history.jsonl")
+    if not os.path.exists(h):
+        return None
+    rows = [r for r in (json.loads(l) for l in open(h) if l.strip())
+            if r.get("quick") and not r.get("partial") and not r.get("max_tokens") and not r.get("rejected")
+            and r["time"] >= since]
+    return rows[-1]["score"] if rows else None
+
+
+def reject_evals(run, since):
+    """Mark evaluations made after `since` as rejected: they scored weights that were undone."""
+    h = os.path.join(run, "eval", "history.jsonl")
+    if not os.path.exists(h):
+        return
+    rows = [json.loads(l) for l in open(h) if l.strip()]
+    for r in rows:
+        if r["time"] >= since:
+            r["rejected"] = True
+    tmp = h + ".tmp"
+    with open(tmp, "w") as f:
+        f.writelines(json.dumps(r) + "\n" for r in rows)
+    os.replace(tmp, h)
+
+
+def evaluate_quick(run):
+    say(f"== quick check of {os.path.basename(run)} (8 prompts)")
+    t = time.time()
+    rc = run_child([sys.executable, "evaluate.py", "--run", run, "--quick"], ROOT)
+    if rc != 0:
+        say(f"  ! evaluation failed (exit {rc})")
+        return None
+    return quick_score(run, since=t - 1)
+
+
+def _weights_time(run):
+    ts = [os.path.getmtime(os.path.join(run, n)) for n in WEIGHT_FILES if os.path.exists(os.path.join(run, n))]
+    return max(ts) if ts else 0
+
+
+def learn(run, min_docs, passes, gate=True, max_drop=5.0, c=None, run_id=None):
+    """Teach the model the waiting articles. With gate=True a quick evaluation runs after
+    learning, and if the score fell by more than max_drop points the old weights are restored."""
     n = pending_count()
     if n < min_docs:
         say(f"{n} new article(s) waiting to be learned; training starts at {min_docs}.")
         return None
+    if studio_busy():
+        say("The Studio is running another job; the articles wait for the next run.")
+        return None
+    stale = os.path.join(run, "_before_learn")
+    if os.path.isdir(stale):  # a previous learn step was killed before it was decided: undo it
+        say("a previous learn step never finished (power cut or kill): restoring the weights from before it")
+        reject_evals(run, os.path.getmtime(stale))
+        restore_weights(run, stale)
+    before = quick_score(run, since=_weights_time(run)) if gate else None
+    if gate and before is None:
+        say("No quick check of the current weights yet, so one runs first (the baseline).")
+        before = evaluate_quick(run)
     say(f"== teaching {os.path.basename(run)} {n} new article(s)")
-    batch = PENDING + f".{int(time.time())}.learning"
+    with job_lock():
+        verdict, after = _learn_checked(run, passes, gate, max_drop, before)
+    if c is not None and run_id is not None:
+        c.execute("UPDATE runs SET score_before=?, score_after=?, verdict=? WHERE id=?", (before, after, verdict, run_id))
+        c.commit()
+    return os.path.basename(run) + ("" if verdict in ("learned", "kept") else f" ({verdict})")
+
+
+def _learn_checked(run, passes, gate, max_drop, before):
+    """Train, then (with the gate) evaluate and maybe undo. The article batch and the weight backup
+    stay until the whole step is decided, so a Stop or crash anywhere in it restores the old weights
+    and requeues the articles."""
+    import shutil
+
+    started = time.time()
+    bk = backup_weights(run) if gate else None
+    batch = PENDING + f".{int(started)}.learning"
     os.replace(PENDING, batch)  # new articles found while training go to a fresh pending.txt
+
+    def undo(reason):
+        _requeue(batch)
+        if bk and os.path.isdir(bk):
+            say("restoring the weights from before this learn step")
+            restore_weights(run, bk)
+            reject_evals(run, started)
+        raise SystemExit(f"{reason}; the articles stay queued for the next run")
+
     try:
         rc = run_child([sys.executable, "learn.py", "--run", run, "--text-file", batch, "--passes", str(passes)], ROOT)
     except KeyboardInterrupt:
         rc = 130
     if rc != 0:
-        # put the batch back in front of anything new, so nothing is lost
-        rest = open(PENDING, encoding="utf-8").read() if os.path.exists(PENDING) else ""
-        with open(PENDING, "w", encoding="utf-8") as f:
-            f.write(open(batch, encoding="utf-8").read() + rest)
+        undo("training stopped" if rc == 130 else f"training failed (exit {rc})")
+    if not gate:
         os.remove(batch)
-        raise SystemExit(f"training {'stopped' if rc == 130 else f'failed (exit {rc})'}; "
-                         "the articles stay queued for the next run")
+        return "learned", None
+    try:
+        after = evaluate_quick(run)
+    except (KeyboardInterrupt, Exception) as e:
+        undo("stopped during the quick check" if isinstance(e, KeyboardInterrupt) else f"quick check failed ({e})")
+    verdict = "kept"
+    if before is not None and after is not None:
+        say(f"== quick-check score {before} → {after}")
+        if after < before - max_drop:
+            say(f"  the model got worse by more than {max_drop} points: undoing this learn step "
+                "(the articles stay in the corpus but are not retried)")
+            restore_weights(run, bk)
+            reject_evals(run, started)  # the score of the undone weights must not become the next baseline
+            verdict = "rolled back"
+    else:
+        say("  no comparable scores, keeping the new weights")
+    shutil.rmtree(bk, ignore_errors=True)
     os.remove(batch)
-    return os.path.basename(run)
+    return verdict, after
+
+
+# ---------------------------------------------------------------- locks and the OS schedule
+def _alive(pid):
+    if not pid:
+        return False
+    if os.name == "nt":
+        import ctypes
+
+        h = ctypes.windll.kernel32.OpenProcess(0x1000, False, int(pid))  # PROCESS_QUERY_LIMITED_INFORMATION
+        if not h:
+            return False
+        try:
+            code = ctypes.c_ulong()
+            ctypes.windll.kernel32.GetExitCodeProcess(h, ctypes.byref(code))
+            return code.value == 259  # STILL_ACTIVE
+        finally:
+            ctypes.windll.kernel32.CloseHandle(h)
+    try:
+        os.kill(int(pid), 0)
+        return True
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        return True
+
+
+def _read_lock(path):
+    try:
+        return json.load(open(path))
+    except (OSError, ValueError):
+        return None
+
+
+def crawl_lock_info():
+    info = _read_lock(LOCK)
+    return info if info and _alive(info.get("pid")) else None
+
+
+def take_lock():
+    os.makedirs(STATE, exist_ok=True)
+    other = crawl_lock_info()
+    if other and other["pid"] != os.getpid():
+        raise SystemExit(f"another crawl is already running (pid {other['pid']}, started "
+                         f"{time.strftime('%H:%M', time.localtime(other['started']))}); nothing to do")
+    json.dump({"pid": os.getpid(), "started": time.time()}, open(LOCK, "w"))
+
+
+def release_lock():
+    try:
+        os.remove(LOCK)
+    except OSError:
+        pass
+
+
+def studio_busy():
+    """True when the Studio is running a job other than this crawl (so training must wait)."""
+    info = _read_lock(JOB_LOCK)
+    if not info or not _alive(info.get("pid")):
+        return False
+    return info["pid"] not in (os.getpid(), os.getppid())
+
+
+class job_lock:
+    """Hold runs/_job.lock while this crawl trains, so the Studio refuses to start a second job on
+    the same model. When the Studio itself started this crawl, the lock is already ours."""
+
+    def __enter__(self):
+        info = _read_lock(JOB_LOCK)
+        self.mine = not (info and _alive(info.get("pid")) and info["pid"] in (os.getpid(), os.getppid()))
+        if self.mine:
+            os.makedirs(os.path.dirname(JOB_LOCK), exist_ok=True)
+            json.dump({"pid": os.getpid(), "kind": "crawl", "name": "news & web (scheduled)", "started": time.time()},
+                      open(JOB_LOCK, "w"))
+        return self
+
+    def __exit__(self, *exc):
+        if self.mine:
+            try:
+                os.remove(JOB_LOCK)
+            except OSError:
+                pass
+
+
+def crawl_command(learn=None, min_docs=20, passes=2, languages="", gate=True):
+    cmd = [sys.executable, os.path.join(ROOT, "data", "crawl.py")]
+    if learn:
+        cmd += ["--learn", learn, "--min-docs", str(min_docs), "--passes", str(passes)]
+        if not gate:
+            cmd.append("--no-gate")
+    if languages:
+        cmd += ["--languages", languages]
+    return cmd
+
+
+def schedule_status():
+    """Is the crawl registered with the OS scheduler (runs without the Studio)?"""
+    try:
+        if os.name == "nt":
+            r = subprocess.run(["schtasks", "/Query", "/TN", TASK_NAME, "/FO", "LIST"], capture_output=True, text=True)
+            return {"installed": r.returncode == 0, "kind": "Task Scheduler", "detail": r.stdout.strip()[-400:] if r.returncode == 0 else ""}
+        r = subprocess.run(["crontab", "-l"], capture_output=True, text=True)
+        line = next((l for l in r.stdout.splitlines() if TASK_NAME in l), "")
+        return {"installed": bool(line), "kind": "cron", "detail": line}
+    except FileNotFoundError:
+        return {"installed": False, "kind": "none", "detail": "no scheduler found"}
+
+
+def install_schedule(every_hours=6, learn=None, min_docs=20, passes=2, languages="", gate=True):
+    """Register the crawl with Windows Task Scheduler or cron, so it runs when the Studio is closed."""
+    log = os.path.join(STATE, "log.txt")
+    os.makedirs(STATE, exist_ok=True)
+    cmd = crawl_command(learn, min_docs, passes, languages, gate)
+    q = lambda s: f'"{s}"' if " " in s or os.name == "nt" else s
+    hours = max(1, int(round(every_hours)))
+    if os.name == "nt":
+        tr = "cmd /c " + " ".join(q(c) for c in cmd) + f" >> {q(log)} 2>&1"
+        args = ["schtasks", "/Create", "/F", "/TN", TASK_NAME, "/SC", "HOURLY", "/MO", str(hours), "/TR", tr]
+        r = subprocess.run(args, capture_output=True, text=True)
+        if r.returncode != 0:
+            raise RuntimeError((r.stderr or r.stdout).strip() or "schtasks failed")
+        return f"Task Scheduler runs the crawl every {hours} h, also when the Studio is closed."
+    r = subprocess.run(["crontab", "-l"], capture_output=True, text=True)
+    lines = [l for l in (r.stdout.splitlines() if r.returncode == 0 else []) if TASK_NAME not in l]
+    sched = f"0 */{hours} * * *" if hours < 24 else "0 3 * * *"
+    lines.append(f"{sched} cd {q(ROOT)} && " + " ".join(q(c) for c in cmd) + f" >> {q(log)} 2>&1  # {TASK_NAME}")
+    r = subprocess.run(["crontab", "-"], input="\n".join(lines) + "\n", capture_output=True, text=True)
+    if r.returncode != 0:
+        raise RuntimeError((r.stderr or r.stdout).strip() or "crontab failed")
+    return f"cron runs the crawl every {hours} h, also when the Studio is closed."
+
+
+def uninstall_schedule():
+    if os.name == "nt":
+        r = subprocess.run(["schtasks", "/Delete", "/F", "/TN", TASK_NAME], capture_output=True, text=True)
+        if r.returncode != 0 and "cannot find" not in (r.stderr + r.stdout).lower():
+            raise RuntimeError((r.stderr or r.stdout).strip())
+        return "Removed from Task Scheduler."
+    r = subprocess.run(["crontab", "-l"], capture_output=True, text=True)
+    lines = [l for l in (r.stdout.splitlines() if r.returncode == 0 else []) if TASK_NAME not in l]
+    subprocess.run(["crontab", "-"], input="\n".join(lines) + ("\n" if lines else ""), capture_output=True, text=True)
+    return "Removed from cron."
 
 
 def recover_batches():
@@ -593,8 +902,19 @@ def recover_batches():
             os.remove(p)
 
 
-def crawl(only=None, delay=3.0, min_chars=600, learn_run=None, min_docs=20, passes=2):
+def crawl(only=None, delay=3.0, min_chars=600, learn_run=None, min_docs=20, passes=2, languages=(),
+          gate=True, max_drop=5.0):
+    take_lock()
+    try:
+        return _crawl(only, delay, min_chars, learn_run, min_docs, passes, tuple(languages), gate, max_drop)
+    finally:
+        release_lock()
+
+
+def _crawl(only, delay, min_chars, learn_run, min_docs, passes, languages, gate, max_drop):
     recover_batches()
+    if languages:
+        say("keeping only: " + ", ".join(langmod.name(l) for l in languages))
     srcs = [s for s in load_sources() if allowed(s) and (not only or s["id"] in only)]
     skipped = [s["name"] for s in load_sources() if s.get("enabled") and not allowed(s)]
     if skipped:
@@ -614,7 +934,7 @@ def crawl(only=None, delay=3.0, min_chars=600, learn_run=None, min_docs=20, pass
                 raise
             except Exception as e:
                 say(f"  ! could not read the source: {type(e).__name__}: {str(e)[:150]}")
-            a, b = fetch_items(f, c, s, min_chars, s.get("max_items", 30))
+            a, b = fetch_items(f, c, s, min_chars, s.get("max_items", 30), languages)
             added, failed = added + a, failed + b
             c.execute("UPDATE runs SET added=?, failed=? WHERE id=?", (added, failed, run_id))
             c.commit()
@@ -628,7 +948,7 @@ def crawl(only=None, delay=3.0, min_chars=600, learn_run=None, min_docs=20, pass
     learned = None
     try:
         if learn_run:
-            learned = learn(learn_run, min_docs, passes)
+            learned = learn(learn_run, min_docs, passes, gate, max_drop, c, run_id)
     finally:
         c.execute("UPDATE runs SET ended=?, learned=? WHERE id=?", (time.time(), learned, run_id))
         c.commit()
@@ -638,6 +958,7 @@ def crawl(only=None, delay=3.0, min_chars=600, learn_run=None, min_docs=20, pass
 
 
 def main():
+    graceful.install()
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--source", nargs="*", help="only these source ids")
     ap.add_argument("--delay", type=float, default=3.0, help="seconds between requests to one site")
@@ -645,6 +966,12 @@ def main():
     ap.add_argument("--learn", help="runs/<name>: teach this model the new articles afterwards")
     ap.add_argument("--min-docs", type=int, default=20, help="only train once this many new articles are waiting")
     ap.add_argument("--passes", type=float, default=2)
+    ap.add_argument("--languages", default="", help="keep only these languages, e.g. en,hy (default: all)")
+    ap.add_argument("--no-gate", action="store_true", help="don't run a quick check after learning / never undo")
+    ap.add_argument("--max-drop", type=float, default=5.0, help="undo the learn step if the score falls by more")
+    ap.add_argument("--install-schedule", type=float, metavar="HOURS",
+                    help="register with Task Scheduler (Windows) or cron so the crawl runs when the Studio is closed")
+    ap.add_argument("--uninstall-schedule", action="store_true")
     ap.add_argument("--list", action="store_true", help="show the sources and exit")
     ap.add_argument("--add", metavar="URL", help="add a source")
     ap.add_argument("--name")
@@ -657,11 +984,20 @@ def main():
                         "rights_confirmed": a.i_have_rights})
         say(f"added {s['id']}")
         return
+    if a.install_schedule:
+        say(install_schedule(a.install_schedule, os.path.abspath(a.learn) if a.learn else None, a.min_docs, a.passes,
+                             a.languages, not a.no_gate))
+        return
+    if a.uninstall_schedule:
+        say(uninstall_schedule())
+        return
     if a.list:
         for s in load_sources():
             say(f"{'on ' if allowed(s) else 'off'}  {s['id']:<20} {s['kind']:<5} {LICENSES[s['license']]['label']:<22} {s['url']}")
         return
-    crawl(a.source, a.delay, a.min_chars, os.path.abspath(a.learn) if a.learn else None, a.min_docs, a.passes)
+    langs = [l.strip().lower() for l in a.languages.split(",") if l.strip()]
+    crawl(a.source, a.delay, a.min_chars, os.path.abspath(a.learn) if a.learn else None, a.min_docs, a.passes,
+          langs, not a.no_gate, a.max_drop)
 
 
 if __name__ == "__main__":

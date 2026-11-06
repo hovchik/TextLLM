@@ -3,6 +3,7 @@ tokenizers
 numpy
 tqdm
 requests
+pyarrow
 datasets
 transformers>=4.51
 peft

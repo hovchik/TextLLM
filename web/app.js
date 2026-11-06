@@ -225,7 +225,7 @@ pages.training = async (sub = "new") => {
   if (sub === "live") sub = "runs";
   main.innerHTML = `<div class="page">
     <div class="page-head"><div><h1>Training</h1><p>Prepare data, train new models, and teach existing models from your own files and links.</p></div>
-      <div class="tabs" id="ttabs">${[["new", "New model"], ["data", "Data"], ["texts", "Your texts"], ["news", "News & web"], ["runs", "Runs"]].map(([k, l]) => `<button data-k="${k}" class="${k === sub ? "on" : ""}">${l}</button>`).join("")}</div></div>
+      <div class="tabs" id="ttabs">${[["new", "New model"], ["data", "Data"], ["texts", "Your texts"], ["news", "News & web"], ["corpus", "Corpus"], ["runs", "Runs"]].map(([k, l]) => `<button data-k="${k}" class="${k === sub ? "on" : ""}">${l}</button>`).join("")}</div></div>
     <div id="tlive"></div><div id="tbody"></div></div>`;
   $$("#ttabs button").forEach((b) => (b.onclick = () => (location.hash = `#/training/${b.dataset.k}`)));
   await poll();
@@ -233,7 +233,7 @@ pages.training = async (sub = "new") => {
   const renderLive = (rs) => { $("#tlive").innerHTML = liveCard(rs.find((r) => r.running)); bindLive(); };
   renderLive(runsList);
   S.onStatus = async () => { const rs = await api("/api/runs").catch(() => []); renderLive(rs); if (sub === "runs") drawRuns(rs); };
-  ({ new: trainNew, data: trainData, texts: trainTexts, news: trainNews, runs: () => drawRuns(runsList) }[sub] || trainNew)();
+  ({ new: trainNew, data: trainData, texts: trainTexts, news: trainNews, corpus: trainCorpus, runs: () => drawRuns(runsList) }[sub] || trainNew)();
 };
 
 function trainNew() {
@@ -411,11 +411,19 @@ async function trainTexts() {
 const KIND_LABEL = { feed: "RSS / Atom feed", page: "Single page", links: "Page of links" };
 async function trainNews() {
   const [st, models] = await Promise.all([api("/api/crawler"), api("/api/models").catch(() => [])]);
-  const L = st.licenses, cs = st.settings, ss = st.stats;
+  const L = st.licenses, cs = st.settings, ss = st.stats, LN = st.language_names || {};
+  const langName = (c) => (c && c !== "?" ? LN[c] || c : "unknown");
   const licPill = (s) => { const l = L[s.license] || { label: s.license }; return `<span class="pill ${l.ok ? "good" : "warn"}" style="white-space:nowrap" title="${esc(l.note || "")}">${esc(l.label)}</span>`; };
   const okSrc = (s) => (L[s.license] || {}).ok || s.rights_confirmed;
+  const osSched = ss.schedule || {};
+  const verdictPill = (r) => {
+    if (!r.learned) return "";
+    const v = r.verdict || "learned";
+    const sc = r.score_before != null && r.score_after != null ? ` ${num(r.score_before, 0)} → ${num(r.score_after, 0)}` : "";
+    return `<span class="pill ${v === "rolled back" ? "warn" : "good"}" title="Quick-check score before → after learning">${v === "rolled back" ? "undone" : "learned"}${sc}</span>`;
+  };
   $("#tbody").innerHTML = `<div class="grid g3"><div class="span2" style="display:flex;flex-direction:column;gap:16px">
-    <div class="card"><div class="card-head"><h2>Sources</h2><span class="hint">${num(ss.total)} articles saved · ${num(ss.queued)} links queued · ${num(ss.pending)} not learned yet</span></div>
+    <div class="card"><div class="card-head"><h2>Sources</h2><span class="hint">${num(ss.total)} articles saved · ${num(ss.queued)} links queued · ${num(ss.pending)} not learned yet${ss.skipped_language ? ` · ${num(ss.skipped_language)} skipped (language)` : ""}</span></div>
       <div class="table-scroll"><table><thead><tr><th>On</th><th>Source</th><th>License</th><th>Saved</th><th>Last article</th><th></th></tr></thead><tbody>
       ${st.sources.map((s) => { const n = ss.sources[s.id] || {}; return `<tr data-sid="${esc(s.id)}">
         <td><label class="switch" style="display:inline-block"><input type="checkbox" data-on ${s.enabled ? "checked" : ""}><span></span></label></td>
@@ -434,19 +442,26 @@ async function trainNews() {
       </div>
       <div id="n-rights" hidden style="margin-top:10px" class="hint"><label class="row"><span class="switch"><input type="checkbox" id="n-ok"><span></span></span> <span>I own these texts or have the owner's permission to use them for training, and I take responsibility for it.</span></label></div>
       <div class="row end" style="margin-top:12px"><button class="btn primary" id="n-add">${I.plus} Add source</button></div></div>
-    <div class="card"><div class="card-head"><h2>Latest articles</h2></div>
-      ${ss.recent.length ? `<ul style="padding-left:18px;margin:0">${ss.recent.map((r) => `<li><a href="${esc(r.url)}" target="_blank" rel="noopener noreferrer"><u>${esc(r.title || r.url)}</u></a> <span class="hint">${esc(r.source)} · ${num(r.chars)} chars · ${ago(r.fetched)}</span></li>`).join("")}</ul>` : '<p class="muted">Nothing yet. Press "Run now".</p>'}</div>
+    <div class="card"><div class="card-head"><h2>Latest articles</h2>${Object.keys(ss.languages || {}).length ? `<span class="hint">${Object.entries(ss.languages).slice(0, 6).map(([k, v]) => `${esc(langName(k))} ${num(v)}`).join(" · ")}</span>` : ""}</div>
+      ${ss.recent.length ? `<ul style="padding-left:18px;margin:0">${ss.recent.map((r) => `<li><a href="${esc(r.url)}" target="_blank" rel="noopener noreferrer"><u>${esc(r.title || r.url)}</u></a> <span class="hint">${esc(r.source)} · ${esc(langName(r.lang))} · ${num(r.chars)} chars · ${ago(r.fetched)}</span></li>`).join("")}</ul>` : '<p class="muted">Nothing yet. Press "Run now".</p>'}</div>
+    <div class="card"><div class="card-head"><h2>Past runs</h2><span class="hint">score = quick check before → after learning; a drop of more than ${cs.crawl_max_drop} points is undone</span></div>
+      ${ss.runs.length ? `<div class="table-scroll"><table><thead><tr><th>Started</th><th>Took</th><th>Added</th><th>Failed</th><th>Learning</th></tr></thead><tbody>${ss.runs.map((r) => `<tr><td>${ago(r.started)}</td><td>${r.ended ? dur(r.ended - r.started) : '<span class="pill good">● running</span>'}</td><td>${num(r.added)}</td><td>${num(r.failed)}</td><td>${r.learned ? `<b>${esc(r.learned.split(" (")[0])}</b> ${verdictPill(r)}` : '<span class="muted">—</span>'}</td></tr>`).join("")}</tbody></table></div>` : '<p class="muted">No runs yet.</p>'}</div>
     <div class="card"><div class="card-head"><h2>Log</h2></div><pre class="console" id="nlog">${esc(st.log || "No crawl yet.")}</pre></div>
   </div>
   <div style="display:flex;flex-direction:column;gap:16px">
     <div class="card"><h2>Schedule</h2>
       <label class="row" style="margin-top:10px"><span class="switch"><input type="checkbox" id="c-on" ${cs.crawl_enabled ? "checked" : ""}><span></span></span> <b>Check sources automatically</b></label>
       <label class="field" style="margin-top:12px">Every (hours)<input class="input" id="c-every" type="number" min="0.25" step="0.25" value="${cs.crawl_every_hours}"></label>
+      <label class="field" style="margin-top:10px">Languages to keep<input class="input" id="c-langs" placeholder="all languages" value="${esc(cs.crawl_languages || "")}"><span class="hint">Codes separated by commas, e.g. <span class="mono">en, hy, ru</span>. Empty keeps every language.</span></label>
       <label class="field" style="margin-top:10px">Then teach this model<select class="input" id="c-model"><option value="">None: only save to the training data</option>${models.map((m) => `<option value="${esc(m.name)}" ${m.name === cs.crawl_learn_model ? "selected" : ""}>${esc(m.label)}</option>`).join("")}</select></label>
       <div class="grid g2" style="margin-top:10px"><label class="field">Train after (articles)<input class="input" id="c-min" type="number" min="1" value="${cs.crawl_min_docs}"></label>
         <label class="field">Read each (times)<input class="input" id="c-passes" type="number" min="0.5" max="10" step="0.5" value="${cs.crawl_passes}"></label></div>
-      <div class="hint" style="margin-top:8px">${cs.next ? `Next run ${cs.next < Date.now() / 1000 ? "as soon as no other job is running" : "in " + dur(cs.next - Date.now() / 1000)}.` : "Automatic checks are off."} Runs only while the Studio is open.</div>
+      <label class="row" style="margin-top:12px;align-items:flex-start"><span class="switch" style="margin-top:2px"><input type="checkbox" id="c-gate" ${cs.crawl_gate ? "checked" : ""}><span></span></span> <span><b>Check the model after learning</b><div class="hint">Quick check (8 prompts) before and after. If the score drops by more than <input class="input sm" id="c-drop" type="number" min="0" max="100" step="1" value="${cs.crawl_max_drop}" style="width:64px;display:inline-block;padding:2px 6px"> points, the learn step is undone.</div></span></label>
+      <div class="hint" style="margin-top:10px">${osSched.installed ? `Runs from ${esc(osSched.kind)}, also when the Studio is closed.` : cs.next ? `Next run ${cs.next < Date.now() / 1000 ? "as soon as no other job is running" : "in " + dur(cs.next - Date.now() / 1000)}. Runs only while the Studio is open.` : "Automatic checks are off."}</div>
       <div class="row end" style="margin-top:12px"><button class="btn" id="c-save">Save</button><button class="btn primary" id="c-run">${I.play} Run now</button></div></div>
+    <div class="card"><h2>When the Studio is closed</h2>
+      <p class="muted" style="margin:6px 0 10px">${osSched.installed ? `✓ Registered with <b>${esc(osSched.kind)}</b>: the crawl runs every ${Math.max(1, Math.round(cs.crawl_every_hours))} h even when this app isn't open, with the settings above as saved at that time.` : `Register the crawl with ${navigator.platform.startsWith("Win") ? "Windows Task Scheduler" : "cron"} so it runs every ${Math.max(1, Math.round(cs.crawl_every_hours))} h without the Studio. Save the settings first; they are baked into the task.`}</p>
+      <div class="row end">${osSched.installed ? `<button class="btn" id="c-os-off">Remove from ${esc(osSched.kind)}</button><button class="btn ghost sm" id="c-os-on" title="Apply the current settings to the task">Update</button>` : `<button class="btn primary" id="c-os-on">${I.clock} Run when closed</button>`}</div></div>
     <div class="card"><h2>Licenses matter</h2><ul class="muted" style="padding-left:18px">
       <li>Most news sites are <b>copyrighted</b>. This project only trains on public-domain or openly licensed text, so the built-in sources are Wikinews and Global Voices (CC BY) and NASA (US government, public domain).</li>
       <li>Sources marked <span class="pill warn">Copyrighted / unknown</span> or <span class="pill warn">I have the rights</span> are skipped until you confirm the rights. You are responsible for them.</li>
@@ -454,9 +469,9 @@ async function trainNews() {
       <li>Every article's link, title and license is kept in <span class="mono">data/raw/news/attribution.jsonl</span>, as CC BY requires.</li></ul></div>
     <div class="card"><h2>How it reads the web</h2><ul class="muted" style="padding-left:18px">
       <li>Obeys robots.txt and waits at least 3 seconds between requests to a site.</li>
-      <li>Skips duplicates and pages with almost no text.</li>
+      <li>Skips duplicates, pages with almost no text, and other languages when a filter is set.</li>
       <li>If the connection drops it resumes the download, and links it found stay queued for the next run.</li>
-      <li>New articles also go into <span class="mono">data/raw/news/</span> for your next full training.</li></ul></div>
+      <li>New articles also go into <span class="mono">data/raw/news/</span> for your next full training. Ask the model about them in Chat with the format <b>About today's news</b>.</li></ul></div>
   </div></div>`;
   const refresh = () => trainNews();
   const toggleRights = () => ($("#n-rights").hidden = !!(L[$("#n-lic").value] || {}).ok);
@@ -472,11 +487,47 @@ async function trainNews() {
     $("[data-on]", tr).onchange = async (e) => { try { await api(`/api/crawler/sources/${sid}`, { method: "PATCH", json: { enabled: e.target.checked } }); } catch (x) { fail(x); refresh(); } };
     $("[data-del]", tr).onclick = async () => { if (!confirm("Remove this source? Articles already saved stay in the training data.")) return; try { await api(`/api/crawler/sources/${sid}`, { method: "DELETE" }); refresh(); } catch (x) { fail(x); } };
   });
-  const settings = () => ({ enabled: $("#c-on").checked, every_hours: +$("#c-every").value, learn_model: $("#c-model").value, min_docs: +$("#c-min").value, passes: +$("#c-passes").value });
+  const settings = () => ({ enabled: $("#c-on").checked, every_hours: +$("#c-every").value, learn_model: $("#c-model").value, min_docs: +$("#c-min").value, passes: +$("#c-passes").value, languages: $("#c-langs").value, gate: $("#c-gate").checked, max_drop: +$("#c-drop").value });
   $("#c-save").onclick = async () => { try { await api("/api/crawler/settings", { json: settings() }); toast("Saved", "ok"); refresh(); } catch (e) { fail(e); } };
   $("#c-run").onclick = async () => { try { await api("/api/crawler/settings", { json: settings() }); await api("/api/crawler/run", { method: "POST" }); toast("Reading the sources…", "ok"); poll(); } catch (e) { fail(e); } };
+  const os = (install) => async () => { try { await api("/api/crawler/settings", { json: settings() }); const r = await api(`/api/crawler/schedule?install=${install}`, { method: "POST" }); toast(esc(r.message), "ok"); refresh(); } catch (e) { fail(e); } };
+  if ($("#c-os-on")) $("#c-os-on").onclick = os(true);
+  if ($("#c-os-off")) $("#c-os-off").onclick = os(false);
   const prev = S.onStatus;
   S.onStatus = (s) => { prev && prev(s); const l = $("#nlog"); if (l && s.job && s.job.kind === "crawl") { l.textContent = s.job.log; l.scrollTop = 1e9; } };
+}
+
+// ---------------------------------------------------------------- corpus
+async function trainCorpus() {
+  let c;
+  try { c = await api("/api/corpus"); } catch (e) { return fail(e); }
+  $("#tbody").innerHTML = `<div class="grid g3"><div class="card span2"><div class="card-head"><h2>What the models learn from</h2><span class="hint">${num(c.total_mb)} MB of text in data/raw · ${c.encoded ? num(c.encoded / 1e6, 1) + "M tokens encoded" : "not encoded yet"}</span></div>
+    ${c.sources.length ? `<div class="table-scroll"><table><thead><tr><th>Source</th><th>Files</th><th>Size</th><th>Documents</th><th>≈ Tokens</th><th>Updated</th><th></th></tr></thead><tbody>
+      ${c.sources.map((s) => `<tr data-src="${esc(s.source)}"><td><b>${esc(s.source)}</b>${s.note ? `<div class="hint">${esc(s.note)}</div>` : ""}</td><td>${num(s.files)}</td><td>${num(s.mb, 1)} MB</td><td>${s.docs_approx ? "≈ " : ""}${num(s.docs)}</td><td>${num(s.tokens_est / 1e6, 1)}M</td><td class="muted">${ago(s.updated)}</td>
+        <td style="white-space:nowrap"><button class="btn sm" data-sample title="Show a few random documents">Sample</button> <button class="btn sm ghost danger" data-del title="Delete this folder">${I.trash}</button></td></tr>`).join("")}
+    </tbody></table></div>` : '<p class="muted">No text yet. Download books under Data, add your own under Your texts, or collect articles under News & web.</p>'}
+    <div id="samples" style="margin-top:12px"></div></div>
+    <div class="card"><h2>Good to know</h2><ul class="muted" style="padding-left:18px">
+      <li>Each source is a folder under <span class="mono">data/raw/</span>. Training reads all of them.</li>
+      <li>After deleting a source, run <b>Build the tokenizer</b> and <b>Encode the corpus</b> again (Data tab) so the change reaches from-scratch training. Fine-tuning reads the folders directly.</li>
+      <li>Deleting a news source's folder also lets the crawler fetch those articles again.</li>
+      <li>Models already trained keep what they learned; deleting text does not untrain them.</li></ul></div></div>`;
+  $$("tr[data-src]").forEach((tr) => {
+    const src = tr.dataset.src;
+    $("[data-sample]", tr).onclick = async () => {
+      const box = $("#samples");
+      box.innerHTML = '<div class="hint">Reading…</div>';
+      try {
+        const r = await api(`/api/corpus/sample?source=${encodeURIComponent(src)}&n=3`);
+        box.innerHTML = `<div class="card-head"><h2 style="font-size:15px">Samples from ${esc(src)}</h2><button class="btn ghost sm" id="samples-close">✕</button></div>` + (r.samples.length ? r.samples.map((s) => `<div class="hint mono" style="margin-top:8px">${esc(s.file)} · ${num(s.chars)} chars</div><pre class="console" style="max-height:200px;white-space:pre-wrap">${esc(s.text)}${s.chars > s.text.length ? " …" : ""}</pre>`).join("") : '<p class="muted">Empty.</p>');
+        $("#samples-close").onclick = () => (box.innerHTML = "");
+      } catch (e) { box.innerHTML = ""; fail(e); }
+    };
+    $("[data-del]", tr).onclick = async () => {
+      if (!confirm(`Delete the folder data/raw/${src} and all its text?\n\nThis cannot be undone. Models already trained keep what they learned.`)) return;
+      try { const r = await api(`/api/corpus/${src}`, { method: "DELETE" }); toast(esc(r.note), "ok"); trainCorpus(); } catch (e) { fail(e); }
+    };
+  });
 }
 
 const IMPORT_BAR = `<div class="row" style="justify-content:space-between;margin-bottom:12px"><span class="hint">Moving from another PC? Export the model there (open it → Export), then import the .zip here and press Resume.</span>
@@ -577,6 +628,7 @@ const SUGGEST = [
   ["LinkedIn post", "I trained my own language model on public-domain books", "linkedin_post"],
   ["Essay", "Why reading old books still matters", "essay"],
   ["X post", "Our small bakery now opens at 7am on weekdays", "x_post"],
+  ["Today's news", "What happened in space exploration this week?", "news"],
 ];
 // temp/max: null = use the chosen format's defaults (writing/formats.json)
 const C = { conv: null, models: [], busy: false, temp: null, max: null, prefsFor: null, formats: [], format: "free", fields: {} };
@@ -677,9 +729,11 @@ const userHtml = (u) => {
 };
 const checkPill = (score) => score == null ? "" : `<span class="pill ${score >= 100 ? "good" : score >= 70 ? "" : "warn"}" title="Automatic format checks: length, hashtags, hook, repetition">checks ${Math.round(score)}%</span>`;
 const fmtBody = (t) => esc(t).split(/\n{2,}/).map((p) => `<p>${p}</p>`).join("");
+const sourcesHtml = (list) => !list ? "" : list.length ? `<div class="hint" style="margin-top:6px">Based on: ${list.map((x) => `<a href="${esc(x.url)}" target="_blank" rel="noopener noreferrer" title="${esc(x.source)}"><u>${esc(x.title)}</u></a>`).join(" · ")}</div>` : '<div class="hint" style="margin-top:6px">No recent articles collected yet · <a href="#/training/news"><u>News & web</u></a></div>';
 function answerHtml(a, alt = "") {
+  const fl = a.fields ? (() => { try { return JSON.parse(a.fields); } catch { return {}; } })() : {};
   return `<div class="msg" data-mid="${a.id}" data-uid="${a.prompt_id}"><div class="avatar">${I.logo}</div><div class="answer">
-    ${alt ? `<div class="alt">${alt}</div>` : ""}<div class="body">${fmtBody(a.content)}</div>
+    ${alt ? `<div class="alt">${alt}</div>` : ""}<div class="body">${fmtBody(a.content)}</div>${sourcesHtml(fl.sources)}
     ${a.correction ? `<div class="correction"><b>Your better answer · the model learns from this</b>${esc(a.correction)}</div>` : ""}
     <div class="actions"><span class="stars" title="Rate this answer">${[1, 2, 3, 4, 5].map((n) => `<button data-r="${n}" class="${a.rating >= n ? "on" : ""}" title="${["Bad", "Weak", "OK", "Good", "Great"][n - 1]}">${I.star}</button>`).join("")}</span>
       <button class="act" data-act="improve">${I.edit} Improve</button><button class="act" data-act="regen">${I.redo} Try again</button><button class="act" data-act="copy">${I.copy} Copy</button>
@@ -748,7 +802,7 @@ async function send(regenUid) {
   }
   const holder = document.createElement("div");
   holder.className = "msg";
-  holder.innerHTML = `<div class="avatar">${I.logo}</div><div class="answer"><div class="hint" data-live-status></div><details class="outline" hidden><summary>Plan</summary><pre></pre></details><div class="body cursor"></div></div>`;
+  holder.innerHTML = `<div class="avatar">${I.logo}</div><div class="answer"><div class="hint" data-live-status></div><details class="outline" hidden><summary>Plan</summary><pre></pre></details><div class="body cursor"></div><div class="sources"></div></div>`;
   if (regenUid) {
     const sibs = $$(`.msg[data-uid="${regenUid}"]`);
     sibs[sibs.length - 1].after(holder);
@@ -771,6 +825,7 @@ async function send(regenUid) {
         if (ev.type === "start") { if (!C.conv) { C.conv = ev.conversation_id; drawConvs(); } }
         if (ev.type === "text") { full = ev.text; body.innerHTML = fmtBody(full); const m = $("#msgs"); if (m.scrollHeight - m.scrollTop - m.clientHeight < 120) m.scrollTop = 1e9; }
         if (ev.type === "status") $("[data-live-status]", holder).textContent = ev.text;
+        if (ev.type === "sources") $(".sources", holder).innerHTML = sourcesHtml(ev.sources);
         if (ev.type === "outline") { const o = $(".outline", holder); o.hidden = false; $("pre", o).textContent = ev.text; $("[data-live-status]", holder).textContent = "Writing from the plan…"; }
         if (ev.type === "check") $("[data-live-status]", holder).innerHTML = checkPill(ev.check.score);
         if (ev.type === "error") toast(esc(ev.error), "err");

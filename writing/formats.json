@@ -72,6 +72,15 @@
       "candidates": 2,
       "sampling": {"temperature": 0.85, "top_p": 0.95, "top_k": 20, "presence_penalty": 1.0, "max_tokens": 300}
     },
+    "news": {
+      "label": "About today's news",
+      "group": "News",
+      "context": "news",
+      "system": "You write about current events from the articles given in the request. Rules:\n- Use only facts from those articles; never invent names, numbers or quotes.\n- Name the source of each fact in brackets, e.g. (Wikinews).\n- Clear, neutral language; short paragraphs.\n- If the articles don't cover the request, say so in one line and write what they do cover.\n- Output only the text.",
+      "fields": ["days", "tone", "audience"],
+      "steps": "single",
+      "sampling": {"temperature": 0.6, "top_p": 0.9, "top_k": 40, "presence_penalty": 0.8, "max_tokens": 600}
+    },
     "story": {
       "label": "Short story",
       "group": "Long form",
@@ -105,6 +114,7 @@
     "setting": "Setting",
     "length": "Length (words)",
     "ending": "Ending",
-    "stance": "Stance"
+    "stance": "Stance",
+    "days": "Look back (days)"
   }
 }

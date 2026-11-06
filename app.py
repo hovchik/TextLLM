@@ -7,7 +7,7 @@
 Sign-in is required. The first visit creates the admin account; admins add more people on the
 Users page (or with `python -m studio.auth add NAME`). Regular users only see Chat and Settings.
 """
-import argparse, json, os, re, shutil, threading, time
+import argparse, glob, json, os, re, shutil, threading, time
 
 from fastapi import FastAPI, File, Form, HTTPException, Request, Response, UploadFile
 from fastapi.responses import FileResponse, JSONResponse, StreamingResponse
@@ -565,12 +565,17 @@ def chat(r: ChatReq, request: Request):
         uid = db.add_message(cid, "user", text, fmt=fmt, fields=fields)
     hist = db.history(cid, before_id=uid)
     samp = {"temperature": r.temperature, "max_tokens": r.max_tokens}
+    model_text, sources = text, None
+    if F.get(fmt).get("context") == "news":  # "Write about today's news": recent articles go into the prompt
+        model_text, sources = with_news(text, fields)
 
     def gen():
         yield json.dumps({"type": "start", "conversation_id": cid, "user_id": uid, "format": fmt}) + "\n"
+        if sources is not None:
+            yield json.dumps({"type": "sources", "sources": sources}) + "\n"
         full, score = "", None
         try:
-            for ev in eng.write(fmt, text, fields, hist, samp):
+            for ev in eng.write(fmt, model_text, fields, hist, samp):
                 if ev["type"] == "text":
                     full = ev["text"]
                     yield json.dumps({"type": "text", "text": full}) + "\n"
@@ -583,10 +588,27 @@ def chat(r: ChatReq, request: Request):
             yield json.dumps({"type": "error", "error": str(e)}) + "\n"
         finally:  # also runs if the browser stops the stream: keep what was written
             mid = db.add_message(cid, "assistant", full.strip() or "…", model=r.model, prompt_id=uid,
-                                 fmt=fmt, check_score=score)
+                                 fmt=fmt, check_score=score, fields={"sources": sources} if sources else None)
         yield json.dumps({"type": "done", "message_id": mid}) + "\n"
 
     return StreamingResponse(gen(), media_type="application/x-ndjson")
+
+
+def with_news(text, fields):
+    """Append the most relevant recent crawled articles to the request. Returns (prompt, sources)."""
+    days = 7
+    try:
+        days = max(1, min(90, int(re.sub(r"[^\d]", "", str((fields or {}).get("days", "")) or "7") or 7)))
+    except ValueError:
+        pass
+    arts = crawl.recent_articles(text, n=5, days=days)
+    if not arts:
+        return text + "\n\n(No recent articles have been collected yet. Say so briefly and write what you can.)", []
+    lines = [text.strip(), "", f"Recent articles (last {days} days):"]
+    for i, a in enumerate(arts, 1):
+        when = (a.get("published") or "")[:10] or time.strftime("%Y-%m-%d", time.localtime(a["fetched"]))
+        lines.append(f"{i}. {a['title'] or a['url']} ({a['source_name']}, {when})\n{a['excerpt'][:900].strip()}")
+    return "\n".join(lines), [{"title": a["title"] or a["url"], "url": a["url"], "source": a["source_name"]} for a in arts]
 
 
 # ---------------------------------------------------------------- feedback
@@ -664,21 +686,135 @@ def settings(r: SettingsReq):
     return db.set_settings(**{k: v for k, v in r.model_dump().items() if v is not None})
 
 
+# ---------------------------------------------------------------- corpus
+RAW = os.path.join(ROOT, "data", "raw")
+EOT = "<|endoftext|>"
+SOURCE_NOTES = {
+    "gutenberg": "Project Gutenberg books (public domain)", "fineweb": "FineWeb-Edu web text (ODC-By)",
+    "custom": "Your own files and links", "news": "News & web crawler", "pg19": "PG-19 books (Apache 2.0)",
+    "standard_ebooks": "Standard Ebooks (CC0)", "common_corpus": "Common Corpus, Open Culture (public domain)",
+    "archive": "Internet Archive books (public domain)", "cosmopedia": "Cosmopedia (Apache 2.0)",
+}
+
+
+def corpus_dir(source):
+    """data/raw/<source> (one folder level, or news/<id>); refuses anything outside data/raw."""
+    rel = os.path.normpath(source.strip().replace("\\", "/"))
+    d = os.path.normpath(os.path.join(RAW, rel))
+    if not rel or rel.startswith("..") or os.path.isabs(rel) or not d.startswith(RAW + os.sep) or not os.path.isdir(d):
+        err(f"no corpus folder named {source}", 404)
+    return d
+
+
+def _shards(d):
+    return sorted(glob.glob(os.path.join(d, "**", "*.txt"), recursive=True))
+
+
+def _count_docs(files, limit_bytes=200_000_000):
+    """Documents (EOT-separated) in the shards; big folders are sampled and scaled."""
+    total = sum(os.path.getsize(f) for f in files)
+    docs, read = 0, 0
+    for f in files:
+        with open(f, "rb") as fh:
+            while True:
+                chunk = fh.read(1 << 20)
+                if not chunk:
+                    break
+                docs += chunk.count(EOT.encode())
+                read += len(chunk)
+        if read > limit_bytes:
+            return int(docs * total / read), True
+    return docs, False
+
+
+@app.get("/api/corpus")
+def corpus_list():
+    out = []
+    if not os.path.isdir(RAW):
+        return {"sources": out, "total_mb": 0}
+    for name in sorted(os.listdir(RAW)):
+        d = os.path.join(RAW, name)
+        if not os.path.isdir(d):
+            continue
+        groups = [(name, d)]
+        if name == "news":  # one row per crawler source
+            groups = [(f"news/{s}", os.path.join(d, s)) for s in sorted(os.listdir(d)) if os.path.isdir(os.path.join(d, s))]
+        for key, folder in groups:
+            files = _shards(folder)
+            size = sum(os.path.getsize(f) for f in files)
+            docs, approx = _count_docs(files) if files else (0, False)
+            out.append({"source": key, "note": SOURCE_NOTES.get(name, ""), "files": len(files), "mb": round(size / 1e6, 1),
+                        "docs": docs, "docs_approx": approx, "tokens_est": size // 4,
+                        "updated": max((os.path.getmtime(f) for f in files), default=os.path.getmtime(folder))})
+    return {"sources": out, "total_mb": round(sum(s["mb"] for s in out), 1),
+            "encoded": jobs.data_status()["train_tokens"]}
+
+
+@app.get("/api/corpus/sample")
+def corpus_sample(source: str, n: int = 3):
+    """A few random documents (their first 700 characters) from a corpus folder."""
+    import random
+
+    files = _shards(corpus_dir(source))
+    if not files:
+        return {"samples": []}
+    samples = []
+    rng = random.Random()
+    for _ in range(max(1, min(10, n)) * 4):
+        f = rng.choice(files)
+        size = os.path.getsize(f)
+        with open(f, "rb") as fh:
+            fh.seek(rng.randrange(0, max(1, size - 50_000)) if size > 60_000 else 0)
+            blob = fh.read(60_000).decode("utf-8", "replace")
+        parts = [p.strip() for p in blob.split(EOT) if p.strip()]
+        if size > 60_000:
+            parts = parts[1:-1]  # the first and last pieces are cut mid-document
+        if parts:
+            doc = rng.choice(parts)
+            samples.append({"file": os.path.relpath(f, RAW).replace(os.sep, "/"), "text": doc[:700], "chars": len(doc)})
+        if len(samples) >= n:
+            break
+    return {"samples": samples}
+
+
+@app.delete("/api/corpus/{source:path}")
+def corpus_delete(source: str):
+    """Remove a corpus folder. The tokenizer and encoded data then need re-running."""
+    if jobs.running() and jobs.JOB["kind"] in ("data", "training", "texts", "crawl"):
+        err("Wait for the running job to finish first.", 409)
+    d = corpus_dir(source)
+    shutil.rmtree(d)
+    if source.startswith("news/"):  # the crawler would otherwise never fetch these again: forget them
+        try:
+            with crawl.db() as c:
+                c.execute("DELETE FROM hashes WHERE url IN (SELECT url FROM items WHERE source=?)", (source[5:],))
+                c.execute("DELETE FROM items WHERE source=?", (source[5:],))
+        except Exception:
+            pass
+    return {"ok": True, "note": "Re-run Build the tokenizer and Encode the corpus so the change reaches training."}
+
+
 # ---------------------------------------------------------------- news & web crawler
 CRAWL_LOG = os.path.join(RUNS, "_crawler", "log.txt")
 
 
 def crawl_cmd(s):
-    cmd = [PY, "data/crawl.py"]
     m = s.get("crawl_learn_model")
-    if m and os.path.isdir(os.path.join(RUNS, m)):
-        cmd += ["--learn", os.path.join(RUNS, m), "--min-docs", str(s["crawl_min_docs"]),
-                "--passes", str(s["crawl_passes"])]
+    if m and not os.path.isdir(os.path.join(RUNS, m)):
+        m = None
+    cmd = crawl.crawl_command(os.path.join(RUNS, m) if m else None, s["crawl_min_docs"], s["crawl_passes"],
+                              s.get("crawl_languages", ""), s.get("crawl_gate", True))
+    cmd[0] = PY
+    if m and s.get("crawl_max_drop", 5) != 5:
+        cmd += ["--max-drop", str(s["crawl_max_drop"])]
     return cmd, (m or None)
 
 
 def crawl_next(s):
-    return s["crawl_last_start"] + float(s["crawl_every_hours"]) * 3600 if s["crawl_enabled"] else None
+    """When the in-app scheduler runs next; None when off or when the OS scheduler does it."""
+    if not s["crawl_enabled"] or crawl.schedule_status()["installed"]:
+        return None
+    return s["crawl_last_start"] + float(s["crawl_every_hours"]) * 3600
 
 
 def start_crawl(s):
@@ -706,12 +842,20 @@ def _start_scheduler():
     threading.Thread(target=crawl_scheduler, daemon=True, name="crawl-scheduler").start()
 
 
+@app.on_event("shutdown")
+def _stop_job():
+    """Closing the Studio (Ctrl+C) stops the running job too; it keeps its last checkpoint."""
+    if jobs.running():
+        print("stopping the running job…", flush=True)
+        jobs.stop(grace=60)
+
+
 @app.get("/api/crawler")
 def crawler_state():
     s = db.get_settings()
     return {"sources": crawl.load_sources(), "licenses": crawl.LICENSES, "stats": crawl.stats(),
             "settings": {k: v for k, v in s.items() if k.startswith("crawl_")} | {"next": crawl_next(s)},
-            "log": jobs.tail(CRAWL_LOG, 150)}
+            "language_names": crawl.langmod.NAMES, "log": jobs.tail(CRAWL_LOG, 150)}
 
 
 class SourceReq(BaseModel):
@@ -758,6 +902,9 @@ class CrawlSettingsReq(BaseModel):
     learn_model: str | None = None   # "" = only add to the corpus
     min_docs: int | None = None
     passes: float | None = None
+    languages: str | None = None     # "en,hy"; "" = keep every language
+    gate: bool | None = None         # quick check after learning, undo if worse
+    max_drop: float | None = None
 
 
 @app.post("/api/crawler/settings")
@@ -771,8 +918,32 @@ def crawler_settings(r: CrawlSettingsReq):
         kw["crawl_min_docs"] = max(1, kw["crawl_min_docs"])
     if "crawl_passes" in kw:
         kw["crawl_passes"] = max(0.5, min(10, kw["crawl_passes"]))
+    if "crawl_languages" in kw:
+        kw["crawl_languages"] = ",".join(sorted({l.strip().lower() for l in re.split(r"[,\s]+", kw["crawl_languages"])
+                                                 if re.fullmatch(r"[a-z]{2,3}", l.strip().lower())}))
+    if "crawl_max_drop" in kw:
+        kw["crawl_max_drop"] = max(0, min(100, kw["crawl_max_drop"]))
     db.set_settings(**kw)
     return crawler_state()
+
+
+@app.post("/api/crawler/schedule")
+def crawler_os_schedule(install: bool = True):
+    """Register the crawl with Windows Task Scheduler / cron (runs when the Studio is closed), or remove it."""
+    s = db.get_settings()
+    try:
+        if install:
+            m = s.get("crawl_learn_model")
+            msg = crawl.install_schedule(s["crawl_every_hours"], os.path.join(RUNS, m) if m and os.path.isdir(os.path.join(RUNS, m)) else None,
+                                         s["crawl_min_docs"], s["crawl_passes"], s.get("crawl_languages", ""),
+                                         s.get("crawl_gate", True))
+        else:
+            msg = crawl.uninstall_schedule()
+    except FileNotFoundError:
+        err("No scheduler found on this computer (schtasks on Windows, crontab on Linux/macOS).")
+    except RuntimeError as e:
+        err(f"Could not change the schedule: {e}")
+    return {"message": msg, **crawler_state()}
 
 
 @app.post("/api/crawler/run")

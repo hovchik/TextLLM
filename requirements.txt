@@ -7,9 +7,10 @@ datasets
 transformers
 peft
 accelerate
-gradio
-pandas
 pypdf
 python-docx
 trafilatura
 beautifulsoup4
+fastapi
+uvicorn
+python-multipart

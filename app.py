@@ -247,6 +247,14 @@ class DataReq(BaseModel):
     step: str            # download | tokenizer | encode
     books: int = 3000
     web_gb: float = 0.3
+    # more rights-cleared sources, 0 = skip (see data/build_corpus.py for licenses)
+    gutenberg_method: str = "mirror"   # mirror | harvest
+    pg19_books: int = 0
+    standard_ebooks: int = 0
+    common_corpus_gb: float = 0
+    archive_books: int = 0
+    cosmopedia_gb: float = 0
+    cosmopedia_subsets: str = "stories"
     vocab: int = 8192
     hf_sets: bool = True
 
@@ -254,7 +262,13 @@ class DataReq(BaseModel):
 @app.post("/api/data")
 def data(r: DataReq):
     cmds = {
-        "download": [PY, "data/build_corpus.py", "--gutenberg-max", str(r.books), "--fineweb-gb", str(r.web_gb)],
+        "download": [PY, "data/build_corpus.py", "--gutenberg-max", str(r.books), "--fineweb-gb", str(r.web_gb),
+                     "--gutenberg-method", r.gutenberg_method if r.gutenberg_method in ("mirror", "harvest") else "mirror",
+                     "--pg19-books", str(max(0, r.pg19_books)), "--standard-ebooks", str(max(0, r.standard_ebooks)),
+                     "--common-corpus-gb", str(max(0.0, r.common_corpus_gb)),
+                     "--archive-books", str(max(0, r.archive_books)),
+                     "--cosmopedia-gb", str(max(0.0, r.cosmopedia_gb)),
+                     "--cosmopedia-subsets", re.sub(r"[^a-z0-9_,]", "", r.cosmopedia_subsets) or "stories"],
         "tokenizer": [PY, "tokenizer/train_tokenizer.py", "--vocab", str(r.vocab)],
         "encode": [PY, "tokenizer/train_tokenizer.py", "--encode"],
         # writing instructions for fine-tuning: posts, stories, essays (rights-cleared sources only)

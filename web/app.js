@@ -307,8 +307,26 @@ function trainData() {
   const d = S.status.data;
   $("#tbody").innerHTML = `<div class="grid g3"><div class="card span2"><div class="card-head"><h2>Prepare the training corpus</h2><span class="hint">Run the steps in order</span></div>
     <div class="steps">
-      <div class="step ${d.raw_files ? "done" : ""}"><div class="num">${d.raw_files ? "✓" : 1}</div><div><b>Download books and web text</b><div class="hint">${d.raw_files ? `${d.raw_files} files, ${num(d.raw_mb)} MB (${d.custom_files} of your own)` : "Public-domain books from Project Gutenberg plus openly licensed FineWeb-Edu articles"}</div>
-        <div class="row" style="margin-top:8px"><label class="field" style="width:140px">Books<input class="input" id="d-books" type="number" value="3000"></label><label class="field" style="width:160px">Web text (GB)<input class="input" id="d-web" type="number" step="0.1" value="0.3"></label></div></div>
+      <div class="step ${d.raw_files ? "done" : ""}"><div class="num">${d.raw_files ? "✓" : 1}</div><div><b>Download books and web text</b><div class="hint">${d.raw_files ? `${d.raw_files} files, ${num(d.raw_mb)} MB (${d.custom_files} of your own)` : "Public-domain books from Project Gutenberg plus openly licensed FineWeb-Edu articles. More book sources below."}</div>
+        <div class="row" style="margin-top:8px"><label class="field" style="width:140px">Books<input class="input" id="d-books" type="number" value="3000"></label><label class="field" style="width:160px">Web text (GB)<input class="input" id="d-web" type="number" step="0.1" value="0.3"></label></div>
+        <details class="more-src" style="margin-top:10px"><summary><b>More book sources</b> <span class="hint">all public domain or openly licensed, 0 = skip</span></summary>
+          <div class="row" style="margin-top:8px;flex-wrap:wrap">
+            <label class="field" style="width:200px">Gutenberg download<select class="input" id="d-gmethod"><option value="mirror">Mirror (catalog order)</option><option value="harvest">Robot harvest (official)</option></select></label>
+            <label class="field" style="width:160px">PG-19 books<input class="input" id="d-pg19" type="number" min="0" value="0"></label>
+            <label class="field" style="width:170px">Standard Ebooks<input class="input" id="d-se" type="number" min="0" value="0"></label>
+            <label class="field" style="width:190px">Common Corpus (GB)<input class="input" id="d-cc" type="number" min="0" step="0.1" value="0"></label>
+            <label class="field" style="width:190px">Internet Archive books<input class="input" id="d-ia" type="number" min="0" value="0"></label>
+            <label class="field" style="width:160px">Cosmopedia (GB)<input class="input" id="d-cosmo" type="number" min="0" step="0.1" value="0"></label>
+            <label class="field" style="width:220px">Cosmopedia part<select class="input" id="d-cosmosub"><option value="stories">Stories</option><option value="stories,wikihow">Stories + how-to guides</option><option value="openstax,khanacademy,stanford">Textbooks</option><option value="stories,wikihow,openstax,khanacademy,stanford,web_samples_v1,web_samples_v2">Everything except math</option></select></label>
+          </div>
+          <ul class="hint" style="padding-left:18px;margin:6px 0 0">
+            <li><b>PG-19</b>: 28,752 Gutenberg books from before 1919 (Apache 2.0). Books Gutenberg already saved are skipped.</li>
+            <li><b>Standard Ebooks</b>: about 1,400 carefully proofread classics (CC0), read from their GitHub pages.</li>
+            <li><b>Common Corpus</b>: only its "Open Culture" part, public-domain books and newspapers (OCR).</li>
+            <li><b>Internet Archive</b>: scanned books published before 1931 (OCR, noisier). Keep it small.</li>
+            <li><b>Cosmopedia</b>: synthetic stories and textbooks written by Mixtral (Apache 2.0).</li>
+            <li>Not offered: BookCorpus, BookCorpusOpen, The Pile and RedPajama books (copyrighted books), Open Library (no book text).</li>
+          </ul></details></div>
         <button class="btn" data-step="download">${I.play} Run</button></div>
       <div class="step ${d.tokenizer ? "done" : ""}"><div class="num">${d.tokenizer ? "✓" : 2}</div><div><b>Build the tokenizer</b><div class="hint">${d.tokenizer ? `${num(d.vocab)}-token vocabulary` : "Learns the word pieces the model reads and writes"}</div>
         <div class="row" style="margin-top:8px"><label class="field" style="width:200px">Vocabulary<select class="input" id="d-vocab"><option value="8192">8,192 (CPU)</option><option value="32000">32,000 (GPU)</option></select></label></div></div>
@@ -327,7 +345,7 @@ function trainData() {
     <div class="card" style="margin-top:16px"><div class="card-head"><h2>Log</h2></div><pre class="console" id="dlog">${esc(S.status.job.kind === "data" ? S.status.job.log : "No data job yet.")}</pre></div>`;
   $$("[data-step]").forEach((b) => (b.onclick = async () => {
     try {
-      await api("/api/data", { json: { step: b.dataset.step, books: +$("#d-books").value, web_gb: +$("#d-web").value, vocab: +$("#d-vocab").value, hf_sets: $("#d-hfsets").checked } });
+      await api("/api/data", { json: { step: b.dataset.step, books: +$("#d-books").value, web_gb: +$("#d-web").value, gutenberg_method: $("#d-gmethod").value, pg19_books: +$("#d-pg19").value, standard_ebooks: +$("#d-se").value, common_corpus_gb: +$("#d-cc").value, archive_books: +$("#d-ia").value, cosmopedia_gb: +$("#d-cosmo").value, cosmopedia_subsets: $("#d-cosmosub").value, vocab: +$("#d-vocab").value, hf_sets: $("#d-hfsets").checked } });
       toast("Started", "ok"); poll();
     } catch (e) { fail(e); }
   }));

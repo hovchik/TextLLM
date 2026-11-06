@@ -409,7 +409,8 @@ function wireImport() {
         if (nn.trim()) fd2.append("name", nn.trim()); else fd2.append("force", "true");
         r = await api("/api/runs/import", { method: "POST", body: fd2 });
       }
-      toast(`Imported <b>${esc(r.name)}</b>. Open it and press Resume to keep training.`, "ok");
+      const warn = (r.log || "").split("\n").filter((l) => /^(Note|Warning)/.test(l));
+      toast(`Imported <b>${esc(r.name)}</b>. Open it and press Resume to keep training.${warn.map((w) => "<br>" + esc(w)).join("")}`, warn.length ? "" : "ok");
       route(); setTimeout(() => openRun(r.name), 400);
     } catch (e) { fail(e); } finally { inp.value = ""; }
   };
@@ -460,7 +461,7 @@ async function openRun(name) {
         try { await api("/api/train", { json: { mode: s.type, name: s.name, resume: true, preset: s.preset || "cpu", base: s.base || undefined, steps: s.max_steps, vocab: S.status?.data?.vocab || 8192 } }); toast("Resumed", "ok"); load(); } catch (e) { fail(e); }
       });
       on("#r-export", () => {
-        const data = confirm(`Export ${s.name}.\n\nOK = also include the training data (bigger file; the other PC continues on exactly the same text).\nCancel = model only.`);
+        const data = s.type === "scratch" && confirm(`Export ${s.name}.\n\nOK = also include the training data (bigger file; the other PC continues on exactly the same text).\nCancel = model only.`);
         const link = document.createElement("a");
         link.href = `/api/runs/${encodeURIComponent(s.name)}/export${data ? "?data=true" : ""}`;
         link.download = ""; document.body.appendChild(link); link.click(); link.parentNode.removeChild(link);

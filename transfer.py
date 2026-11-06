@@ -11,12 +11,14 @@ then press Resume on the model's page in the Studio, or run the command that `im
 What goes in the bundle:
   * the whole run folder: weights (ckpt.pt or adapter/), optimizer state and step (ckpt.pt or
     train_state.pt), training settings (train_cmd.json), meta.json, charts (metrics*.jsonl),
-    eval history and the fast GGUF copy if there is one;
+    eval history and the fast GGUF copy if there is one. A fine-tune's folder also holds its
+    tokenized examples (examples.pt), so it always continues on exactly the same data;
   * from scratch: the tokenizer (as <run>/tokenizer.json). Its numbers must match the weights, so
     never train a new tokenizer for a moved model;
-  * --with-data: data/bin/train.bin + val.bin (from scratch) or data/instructions/ (fine-tune).
-    Without it, the new PC needs its own data/bin (built with the same tokenizer) to continue a
-    from-scratch run; a fine-tune rebuilds its examples from whatever data is there.
+  * --with-data (from scratch): the train.bin + val.bin the run trains on. On import they go into
+    the run's own folder (runs/<name>/data/bin) and the run is pointed at them, so they never mix
+    with other data on the new PC. Without it, the new PC needs its own data/bin encoded with the
+    same tokenizer.
 The fine-tune's base model (e.g. Qwen/Qwen3-0.6B) is not included: the new PC downloads it once.
 """
 import argparse, json, os, shutil, sys, tempfile, time, zipfile
@@ -51,18 +53,12 @@ def export(run_dir, out=None, with_data=False, log=print):
         from chat_engine import tokenizer_path
 
         files.append((tokenizer_path(run_dir, meta), "run/tokenizer.json"))
-    if with_data:
-        if meta["type"] == "scratch":
+    if with_data and meta["type"] == "scratch":
+        d = _data_dir(run_dir)
+        if os.path.commonpath([d, run_dir]) != run_dir:  # data inside the run folder is already packed
             for f in ("train.bin", "val.bin"):
-                p = os.path.join(ROOT, "data", "bin", f)
-                if os.path.exists(p):
-                    files.append((p, "data/bin/" + f))
-        else:
-            d = os.path.join(ROOT, "data", "instructions")
-            for dp, _, fns in os.walk(d):
-                for f in fns:
-                    p = os.path.join(dp, f)
-                    files.append((p, "data/instructions/" + os.path.relpath(p, d).replace(os.sep, "/")))
+                if os.path.exists(os.path.join(d, f)):
+                    files.append((os.path.join(d, f), "data/bin/" + f))
     manifest = {"format": FORMAT, "name": name, "type": meta["type"], "base": meta.get("base"),
                 "created": time.time(), "with_data": with_data}
     tmp = out + ".part"
@@ -76,6 +72,27 @@ def export(run_dir, out=None, with_data=False, log=print):
     os.replace(tmp, out)
     log(f"done: {out}")
     return out
+
+
+def _data_dir(run_dir):
+    """Where this from-scratch run reads train.bin/val.bin from (its --data, else data/bin)."""
+    cmd = _saved_cmd(run_dir) or []
+    d = next((cmd[i + 1] for i, c in enumerate(cmd[:-1]) if c == "--data"), "data/bin")
+    return os.path.abspath(os.path.join(ROOT, d))
+
+
+def _saved_cmd(run_dir):
+    p = os.path.join(run_dir, "train_cmd.json")
+    return json.load(open(p)) if os.path.exists(p) else None
+
+
+def _safe_target(base, parts):
+    """Join zip path parts under base, refusing anything that could land outside it
+    (.., absolute paths, drive letters, backslash tricks on Windows)."""
+    if not parts or any(p in ("", ".", "..") or "\\" in p or ":" in p for p in parts):
+        return None
+    target = os.path.abspath(os.path.join(base, *parts))
+    return target if os.path.commonpath([target, os.path.abspath(base)]) == os.path.abspath(base) else None
 
 
 def import_bundle(zip_path, name=None, force=False, log=print):
@@ -94,19 +111,22 @@ def import_bundle(zip_path, name=None, force=False, log=print):
         os.makedirs(RUNS, exist_ok=True)
         stage = tempfile.mkdtemp(prefix=f".{name}.", dir=RUNS)
         try:
+            has_data = False
             for info in z.infolist():
                 parts = info.filename.split("/")
-                if info.is_dir() or ".." in parts or info.filename.startswith("/") or ":" in parts[0]:
+                if info.is_dir():
                     continue
                 if parts[0] == "run":
-                    target = os.path.join(stage, *parts[1:])
-                elif parts[0] == "data" and len(parts) >= 3 and parts[1] in ("bin", "instructions"):
-                    target = os.path.join(ROOT, *parts)
-                    if os.path.exists(target) and not force:
-                        log(f"kept your existing {'/'.join(parts)} (use --force to replace it)")
-                        continue
+                    target = _safe_target(stage, parts[1:])
+                elif parts[:2] == ["data", "bin"] and len(parts) == 3:
+                    # into the run's own folder, never over this PC's data/bin (which may come
+                    # from a different tokenizer)
+                    target = _safe_target(os.path.join(stage, "data", "bin"), parts[2:])
+                    has_data = True
                 else:
                     continue
+                if target is None:
+                    raise SystemExit(f"refusing unsafe path in bundle: {info.filename!r}")
                 os.makedirs(os.path.dirname(target), exist_ok=True)
                 with z.open(info) as src, open(target + ".part", "wb") as dst:
                     shutil.copyfileobj(src, dst, 1 << 20)
@@ -116,15 +136,31 @@ def import_bundle(zip_path, name=None, force=False, log=print):
             if meta["type"] == "scratch":
                 meta["tok"] = "tokenizer.json"  # the run's own copy; the old PC's path means nothing here
                 json.dump(meta, open(meta_p, "w"))
+            cmd = _saved_cmd(stage)
+            if cmd is not None:
+                if "--out" in cmd:
+                    cmd[cmd.index("--out") + 1] = f"runs/{name}"
+                if has_data:
+                    rel = f"runs/{name}/data/bin"
+                    if "--data" in cmd:
+                        cmd[cmd.index("--data") + 1] = rel
+                    else:
+                        cmd[1:1] = ["--data", rel]
+                json.dump(cmd, open(os.path.join(stage, "train_cmd.json"), "w"))
             if os.path.exists(dest):
                 shutil.rmtree(dest)
             os.replace(stage, dest)
         finally:
             shutil.rmtree(stage, ignore_errors=True)
     log(f"imported as runs/{name}")
-    if manifest["type"] == "scratch" and not os.path.exists(os.path.join(ROOT, "data", "bin", "train.bin")):
-        log("note: to continue training, this PC needs data/bin/train.bin + val.bin. Export with "
-            "--with-data, or copy data/bin/ from the old PC (don't retrain the tokenizer).")
+    if manifest["type"] == "scratch" and not os.path.exists(os.path.join(_data_dir(dest), "train.bin")):
+        log("Note: to continue training, this PC needs the training data. Export again with the "
+            "training data included, or copy data/bin/ from the old PC (don't retrain the tokenizer).")
+    elif manifest["type"] == "scratch" and _data_dir(dest) == os.path.join(ROOT, "data", "bin"):
+        mine = os.path.join(ROOT, "tokenizer", "bpe.json")
+        if os.path.exists(mine) and open(mine, "rb").read() != open(os.path.join(dest, "tokenizer.json"), "rb").read():
+            log("Warning: this PC's data/bin was made with a different tokenizer than this model. "
+                "Export again with the training data included before resuming.")
     log("continue training: press Resume on the model's page in the Studio, or run\n  "
         + " ".join(resume_cmd(dest)))
     return name
@@ -157,11 +193,12 @@ def main():
     e = sub.add_parser("export", help="pack a run into one .zip")
     e.add_argument("--run", required=True, help="runs/<name>")
     e.add_argument("--out", help="zip file to write (default: <name>.textllm.zip here)")
-    e.add_argument("--with-data", action="store_true", help="include the training data too")
+    e.add_argument("--with-data", action="store_true",
+                   help="from scratch: include train.bin/val.bin (fine-tunes always carry their examples)")
     i = sub.add_parser("import", help="unpack a .zip made by export into runs/")
     i.add_argument("zip")
     i.add_argument("--name", help="save under this name instead of the original")
-    i.add_argument("--force", action="store_true", help="replace an existing run / data with the same name")
+    i.add_argument("--force", action="store_true", help="replace an existing run with the same name")
     a = ap.parse_args()
     if a.cmd == "export":
         export(a.run, a.out, a.with_data)

@@ -120,7 +120,7 @@ def main():
         # Pick up the random batch sampling where it stopped instead of replaying the first batches.
         train.rng.bit_generator.state = ck["rng"]["train"]
         val.rng.bit_generator.state = ck["rng"]["val"]
-        torch.set_rng_state(ck["rng"]["torch"])
+        torch.set_rng_state(ck["rng"]["torch"].cpu())  # map_location may have moved it
     ck = None  # free the memory
 
     def save():

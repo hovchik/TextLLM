@@ -286,7 +286,8 @@ def train(r: TrainReq):
     out = os.path.join(RUNS, name)
     os.makedirs(out, exist_ok=True)
     if r.mode == "scratch":
-        if not os.path.exists(os.path.join(ROOT, "data/bin/train.bin")):
+        if not (r.resume and os.path.exists(os.path.join(out, "train_cmd.json"))) and \
+                not os.path.exists(os.path.join(ROOT, "data/bin/train.bin")):
             err("Prepare the training data first (Training → Data, steps 1–3).")
         tok_copy = os.path.join(out, "tokenizer.json")
         if not (r.resume and os.path.exists(tok_copy)):

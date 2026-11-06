@@ -101,7 +101,7 @@ A checkpoint holds the weights, the optimizer state, the step and LR schedule, t
 the batch sampler, and the training settings, so training continues where it stopped.
 
 **In the Studio:** open the model (Training → Runs), press **Stop** if it is training, then **Export**
-(OK = include the training data). On the new PC, run `run.bat` once, go to Training → Runs →
+(for a from-scratch model, OK = include the training data). On the new PC, run `run.bat` once, go to Training → Runs →
 **Import a model (.zip)**, open the model and press **Resume**.
 
 **From the command line:**
@@ -112,9 +112,11 @@ python transfer.py export --run runs/my-model --with-data     # -> my-model.text
 python transfer.py import my-model.textllm.zip                 # -> runs/my-model, prints the resume command
 python train.py --out runs/my-model --resume ...               # or finetune/finetune_lora.py ... --resume
 ```
-- **What is in the zip:** the whole `runs/<name>/` folder (`ckpt.pt`, or `adapter/` + `train_state.pt` for
-  a fine-tune, plus `meta.json`, `train_cmd.json`, charts, eval history, the GGUF copy) and, for a
-  from-scratch model, its tokenizer. `--with-data` adds `data/bin/` (from scratch) or `data/instructions/` (fine-tune).
+- **What is in the zip:** the whole `runs/<name>/` folder (`ckpt.pt`, or `adapter/` + `train_state.pt` +
+  `examples.pt` for a fine-tune, plus `meta.json`, `train_cmd.json`, charts, eval history, the GGUF copy)
+  and, for a from-scratch model, its tokenizer. A fine-tune always carries its exact examples.
+  `--with-data` adds a from-scratch model's `train.bin`/`val.bin`; on import they go to
+  `runs/<name>/data/bin/`, so they never overwrite or mix with the new PC's own `data/bin/`.
 - **Without `--with-data`:** a from-scratch model needs `data/bin/train.bin` + `val.bin` on the new PC,
   encoded with the **same** tokenizer. Copy `data/bin/` over, or encode new text with
   `--tok runs/my-model/tokenizer.json`. Never train a new tokenizer for a moved model.

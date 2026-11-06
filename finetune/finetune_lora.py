@@ -12,8 +12,8 @@ Colab GPU:      python finetune/finetune_lora.py --base Qwen/Qwen3-1.7B --batch 
 
 CPU speed-ups: physical-core threads, bfloat16 autocast on CPUs with AVX-512 BF16 / AMX,
 length-bucketed batches (little padding) and a cache of the tokenized examples.
-Writes runs/<name>/adapter/ (LoRA weights + tokenizer), train_state.pt (optimizer, step, random
-state), meta.json and metrics.jsonl; --gguf also makes the fast quantized copy for chat (export_gguf.py).
+Writes runs/<name>/adapter/ (LoRA weights + tokenizer), train_state.pt (optimizer, step, batch
+position), examples.pt (the tokenized examples), meta.json and metrics.jsonl; --gguf also makes the fast quantized copy for chat (export_gguf.py).
 Stopped, or moved to another PC? Run the same command again with --resume to continue from the last save.
 """
 import argparse, contextlib, glob, hashlib, json, math, os, random, shutil, subprocess, sys, time
@@ -110,12 +110,22 @@ def encode(tok, pairs, seq):
     return out
 
 
-def batches(data, bs, pad, rng):
-    """Length-bucketed batches: similar lengths together, so short posts aren't padded to essays."""
+def batches(data, bs, pad, seed=0, skip=0):
+    """Length-bucketed batches: similar lengths together, so short posts aren't padded to essays.
+
+    Each pass over the data has its own fixed order (from seed + pass number), so a resumed run
+    skips the `skip` batches it already trained on and continues with exactly the same batches."""
+    epoch = 0
     while True:
-        order = sorted(data, key=lambda x: len(x[0]) + rng.random())
+        r = random.Random(seed * 100003 + epoch)
+        epoch += 1
+        order = sorted(data, key=lambda x: len(x[0]) + r.random())
         groups = [order[i:i + bs] for i in range(0, len(order), bs)]  # last batch may be smaller
-        rng.shuffle(groups)
+        r.shuffle(groups)
+        if skip >= len(groups):
+            skip -= len(groups)
+            continue
+        groups, skip = groups[skip:], 0
         for chunk in groups:
             n = len(chunk)
             L = max(len(x) for x, _ in chunk)
@@ -136,8 +146,17 @@ def main():
     threads = hf.set_threads()
     tok = hf.load_tokenizer(a.base)
     pad = tok.pad_token_id if tok.pad_token_id is not None else tok.eos_token_id
-    data = load_or_encode(a, tok, rng)
-    rng.shuffle(data)
+    ex_p = os.path.join(a.out, "examples.pt")
+    if a.resume and os.path.exists(ex_p):
+        # The exact examples this run was trained on (kept in the run folder, so it moves with it).
+        data = torch.load(ex_p, weights_only=False)
+        print(f"using this run's saved examples ({len(data)})")
+    else:
+        data = load_or_encode(a, tok, rng)
+        torch.save(data, ex_p + ".tmp")
+        os.replace(ex_p + ".tmp", ex_p)
+    data = list(data)
+    random.Random(1).shuffle(data)  # same train/val split every time for the same examples
     n_val = max(4, len(data) // 50)
     val, train = data[:n_val], data[n_val:]
     print(f"{len(train)} train / {len(val)} val examples")
@@ -182,8 +201,7 @@ def main():
                     st[k] = v.to(a.device)
         start = state["step"]
         steps = max(steps, state["steps"]) if not a.max_steps else a.max_steps  # keep the same LR schedule
-        rng.setstate(state["rng"])
-        torch.set_rng_state(state["torch_rng"])
+        torch.set_rng_state(state["torch_rng"].cpu())
         print(f"resumed at step {start}/{steps}")
     warm = max(1, steps // 20)
     lr_at = lambda s: a.lr * min(1, (s + 1) / warm) * (0.1 + 0.9 * 0.5 * (1 + math.cos(math.pi * min(1, s / steps))))
@@ -211,7 +229,7 @@ def main():
         shutil.rmtree(tmp, ignore_errors=True)
         model.save_pretrained(tmp)
         tok.save_pretrained(tmp)
-        torch.save({"opt": opt.state_dict(), "step": step, "steps": steps, "rng": rng.getstate(),
+        torch.save({"opt": opt.state_dict(), "step": step, "steps": steps, "batches": step * a.grad_accum,
                     "torch_rng": torch.get_rng_state(), "base": a.base}, state_p + ".tmp")
         shutil.rmtree(ad, ignore_errors=True)
         os.replace(tmp, ad)
@@ -222,7 +240,8 @@ def main():
 
     if state is None:
         log(kind="val", step=0, loss=evaluate())
-    it, t0, model_tokens = batches(train, a.batch, pad, rng), time.time(), 0
+    done = state.get("batches", start * a.grad_accum) if state else 0
+    it, t0, model_tokens = batches(train, a.batch, pad, seed=0, skip=done), time.time(), 0
     model.train()
     for step in range(start + 1, steps + 1):
         for g in opt.param_groups:

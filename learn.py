@@ -7,7 +7,7 @@ The downloaded/extracted text lives in a temporary folder and is deleted when tr
 (also if it fails). With --delete-originals the files you passed in are removed too.
 The model keeps what it learned; the texts themselves are not stored anywhere.
 """
-import argparse, json, math, os, shutil, subprocess, sys, tempfile
+import argparse, json, math, os, shutil, subprocess, sys, tempfile, time
 
 import numpy as np
 
@@ -18,6 +18,27 @@ from data.ingest import EOT, ingest  # noqa: E402
 
 def say(m):
     print(m, flush=True)
+
+
+def run_child(cmd, cwd):
+    """subprocess.call, except that on Ctrl-C / Stop the child gets time to save and exit
+    (subprocess.call would kill it at once, and a grandchild trainer would be left running)."""
+    p = subprocess.Popen(cmd, cwd=cwd)
+    try:
+        return p.wait()
+    except KeyboardInterrupt:
+        # Ctrl-C and Studio's Stop already reach the whole process group, so the child has the
+        # signal too: wait for it (ignoring repeated interrupts), and only kill it if it hangs.
+        end = time.time() + 120
+        while p.poll() is None and time.time() < end:
+            try:
+                p.wait(max(0.1, end - time.time()))
+            except (KeyboardInterrupt, subprocess.TimeoutExpired):
+                pass
+        if p.poll() is None:
+            p.kill()
+            p.wait()
+        raise
 
 
 def last_step(run):
@@ -122,7 +143,7 @@ def main():
             raise SystemExit("nothing could be extracted, so there is nothing to learn")
         say(f"== 2/3 training {os.path.basename(a.run)} on {n} new document(s)")
         cmd = learn_scratch(a, meta, text_dir, tmp) if meta["type"] == "scratch" else learn_lora(a, meta, text_dir)
-        rc = subprocess.call(cmd, cwd=ROOT)
+        rc = run_child(cmd, ROOT)
         if rc != 0:
             raise SystemExit(f"training failed (exit {rc})")
     finally:

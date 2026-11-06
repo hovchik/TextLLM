@@ -85,6 +85,27 @@ def say(m):
     print(m, flush=True)
 
 
+def run_child(cmd, cwd):
+    """subprocess.call, except that on Ctrl-C / Stop the child gets time to save and exit
+    (subprocess.call would kill it at once, and a grandchild trainer would be left running)."""
+    p = subprocess.Popen(cmd, cwd=cwd)
+    try:
+        return p.wait()
+    except KeyboardInterrupt:
+        # Ctrl-C and Studio's Stop already reach the whole process group, so the child has the
+        # signal too: wait for it (ignoring repeated interrupts), and only kill it if it hangs.
+        end = time.time() + 120
+        while p.poll() is None and time.time() < end:
+            try:
+                p.wait(max(0.1, end - time.time()))
+            except (KeyboardInterrupt, subprocess.TimeoutExpired):
+                pass
+        if p.poll() is None:
+            p.kill()
+            p.wait()
+        raise
+
+
 # ---------------------------------------------------------------- sources
 def slug(s):
     return re.sub(r"[^a-z0-9]+", "-", s.lower()).strip("-")[:40] or "source"
@@ -286,7 +307,9 @@ class Fetcher:
         meta_p = part + ".json"
         for attempt in range(self.retries + 1):
             have = os.path.getsize(part) if os.path.exists(part) else 0
-            h = dict(headers or {})
+            # identity: a Range offset counts bytes on the wire, and requests would write
+            # decompressed gzip bytes to the .part file, so resuming would start at the wrong place
+            h = {"Accept-Encoding": "identity", **(headers or {})}
             meta = json.load(open(meta_p)) if have and os.path.exists(meta_p) else {}
             if have and meta.get("validator"):
                 h.update({"Range": f"bytes={have}-", "If-Range": meta["validator"]})
@@ -541,15 +564,18 @@ def learn(run, min_docs, passes):
     say(f"== teaching {os.path.basename(run)} {n} new article(s)")
     batch = PENDING + f".{int(time.time())}.learning"
     os.replace(PENDING, batch)  # new articles found while training go to a fresh pending.txt
-    rc = subprocess.call([sys.executable, "learn.py", "--run", run, "--text-file", batch, "--passes", str(passes)],
-                         cwd=ROOT)
+    try:
+        rc = run_child([sys.executable, "learn.py", "--run", run, "--text-file", batch, "--passes", str(passes)], ROOT)
+    except KeyboardInterrupt:
+        rc = 130
     if rc != 0:
         # put the batch back in front of anything new, so nothing is lost
         rest = open(PENDING, encoding="utf-8").read() if os.path.exists(PENDING) else ""
         with open(PENDING, "w", encoding="utf-8") as f:
             f.write(open(batch, encoding="utf-8").read() + rest)
         os.remove(batch)
-        raise SystemExit(f"training failed (exit {rc}); the articles stay queued for the next run")
+        raise SystemExit(f"training {'stopped' if rc == 130 else f'failed (exit {rc})'}; "
+                         "the articles stay queued for the next run")
     os.remove(batch)
     return os.path.basename(run)
 

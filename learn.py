@@ -92,6 +92,8 @@ def main():
     ap.add_argument("--files", nargs="*", default=[])
     ap.add_argument("--urls", nargs="*", default=[])
     ap.add_argument("--url-list")
+    ap.add_argument("--text-file", nargs="*", default=[],
+                    help="ready-made shards (documents separated by <|endoftext|>, e.g. from data/crawl.py)")
     ap.add_argument("--passes", type=float, default=3, help="how many times to read the new texts")
     ap.add_argument("--mix", type=float, default=1.0, help="old-corpus tokens per new token (scratch only)")
     ap.add_argument("--lr", type=float, default=None, help="default 3e-4 (scratch) / 1e-4 (LoRA)")
@@ -107,7 +109,15 @@ def main():
     try:
         say("== 1/3 downloading and extracting text")
         text_dir = os.path.join(tmp, "text")
-        shard, n, _ = ingest(a.files, urls, text_dir, a.delete_originals, log=say)
+        shard, n = None, 0
+        if a.files or urls:
+            shard, n, _ = ingest(a.files, urls, text_dir, a.delete_originals, log=say)
+        for i, tf in enumerate(a.text_file):  # already clean: copy as-is, keeping document breaks
+            os.makedirs(text_dir, exist_ok=True)
+            dst = os.path.join(text_dir, f"given_{i}.txt")
+            shutil.copyfile(tf, dst)
+            n += sum(1 for d in open(dst, encoding="utf-8").read().split(EOT) if d.strip())
+            shard = shard or dst
         if not shard:
             raise SystemExit("nothing could be extracted, so there is nothing to learn")
         say(f"== 2/3 training {os.path.basename(a.run)} on {n} new document(s)")

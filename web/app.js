@@ -108,7 +108,7 @@ async function poll() {
     S.onStatus && S.onStatus(S.status);
   } catch {}
 }
-const labelKind = (k) => ({ training: "Training", data: "Preparing data", texts: "Learning texts", feedback: "Learning from ratings", eval: "Evaluating", export: "Making fast CPU copy" }[k] || k);
+const labelKind = (k) => ({ crawl: "Reading news & web", training: "Training", data: "Preparing data", texts: "Learning texts", feedback: "Learning from ratings", eval: "Evaluating", export: "Making fast CPU copy" }[k] || k);
 $("#jobpill").onclick = () => (location.hash = "#/training/live");
 
 // ---------------------------------------------------------------- router
@@ -225,7 +225,7 @@ pages.training = async (sub = "new") => {
   if (sub === "live") sub = "runs";
   main.innerHTML = `<div class="page">
     <div class="page-head"><div><h1>Training</h1><p>Prepare data, train new models, and teach existing models from your own files and links.</p></div>
-      <div class="tabs" id="ttabs">${[["new", "New model"], ["data", "Data"], ["texts", "Your texts"], ["runs", "Runs"]].map(([k, l]) => `<button data-k="${k}" class="${k === sub ? "on" : ""}">${l}</button>`).join("")}</div></div>
+      <div class="tabs" id="ttabs">${[["new", "New model"], ["data", "Data"], ["texts", "Your texts"], ["news", "News & web"], ["runs", "Runs"]].map(([k, l]) => `<button data-k="${k}" class="${k === sub ? "on" : ""}">${l}</button>`).join("")}</div></div>
     <div id="tlive"></div><div id="tbody"></div></div>`;
   $$("#ttabs button").forEach((b) => (b.onclick = () => (location.hash = `#/training/${b.dataset.k}`)));
   await poll();
@@ -233,7 +233,7 @@ pages.training = async (sub = "new") => {
   const renderLive = (rs) => { $("#tlive").innerHTML = liveCard(rs.find((r) => r.running)); bindLive(); };
   renderLive(runsList);
   S.onStatus = async () => { const rs = await api("/api/runs").catch(() => []); renderLive(rs); if (sub === "runs") drawRuns(rs); };
-  ({ new: trainNew, data: trainData, texts: trainTexts, runs: () => drawRuns(runsList) }[sub] || trainNew)();
+  ({ new: trainNew, data: trainData, texts: trainTexts, news: trainNews, runs: () => drawRuns(runsList) }[sub] || trainNew)();
 };
 
 function trainNew() {
@@ -405,6 +405,78 @@ async function trainTexts() {
       if (action === "learn") setTimeout(() => openRun($("#x-model").value), 500);
     } catch (e) { fail(e); }
   };
+}
+
+// ---------------------------------------------------------------- news & web crawler
+const KIND_LABEL = { feed: "RSS / Atom feed", page: "Single page", links: "Page of links" };
+async function trainNews() {
+  const [st, models] = await Promise.all([api("/api/crawler"), api("/api/models").catch(() => [])]);
+  const L = st.licenses, cs = st.settings, ss = st.stats;
+  const licPill = (s) => { const l = L[s.license] || { label: s.license }; return `<span class="pill ${l.ok ? "good" : "warn"}" style="white-space:nowrap" title="${esc(l.note || "")}">${esc(l.label)}</span>`; };
+  const okSrc = (s) => (L[s.license] || {}).ok || s.rights_confirmed;
+  $("#tbody").innerHTML = `<div class="grid g3"><div class="span2" style="display:flex;flex-direction:column;gap:16px">
+    <div class="card"><div class="card-head"><h2>Sources</h2><span class="hint">${num(ss.total)} articles saved · ${num(ss.queued)} links queued · ${num(ss.pending)} not learned yet</span></div>
+      <div class="table-scroll"><table><thead><tr><th>On</th><th>Source</th><th>License</th><th>Saved</th><th>Last article</th><th></th></tr></thead><tbody>
+      ${st.sources.map((s) => { const n = ss.sources[s.id] || {}; return `<tr data-sid="${esc(s.id)}">
+        <td><label class="switch" style="display:inline-block"><input type="checkbox" data-on ${s.enabled ? "checked" : ""}><span></span></label></td>
+        <td><b>${esc(s.name)}</b><div class="hint mono" style="max-width:260px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap" title="${esc(s.url)}">${esc(KIND_LABEL[s.kind] || s.kind)} · ${esc(s.url)}</div>${s.enabled && !okSrc(s) ? '<div class="hint" style="color:var(--warn)">Skipped until you confirm the rights</div>' : ""}</td>
+        <td>${licPill(s)}</td><td>${num(n.done || 0)}${n.failed ? ` <span class="hint">(${n.failed} failed)</span>` : ""}</td>
+        <td class="muted">${n.last ? ago(n.last) : "—"}</td>
+        <td><button class="btn" data-del title="Remove source">${I.trash}</button></td></tr>`; }).join("") || '<tr><td colspan="6" class="muted">No sources yet. Add one below.</td></tr>'}
+      </tbody></table></div></div>
+    <div class="card"><h2>Add a source</h2>
+      <div class="grid g2" style="margin-top:10px">
+        <label class="field">Link<input class="input" id="n-url" placeholder="https://example.org/feed.xml"></label>
+        <label class="field">Name<input class="input" id="n-name" placeholder="Example News"></label>
+        <label class="field">What is it?<select class="input" id="n-kind"><option value="feed">RSS / Atom feed (best)</option><option value="links">Page of links: read the articles it links to</option><option value="page">Single page or article</option></select></label>
+        <label class="field">License of the texts<select class="input" id="n-lic">${Object.entries(L).map(([k, l]) => `<option value="${k}">${esc(l.label)}: ${esc(l.note)}</option>`).join("")}</select></label>
+        <label class="field">Articles per run<input class="input" id="n-max" type="number" min="1" max="500" value="30"></label>
+      </div>
+      <div id="n-rights" hidden style="margin-top:10px" class="hint"><label class="row"><span class="switch"><input type="checkbox" id="n-ok"><span></span></span> <span>I own these texts or have the owner's permission to use them for training, and I take responsibility for it.</span></label></div>
+      <div class="row end" style="margin-top:12px"><button class="btn primary" id="n-add">${I.plus} Add source</button></div></div>
+    <div class="card"><div class="card-head"><h2>Latest articles</h2></div>
+      ${ss.recent.length ? `<ul style="padding-left:18px;margin:0">${ss.recent.map((r) => `<li><a href="${esc(r.url)}" target="_blank" rel="noopener noreferrer"><u>${esc(r.title || r.url)}</u></a> <span class="hint">${esc(r.source)} · ${num(r.chars)} chars · ${ago(r.fetched)}</span></li>`).join("")}</ul>` : '<p class="muted">Nothing yet. Press "Run now".</p>'}</div>
+    <div class="card"><div class="card-head"><h2>Log</h2></div><pre class="console" id="nlog">${esc(st.log || "No crawl yet.")}</pre></div>
+  </div>
+  <div style="display:flex;flex-direction:column;gap:16px">
+    <div class="card"><h2>Schedule</h2>
+      <label class="row" style="margin-top:10px"><span class="switch"><input type="checkbox" id="c-on" ${cs.crawl_enabled ? "checked" : ""}><span></span></span> <b>Check sources automatically</b></label>
+      <label class="field" style="margin-top:12px">Every (hours)<input class="input" id="c-every" type="number" min="0.25" step="0.25" value="${cs.crawl_every_hours}"></label>
+      <label class="field" style="margin-top:10px">Then teach this model<select class="input" id="c-model"><option value="">None: only save to the training data</option>${models.map((m) => `<option value="${esc(m.name)}" ${m.name === cs.crawl_learn_model ? "selected" : ""}>${esc(m.label)}</option>`).join("")}</select></label>
+      <div class="grid g2" style="margin-top:10px"><label class="field">Train after (articles)<input class="input" id="c-min" type="number" min="1" value="${cs.crawl_min_docs}"></label>
+        <label class="field">Read each (times)<input class="input" id="c-passes" type="number" min="0.5" max="10" step="0.5" value="${cs.crawl_passes}"></label></div>
+      <div class="hint" style="margin-top:8px">${cs.next ? `Next run ${cs.next < Date.now() / 1000 ? "as soon as no other job is running" : "in " + dur(cs.next - Date.now() / 1000)}.` : "Automatic checks are off."} Runs only while the Studio is open.</div>
+      <div class="row end" style="margin-top:12px"><button class="btn" id="c-save">Save</button><button class="btn primary" id="c-run">${I.play} Run now</button></div></div>
+    <div class="card"><h2>Licenses matter</h2><ul class="muted" style="padding-left:18px">
+      <li>Most news sites are <b>copyrighted</b>. This project only trains on public-domain or openly licensed text, so the built-in sources are Wikinews and Global Voices (CC BY) and NASA (US government, public domain).</li>
+      <li>Sources marked <span class="pill warn">Copyrighted / unknown</span> or <span class="pill warn">I have the rights</span> are skipped until you confirm the rights. You are responsible for them.</li>
+      <li>Not allowed: CC BY-ND or NC-ND sites, and sites whose terms forbid text and data mining.</li>
+      <li>Every article's link, title and license is kept in <span class="mono">data/raw/news/attribution.jsonl</span>, as CC BY requires.</li></ul></div>
+    <div class="card"><h2>How it reads the web</h2><ul class="muted" style="padding-left:18px">
+      <li>Obeys robots.txt and waits at least 3 seconds between requests to a site.</li>
+      <li>Skips duplicates and pages with almost no text.</li>
+      <li>If the connection drops it resumes the download, and links it found stay queued for the next run.</li>
+      <li>New articles also go into <span class="mono">data/raw/news/</span> for your next full training.</li></ul></div>
+  </div></div>`;
+  const refresh = () => trainNews();
+  const toggleRights = () => ($("#n-rights").hidden = !!(L[$("#n-lic").value] || {}).ok);
+  $("#n-lic").onchange = toggleRights; toggleRights();
+  $("#n-add").onclick = async () => {
+    try {
+      await api("/api/crawler/sources", { json: { url: $("#n-url").value, name: $("#n-name").value, kind: $("#n-kind").value, license: $("#n-lic").value, max_items: +$("#n-max").value, rights_confirmed: $("#n-ok").checked } });
+      toast("Source added", "ok"); refresh();
+    } catch (e) { fail(e); }
+  };
+  $$("tr[data-sid]").forEach((tr) => {
+    const sid = encodeURIComponent(tr.dataset.sid);
+    $("[data-on]", tr).onchange = async (e) => { try { await api(`/api/crawler/sources/${sid}`, { method: "PATCH", json: { enabled: e.target.checked } }); } catch (x) { fail(x); refresh(); } };
+    $("[data-del]", tr).onclick = async () => { if (!confirm("Remove this source? Articles already saved stay in the training data.")) return; try { await api(`/api/crawler/sources/${sid}`, { method: "DELETE" }); refresh(); } catch (x) { fail(x); } };
+  });
+  const settings = () => ({ enabled: $("#c-on").checked, every_hours: +$("#c-every").value, learn_model: $("#c-model").value, min_docs: +$("#c-min").value, passes: +$("#c-passes").value });
+  $("#c-save").onclick = async () => { try { await api("/api/crawler/settings", { json: settings() }); toast("Saved", "ok"); refresh(); } catch (e) { fail(e); } };
+  $("#c-run").onclick = async () => { try { await api("/api/crawler/settings", { json: settings() }); await api("/api/crawler/run", { method: "POST" }); toast("Reading the sources…", "ok"); poll(); } catch (e) { fail(e); } };
+  const prev = S.onStatus;
+  S.onStatus = (s) => { prev && prev(s); const l = $("#nlog"); if (l && s.job && s.job.kind === "crawl") { l.textContent = s.job.log; l.scrollTop = 1e9; } };
 }
 
 const IMPORT_BAR = `<div class="row" style="justify-content:space-between;margin-bottom:12px"><span class="hint">Moving from another PC? Export the model there (open it → Export), then import the .zip here and press Resume.</span>

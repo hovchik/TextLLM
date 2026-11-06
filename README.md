@@ -92,6 +92,34 @@ python data/ingest.py --files book.pdf ~/MyBooks --urls https://example.com/arti
 - **Forgetting:** for from-scratch models, learning mixes in an equal amount of the original corpus so the model doesn't forget the rest (`--mix`).
 - **Copyright:** only use texts you have the right to use.
 
+## Read news and web pages on a schedule
+
+Training → **News & web** (admins only) reads RSS/Atom feeds and web pages every few hours, saves new
+articles to `data/raw/news/<source>/`, and can teach a chosen model the new articles once enough
+have arrived (default 20). From the command line:
+
+```bash
+python data/crawl.py                         # read every enabled source once
+python data/crawl.py --learn runs/my-model   # ...then teach that model the new articles
+python data/crawl.py --list
+python data/crawl.py --add https://example.org/feed.xml --license cc-by --name "Example"
+```
+
+![News & web](docs/studio-news.png)
+
+- **Licenses.** Most news is copyrighted, and this project only trains on public-domain or openly
+  licensed text. The built-in sources are Wikinews and Global Voices (CC BY) and NASA news releases
+  (US government, public domain). A source marked "copyrighted / unknown" or "I have the rights" is
+  skipped until an admin confirms they have permission. CC BY-ND / NC-ND sites aren't allowed.
+  Every article's link, title and license goes to `data/raw/news/attribution.jsonl`.
+- **Polite.** Obeys robots.txt (and Crawl-delay), waits at least 3 s between requests to a site,
+  uses conditional GETs for feeds, and skips duplicates and pages with under 600 characters of text.
+- **Resumable.** URL state lives in `runs/_crawler/crawl.db`, so a stopped run continues next time.
+  Downloads resume from a `.part` file with HTTP Range after a dropped connection; failed pages are
+  retried on the next two runs. If training fails, the articles stay in `runs/_crawler/pending.txt`.
+- The schedule runs while the Studio is open. With the Studio closed, use Windows Task Scheduler
+  or cron to run `python data/crawl.py --learn runs/my-model`.
+
 ## CPU-only quick path (recommended for a laptop or desktop)
 CPU training is about 100× slower than a GPU, so this path uses a 14M-parameter model, an 8k vocabulary, and roughly 3,000 books.
 The `--gutenberg-max 3000` flag takes the first 3,000 English books in the catalog (about 1 GB, roughly 300M tokens).

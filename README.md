@@ -122,7 +122,7 @@ All of these are off by default (0 = skip). Pick them in the Studio under Traini
 | `--standard-ebooks N` | [Standard Ebooks](https://standardebooks.org), ~1,400 proofread classics. Read from their GitHub repos, or from the Patrons feed if `STANDARD_EBOOKS_EMAIL` is set. `GITHUB_TOKEN` avoids GitHub's hourly limit. | CC0 |
 | `--common-corpus-gb G` | [Common Corpus](https://huggingface.co/datasets/PleIAs/common_corpus), only the "Open Culture" part (public-domain books and newspapers, OCR). `--common-corpus-lang en` or `all`. | public domain |
 | `--archive-books N` | Internet Archive scans published before 1931 (americana, toronto, europeanlibraries collections; never the lending library). OCR text, keep it a small share. | public domain (US) |
-| `--cosmopedia-gb G` | [Cosmopedia](https://huggingface.co/datasets/HuggingFaceTB/cosmopedia) synthetic text by Mixtral. `--cosmopedia-subsets stories,wikihow,...` | Apache 2.0 |
+| `--cosmopedia-gb G` | [Cosmopedia](https://huggingface.co/datasets/HuggingFaceTB/cosmopedia) synthetic text by Mixtral. `--cosmopedia-subsets stories,wikihow,...` (the GB are split evenly, one folder per subset) | Apache 2.0 |
 
 ```bash
 python data/build_corpus.py --gutenberg-max 3000 --pg19-books 3000 --standard-ebooks 500 \

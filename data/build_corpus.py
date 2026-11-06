@@ -24,8 +24,8 @@ Usage:
 
 Everything resumes: run the same command again after a crash, a closed laptop or a dropped
 connection. Each source keeps data/raw/<source>/progress.json, saved after every small chunk, and
-network errors are retried with backoff (--retries). Books that Gutenberg already saved are skipped
-by PG-19, so the two don't duplicate each other.
+network errors are retried with backoff (--retries). Books that Gutenberg already saved are
+listed in gutenberg/ids.list (not .txt, so the tokenizer never reads it) and PG-19 skips them.
 """
 import argparse, csv, html, io, json, os, posixpath, random, re, sys, time, zipfile
 import xml.etree.ElementTree as ET
@@ -282,18 +282,18 @@ def catalog_ids(sess, tries):
 
 def record_ids(outdir, ids):
     if ids:
-        with open(os.path.join(outdir, "ids.txt"), "a") as f:
+        with open(os.path.join(outdir, "ids.list"), "a") as f:
             f.write("".join(f"{i}\n" for i in ids))
 
 
 def gutenberg_ids(outdir, tries):
     """Gutenberg ebook numbers already saved under outdir, so other sources can skip them."""
     ids = set()
-    path = os.path.join(outdir, "ids.txt")
+    path = os.path.join(outdir, "ids.list")
     if os.path.exists(path):
         ids |= {line.strip() for line in open(path) if line.strip()}
     marker = os.path.join(outdir, "_done.json")
-    if os.path.exists(marker):          # finished by an older version that didn't write ids.txt
+    if os.path.exists(marker):          # finished by an older version that didn't write ids.list
         n = json.load(open(marker)).get("max_books", 0)
         try:
             ids |= set(catalog_ids(session(), tries)[:n])
@@ -823,6 +823,9 @@ def hf_parquet(outdir, label, repo, dirs, max_gb, mode="stream", tries=30, cache
     p = Progress(outdir, label, int(max_gb * 1024**3), sha=None, file=None, row_group=0, skip_rows=0)
     if legacy and not os.path.exists(p.path):
         p.st.update(adopt_legacy(outdir) or {})
+    if p.st.setdefault("dirs", dirs) != dirs:
+        raise SystemExit(f"{label}: {outdir} was downloaded from {p.st['dirs']}, not {dirs}. "
+                         f"Use another --out folder or delete {p.path} to start over.")
     if p.finished():
         return
     filters = filters or {}
@@ -903,8 +906,10 @@ def cosmopedia(outdir, max_gb, subsets, mode="stream", tries=30, cache="data/cac
     bad = [s for s in subsets if s not in COSMO_SUBSETS]
     if bad:
         raise SystemExit(f"unknown Cosmopedia subset(s) {bad}; choose from {COSMO_SUBSETS}")
-    hf_parquet(outdir, "Cosmopedia", COSMO_REPO, [f"data/{s}" for s in subsets], max_gb, mode, tries,
-               cache, keep_parquet)
+    # one folder and progress file per subset, so changing the selection later never mixes cursors
+    for sub in subsets:
+        hf_parquet(os.path.join(outdir, sub), f"Cosmopedia {sub}", COSMO_REPO, [f"data/{sub}"],
+                   max_gb / len(subsets), mode, tries, cache, keep_parquet)
 
 
 def _lang_ok(lang):
@@ -939,7 +944,8 @@ if __name__ == "__main__":
     src.add_argument("--common-corpus-gb", type=float, default=0, help="Common Corpus, Open Culture part")
     src.add_argument("--common-corpus-lang", default="en", help="language code to keep, or 'all'")
     src.add_argument("--archive-books", type=int, default=0, help="Internet Archive books published before 1931")
-    src.add_argument("--cosmopedia-gb", type=float, default=0, help="Cosmopedia synthetic text")
+    src.add_argument("--cosmopedia-gb", type=float, default=0,
+                     help="Cosmopedia synthetic text, split evenly over the chosen subsets")
     src.add_argument("--cosmopedia-subsets", default="stories",
                      help=f"comma-separated, from: {','.join(COSMO_SUBSETS)}")
     src.add_argument("--fineweb-gb", type=float, default=20, help="FineWeb-Edu web text")

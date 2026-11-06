@@ -12,10 +12,11 @@ Colab GPU:      python finetune/finetune_lora.py --base Qwen/Qwen3-1.7B --batch 
 
 CPU speed-ups: physical-core threads, bfloat16 autocast on CPUs with AVX-512 BF16 / AMX,
 length-bucketed batches (little padding) and a cache of the tokenized examples.
-Writes runs/<name>/adapter/ (LoRA weights + tokenizer), meta.json and metrics.jsonl;
---gguf also makes the fast quantized copy for chat (export_gguf.py).
+Writes runs/<name>/adapter/ (LoRA weights + tokenizer), train_state.pt (optimizer, step, random
+state), meta.json and metrics.jsonl; --gguf also makes the fast quantized copy for chat (export_gguf.py).
+Stopped, or moved to another PC? Run the same command again with --resume to continue from the last save.
 """
-import argparse, contextlib, glob, hashlib, json, math, os, random, subprocess, sys, time
+import argparse, contextlib, glob, hashlib, json, math, os, random, shutil, subprocess, sys, time
 
 import torch
 from peft import LoraConfig, get_peft_model
@@ -57,6 +58,8 @@ def args():
     ap.add_argument("--pairs-per-doc", type=int, default=8, help="max examples taken from one document")
     ap.add_argument("--min-doc-chars", type=int, default=5000)
     ap.add_argument("--step-offset", type=int, default=0, help="added to logged steps (continued runs)")
+    ap.add_argument("--resume", action="store_true",
+                    help="continue from <out>/adapter + <out>/train_state.pt (optimizer, step, schedule)")
     ap.add_argument("--device", default="cuda" if torch.cuda.is_available() else "cpu")
     return ap.parse_args()
 
@@ -146,6 +149,17 @@ def main():
     cpu_bf16 = a.device == "cpu" and hf.cpu_bf16_ok()
     autocast = (lambda: torch.autocast("cpu", dtype=torch.bfloat16)) if cpu_bf16 else contextlib.nullcontext
     print(f"device {a.device} · {threads} threads · {'bf16 autocast' if cpu_bf16 else str(dtype).split('.')[-1]}")
+    state_p = os.path.join(a.out, "train_state.pt")
+    state = None
+    if a.resume and os.path.exists(state_p) and os.path.isdir(os.path.join(a.out, "adapter")):
+        state = torch.load(state_p, map_location="cpu", weights_only=False)
+        a.init_adapter = os.path.join(a.out, "adapter")
+    elif a.resume and os.path.isdir(os.path.join(a.out, "adapter")):
+        print("no train_state.pt (made by an older version): continuing from the saved adapter weights "
+              "with a fresh optimizer and schedule")
+        a.init_adapter = os.path.join(a.out, "adapter")
+    elif a.resume:
+        print(f"nothing to resume in {a.out}; starting from step 0")
     if a.init_adapter:
         from peft import PeftModel
 
@@ -159,6 +173,18 @@ def main():
 
     steps = a.max_steps or max(1, int(len(train) * a.epochs / (a.batch * a.grad_accum)))
     opt = torch.optim.AdamW([p for p in model.parameters() if p.requires_grad], lr=a.lr, weight_decay=0.0)
+    start = 0
+    if state is not None:
+        opt.load_state_dict(state["opt"])
+        for st in opt.state.values():  # saved on another device (e.g. GPU → CPU)
+            for k, v in st.items():
+                if torch.is_tensor(v) and k != "step":
+                    st[k] = v.to(a.device)
+        start = state["step"]
+        steps = max(steps, state["steps"]) if not a.max_steps else a.max_steps  # keep the same LR schedule
+        rng.setstate(state["rng"])
+        torch.set_rng_state(state["torch_rng"])
+        print(f"resumed at step {start}/{steps}")
     warm = max(1, steps // 20)
     lr_at = lambda s: a.lr * min(1, (s + 1) / warm) * (0.1 + 0.9 * 0.5 * (1 + math.cos(math.pi * min(1, s / steps))))
 
@@ -179,17 +205,26 @@ def main():
         model.train()
         return sum(ls) / len(ls)
 
-    def save():
-        model.save_pretrained(os.path.join(a.out, "adapter"))
-        tok.save_pretrained(os.path.join(a.out, "adapter"))
+    def save(step):
+        # Save into a temp folder and swap it in, so a crash mid-save keeps the previous adapter.
+        ad, tmp = os.path.join(a.out, "adapter"), os.path.join(a.out, "adapter.tmp")
+        shutil.rmtree(tmp, ignore_errors=True)
+        model.save_pretrained(tmp)
+        tok.save_pretrained(tmp)
+        torch.save({"opt": opt.state_dict(), "step": step, "steps": steps, "rng": rng.getstate(),
+                    "torch_rng": torch.get_rng_state(), "base": a.base}, state_p + ".tmp")
+        shutil.rmtree(ad, ignore_errors=True)
+        os.replace(tmp, ad)
+        os.replace(state_p + ".tmp", state_p)
         json.dump({"type": "lora", "base": a.base, "lora_r": a.lora_r,
                    "instructions": bool(a.instructions), "book_share": a.book_share},
                   open(os.path.join(a.out, "meta.json"), "w"))
 
-    log(kind="val", step=0, loss=evaluate())
+    if state is None:
+        log(kind="val", step=0, loss=evaluate())
     it, t0, model_tokens = batches(train, a.batch, pad, rng), time.time(), 0
     model.train()
-    for step in range(1, steps + 1):
+    for step in range(start + 1, steps + 1):
         for g in opt.param_groups:
             g["lr"] = lr_at(step)
         total = 0.0
@@ -213,7 +248,7 @@ def main():
             print(f"== step {step} val loss {vl:.3f}")
             log(kind="val", step=step, loss=vl)
         if step % a.save_every == 0 or step == steps:
-            save()
+            save(step)
     print(f"saved adapter to {a.out}/adapter")
     if a.gguf:
         rc = subprocess.call([sys.executable, os.path.join(ROOT, "export_gguf.py"), "--run", a.out])

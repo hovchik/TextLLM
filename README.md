@@ -95,6 +95,37 @@ Each request is retried up to `--retries 30` times with backoff of up to 2 minut
 It saves a checkpoint every 250 steps (about 20 minutes on 4 cores, sooner on more), so you can try `generate.py` while it trains.
 Expect grammatical, book-flavoured prose that drifts after a few sentences. It won't produce coherent stories or follow instructions.
 
+## Move a model to another PC and keep training
+Both kinds of model can be stopped on one PC and continued on another (CPU or GPU, Windows or Linux).
+A checkpoint holds the weights, the optimizer state, the step and LR schedule, the random state of
+the batch sampler, and the training settings, so training continues where it stopped.
+
+**In the Studio:** open the model (Training → Runs), press **Stop** if it is training, then **Export**
+(OK = include the training data). On the new PC, run `run.bat` once, go to Training → Runs →
+**Import a model (.zip)**, open the model and press **Resume**.
+
+**From the command line:**
+```bash
+# old PC (training stopped)
+python transfer.py export --run runs/my-model --with-data     # -> my-model.textllm.zip
+# new PC, inside its own copy of this repo
+python transfer.py import my-model.textllm.zip                 # -> runs/my-model, prints the resume command
+python train.py --out runs/my-model --resume ...               # or finetune/finetune_lora.py ... --resume
+```
+- **What is in the zip:** the whole `runs/<name>/` folder (`ckpt.pt`, or `adapter/` + `train_state.pt` for
+  a fine-tune, plus `meta.json`, `train_cmd.json`, charts, eval history, the GGUF copy) and, for a
+  from-scratch model, its tokenizer. `--with-data` adds `data/bin/` (from scratch) or `data/instructions/` (fine-tune).
+- **Without `--with-data`:** a from-scratch model needs `data/bin/train.bin` + `val.bin` on the new PC,
+  encoded with the **same** tokenizer. Copy `data/bin/` over, or encode new text with
+  `--tok runs/my-model/tokenizer.json`. Never train a new tokenizer for a moved model.
+- **Fine-tunes:** the base model (e.g. `Qwen/Qwen3-0.6B`) is not packed; the new PC downloads it once.
+- **Saves:** from scratch saves at every evaluation (every 1/80 of the run in the Studio), a fine-tune
+  every 1/10 of the run. Work after the last save is redone. Saves are written to a temp file first, so
+  a crash or power cut never leaves a broken checkpoint.
+- **Copying by hand works too:** copy `runs/<name>/` (and `data/bin/`) to the same place in the other
+  copy of the repo, then resume. Older runs stored the tokenizer's full path, so also copy
+  `tokenizer/bpe.json` there as `runs/<name>/tokenizer.json`.
+
 ## Pipeline (GPU)
 ```bash
 # 1. Download the corpus (~10 GB of Gutenberg + N GB of FineWeb-Edu)

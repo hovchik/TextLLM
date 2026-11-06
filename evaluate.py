@@ -98,14 +98,15 @@ def run_eval(run, formats=None, quick=False, limit=0, seed=0, max_tokens=None, o
     summary["val_loss"] = val_loss(eng)
     partial = bool(formats or limit)  # a subset run is not comparable; the gate ignores it
     res = {"run": os.path.basename(run), "time": time.time(), "seconds": round(time.time() - t0),
-           "backend": eng.backend, "quick": quick, "partial": partial, "summary": summary, "items": items}
+           "backend": eng.backend, "quick": quick, "partial": partial, "max_tokens": max_tokens or None,
+           "summary": summary, "items": items}
     d = out_dir or os.path.join(run, "eval")
     os.makedirs(d, exist_ok=True)
     stamp = time.strftime("%Y%m%d-%H%M%S")
     json.dump(res, open(os.path.join(d, f"{stamp}.json"), "w"), ensure_ascii=False, indent=1)
     with open(os.path.join(d, "history.jsonl"), "a") as h:
         h.write(json.dumps({"time": res["time"], "file": f"{stamp}.json", "quick": quick, "partial": partial,
-                            "backend": eng.backend, **summary}) + "\n")
+                            "backend": eng.backend, "max_tokens": max_tokens or None, **summary}) + "\n")
     say(f"== score {summary['score']} · " + " · ".join(f"{k} {v}" for k, v in summary["per_format"].items()))
     return res
 
@@ -165,10 +166,16 @@ def make_pairs(run_a, run_b, judge=None, quick=False):
     """Pair the latest evals of two runs prompt by prompt and store them for blind voting."""
     from studio import db
 
-    ea, eb = latest(run_a, quick), latest(run_b, quick)
+    from chat_engine import weights_stamp
+
+    def usable(run):  # a full-length evaluation of the run's current weights
+        e = latest(run, quick)
+        return e if e and not e.get("max_tokens") and e["time"] >= weights_stamp(run) else None
+
+    ea, eb = usable(run_a), usable(run_b)
     for r, e in ((run_a, ea), (run_b, eb)):
         if not e:
-            say(f"{os.path.basename(r)} has no evaluation yet; running it first")
+            say(f"{os.path.basename(r)} has no evaluation of its current weights; running it first")
     ea = ea or run_eval(run_a, quick=quick)
     eb = eb or run_eval(run_b, quick=quick)
     bi = {i["id"]: i for i in eb["items"]}

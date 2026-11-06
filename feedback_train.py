@@ -134,16 +134,20 @@ def train_scratch(a, examples):
     return rc == 0
 
 
+QUICK_TOKENS = 300  # same cap before and after, so long formats are compared like for like
+
+
 def quick_score(run, fresh=False):
     """Summary of a quick evaluation; reuses the last one if the weights haven't changed since."""
     import evaluate
     from chat_engine import Engine, weights_stamp
 
     last = evaluate.latest(run, quick=True)
-    if last and not fresh and last.get("backend") == "hf" and last["time"] >= weights_stamp(run):
+    if (last and not fresh and last.get("backend") == "hf" and last["time"] >= weights_stamp(run)
+            and last.get("max_tokens") == QUICK_TOKENS):
         return last["summary"]
     # Short answers keep this to a few minutes on CPU; the HF backend sees the new adapter at once.
-    return evaluate.run_eval(run, quick=True, max_tokens=300, engine=Engine(run, backend="hf"))["summary"]
+    return evaluate.run_eval(run, quick=True, max_tokens=QUICK_TOKENS, engine=Engine(run, backend="hf"))["summary"]
 
 
 def main():

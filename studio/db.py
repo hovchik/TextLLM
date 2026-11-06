@@ -164,14 +164,14 @@ def next_pair():
     return q("SELECT * FROM pairs WHERE vote IS NULL ORDER BY RANDOM() LIMIT 1", one=True)
 
 
-def pair_stats(run_a=None, run_b=None):
-    """Wins of run_a (candidate) over run_b; ties count half."""
+def pair_stats(run_a=None, run_b=None, since=0):
+    """Wins of run_a (candidate) over run_b; ties count half. since = ignore pairs made before."""
     sql = ("SELECT run_a, run_b, format, SUM(vote='a') a, SUM(vote='b') b, SUM(vote='tie') t, "
-           "SUM(vote IS NULL) open FROM pairs")
-    args = ()
+           "SUM(vote IS NULL) open FROM pairs WHERE created >= ?")
+    args = (since,)
     if run_a and run_b:
-        sql += " WHERE run_a=? AND run_b=?"
-        args = (run_a, run_b)
+        sql += " AND run_a=? AND run_b=?"
+        args = (since, run_a, run_b)
     rows = q(sql + " GROUP BY run_a, run_b, format", args)
     out = {}
     for r in rows:

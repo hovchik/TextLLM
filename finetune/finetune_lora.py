@@ -111,7 +111,7 @@ def batches(data, bs, pad, rng):
     """Length-bucketed batches: similar lengths together, so short posts aren't padded to essays."""
     while True:
         order = sorted(data, key=lambda x: len(x[0]) + rng.random())
-        groups = [order[i:i + bs] for i in range(0, len(order) - bs + 1, bs)] or [order]
+        groups = [order[i:i + bs] for i in range(0, len(order), bs)]  # last batch may be smaller
         rng.shuffle(groups)
         for chunk in groups:
             n = len(chunk)

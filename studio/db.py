@@ -40,7 +40,10 @@ CREATE TABLE IF NOT EXISTS pairs (          -- blind A/B comparisons (evaluate.p
 );
 """
 
-DEFAULT_SETTINGS = {"auto_train": True, "auto_threshold": 10, "default_model": None, "gate_on_feedback": True}
+DEFAULT_SETTINGS = {"auto_train": True, "auto_threshold": 10, "default_model": None, "gate_on_feedback": True,
+                    # news & web crawler (data/crawl.py), run by the scheduler in app.py
+                    "crawl_enabled": False, "crawl_every_hours": 6, "crawl_learn_model": "",
+                    "crawl_min_docs": 20, "crawl_passes": 2, "crawl_last_start": 0}
 
 
 def conn():

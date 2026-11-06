@@ -22,8 +22,9 @@ def launch(kind, name, cmd, log_path, run=None, cleanup=()):
         logf = open(log_path, "a")
         logf.write(f"\n$ {' '.join(cmd)}\n")
         logf.flush()
+        # own process group (POSIX), so Stop reaches the trainers a job starts, not just the job
         proc = subprocess.Popen(cmd, cwd=ROOT, stdout=logf, stderr=subprocess.STDOUT,
-                                env={**os.environ, "PYTHONUNBUFFERED": "1"})
+                                env={**os.environ, "PYTHONUNBUFFERED": "1"}, start_new_session=os.name == "posix")
         JOB.update(proc=proc, name=name, kind=kind, log=log_path, run=run, started=time.time(),
                    cleanup=list(cleanup))
         threading.Thread(target=_watch, args=(proc,), daemon=True).start()
@@ -42,15 +43,26 @@ def _watch(proc):
                             "ended": time.time(), "exit": rc}) + "\n")
 
 
+def _signal(p, sig):
+    """Signal the job and every process it started (they share its process group on POSIX)."""
+    try:
+        if os.name == "posix":
+            os.killpg(p.pid, sig)
+        else:
+            p.send_signal(sig)
+    except (ProcessLookupError, PermissionError):
+        pass
+
+
 def stop():
     p = JOB["proc"]
     if not running():
         return status()
-    p.send_signal(signal.SIGINT)
+    _signal(p, signal.SIGINT)
     try:
         p.wait(20)
     except subprocess.TimeoutExpired:
-        p.kill()
+        _signal(p, signal.SIGKILL if hasattr(signal, "SIGKILL") else signal.SIGTERM)
     return status()
 
 

@@ -16,6 +16,7 @@ from pydantic import BaseModel
 
 import devices
 from chat_engine import ROOT, RUNS, Engine, gguf_path, list_models, weights_stamp
+from data import crawl
 from studio import auth, db, feedback, gate, jobs
 from writing import formats as F
 
@@ -661,6 +662,125 @@ class SettingsReq(BaseModel):
 @app.post("/api/settings")
 def settings(r: SettingsReq):
     return db.set_settings(**{k: v for k, v in r.model_dump().items() if v is not None})
+
+
+# ---------------------------------------------------------------- news & web crawler
+CRAWL_LOG = os.path.join(RUNS, "_crawler", "log.txt")
+
+
+def crawl_cmd(s):
+    cmd = [PY, "data/crawl.py"]
+    m = s.get("crawl_learn_model")
+    if m and os.path.isdir(os.path.join(RUNS, m)):
+        cmd += ["--learn", os.path.join(RUNS, m), "--min-docs", str(s["crawl_min_docs"]),
+                "--passes", str(s["crawl_passes"])]
+    return cmd, (m or None)
+
+
+def crawl_next(s):
+    return s["crawl_last_start"] + float(s["crawl_every_hours"]) * 3600 if s["crawl_enabled"] else None
+
+
+def start_crawl(s):
+    cmd, run = crawl_cmd(s)
+    st = jobs.launch("crawl", "news & web", cmd, CRAWL_LOG, run=run)
+    db.set_settings(crawl_last_start=time.time())
+    return st
+
+
+def crawl_scheduler():
+    """Runs a crawl when one is due. If another job is busy it waits for it to finish."""
+    while True:
+        try:
+            s = db.get_settings()
+            nxt = crawl_next(s)
+            if nxt is not None and time.time() >= nxt and not jobs.running():
+                start_crawl(s)
+        except Exception as e:  # keep the scheduler alive whatever happens
+            print("crawler scheduler:", e, flush=True)
+        time.sleep(60)
+
+
+@app.on_event("startup")
+def _start_scheduler():
+    threading.Thread(target=crawl_scheduler, daemon=True, name="crawl-scheduler").start()
+
+
+@app.get("/api/crawler")
+def crawler_state():
+    s = db.get_settings()
+    return {"sources": crawl.load_sources(), "licenses": crawl.LICENSES, "stats": crawl.stats(),
+            "settings": {k: v for k, v in s.items() if k.startswith("crawl_")} | {"next": crawl_next(s)},
+            "log": jobs.tail(CRAWL_LOG, 150)}
+
+
+class SourceReq(BaseModel):
+    url: str | None = None
+    name: str | None = None
+    kind: str | None = None          # feed | page | links
+    license: str | None = None
+    rights_confirmed: bool | None = None
+    enabled: bool | None = None
+    max_items: int | None = None
+    credit: str | None = None
+
+
+@app.post("/api/crawler/sources")
+def crawler_add(r: SourceReq):
+    try:
+        return crawl.add_source(r.model_dump(exclude_none=True))
+    except ValueError as e:
+        err(str(e))
+
+
+@app.patch("/api/crawler/sources/{sid}")
+def crawler_edit(sid: str, r: SourceReq):
+    try:
+        return crawl.update_source(sid, r.model_dump(exclude_none=True))
+    except LookupError as e:
+        err(str(e), 404)
+    except ValueError as e:
+        err(str(e))
+
+
+@app.delete("/api/crawler/sources/{sid}")
+def crawler_delete(sid: str):
+    try:
+        crawl.delete_source(sid)
+    except LookupError as e:
+        err(str(e), 404)
+    return {"ok": True}
+
+
+class CrawlSettingsReq(BaseModel):
+    enabled: bool | None = None
+    every_hours: float | None = None
+    learn_model: str | None = None   # "" = only add to the corpus
+    min_docs: int | None = None
+    passes: float | None = None
+
+
+@app.post("/api/crawler/settings")
+def crawler_settings(r: CrawlSettingsReq):
+    kw = {f"crawl_{k}": v for k, v in r.model_dump(exclude_none=True).items()}
+    if "crawl_every_hours" in kw:
+        kw["crawl_every_hours"] = max(0.25, min(24 * 7, kw["crawl_every_hours"]))
+    if kw.get("crawl_learn_model"):
+        run_dir(kw["crawl_learn_model"])
+    if "crawl_min_docs" in kw:
+        kw["crawl_min_docs"] = max(1, kw["crawl_min_docs"])
+    if "crawl_passes" in kw:
+        kw["crawl_passes"] = max(0.5, min(10, kw["crawl_passes"]))
+    db.set_settings(**kw)
+    return crawler_state()
+
+
+@app.post("/api/crawler/run")
+def crawler_run():
+    try:
+        return start_crawl(db.get_settings())
+    except RuntimeError as e:
+        err(str(e), 409)
 
 
 # ---------------------------------------------------------------- analytics

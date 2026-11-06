@@ -40,7 +40,10 @@ def train_lora(a, meta, examples):
     from peft import PeftModel
     from writing import hf
 
-    dev = "cuda" if torch.cuda.is_available() else "cpu"
+    import devices
+
+    dev = devices.pick()
+    say(f"device {dev}: {devices.describe(dev)}")
     hf.set_threads()
     ad = os.path.join(a.run, "adapter")
     tok = hf.load_tokenizer(ad)

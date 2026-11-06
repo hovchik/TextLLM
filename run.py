@@ -6,15 +6,19 @@
     python run.py --host 0.0.0.0     # reachable from other machines on your network
     python run.py --no-browser       # don't open a browser tab
     python run.py --reinstall        # reinstall the Python packages
-    python run.py --gpu              # install the CUDA build of PyTorch instead of the CPU build
+    python run.py --gpu              # force the CUDA (NVIDIA GPU) build of PyTorch
+    python run.py --cpu              # force the CPU build of PyTorch (no GPU)
+    python run.py --torch-index cu128   # pick the PyTorch build yourself (cu118, cu126, cu128, cu130, xpu, cpu ...)
     python run.py --no-venv          # use the current Python instead of .venv
     python run.py --no-fast          # skip llama-cpp-python (fast quantized chat on CPU)
 
 What it does:
   1. Creates a virtual environment in .venv (first run only).
-  2. Installs requirements.txt into it. On Linux and Windows it installs the CPU build of
-     PyTorch, which is much smaller than the default CUDA build. Packages are only
-     reinstalled when requirements.txt changes.
+  2. Installs requirements.txt into it. If this PC has an NVIDIA GPU (found with nvidia-smi),
+     it installs the CUDA build of PyTorch so training and chat run on the GPU; otherwise the
+     much smaller CPU build. A CPU build installed earlier is swapped for the CUDA build once a
+     GPU is found. Macs use the regular build, which runs on the Apple GPU (MPS). Packages are
+     only reinstalled when requirements.txt or the PyTorch build changes.
   3. Tries once to install llama-cpp-python (prebuilt CPU wheel), which makes chat with
      fine-tuned models several times faster through 4-bit GGUF copies. If it can't be
      installed, everything still works, just slower.
@@ -25,13 +29,14 @@ Stop it with Ctrl+C.
 
 This file only uses the Python standard library, so it runs before anything is installed.
 """
-import argparse, hashlib, os, socket, subprocess, sys, threading, time, venv, webbrowser
+import argparse, hashlib, os, shutil, socket, subprocess, sys, threading, time, venv, webbrowser
 
 ROOT = os.path.dirname(os.path.abspath(__file__))
 VENV = os.path.join(ROOT, ".venv")
 REQS = os.path.join(ROOT, "requirements.txt")
 STAMP = os.path.join(VENV, ".requirements.sha256")
-TORCH_CPU_INDEX = "https://download.pytorch.org/whl/cpu"
+TORCH_INDEX = "https://download.pytorch.org/whl/{}"
+TORCH_CPU_INDEX = TORCH_INDEX.format("cpu")
 LLAMA_CPU_INDEX = "https://abetlen.github.io/llama-cpp-python/whl/cpu"
 FAST_STAMP = os.path.join(VENV, ".fast-attempted")
 
@@ -78,9 +83,15 @@ def requirements_met(py):
                            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL) == 0
 
 
-def torch_has_cuda_build(py):
-    return subprocess.call([py, "-c", "import torch, sys; sys.exit(0 if torch.version.cuda else 1)"], cwd=ROOT,
-                           stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL) == 0
+def torch_build(py):
+    """'cuda', 'cpu' or None (torch not installed) for the PyTorch in this Python."""
+    code = ("import torch; v = torch.version; "
+            "print('cuda' if v.cuda or getattr(v, 'hip', None) or getattr(v, 'xpu', None) else 'cpu')")
+    try:
+        out = subprocess.run([py, "-c", code], cwd=ROOT, capture_output=True, text=True, timeout=300)
+    except Exception:
+        return None
+    return out.stdout.strip() if out.returncode == 0 else None
 
 
 def has_module(py, name):
@@ -88,27 +99,108 @@ def has_module(py, name):
                            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL) == 0
 
 
-def ensure_packages(py, reinstall=False, gpu=False):
+def nvidia_gpus():
+    """[(name, memory_mb, driver_version)] from nvidia-smi, or [] when there is no NVIDIA GPU/driver."""
+    exe = shutil.which("nvidia-smi")
+    if not exe and os.name == "nt":
+        p = os.path.join(os.environ.get("SystemRoot", r"C:\Windows"), "System32", "nvidia-smi.exe")
+        exe = p if os.path.exists(p) else None
+    if not exe:
+        return []
+    try:
+        out = subprocess.run([exe, "--query-gpu=name,memory.total,driver_version", "--format=csv,noheader,nounits"],
+                             capture_output=True, text=True, timeout=20)
+    except Exception:
+        return []
+    gpus = []
+    for line in out.stdout.splitlines() if out.returncode == 0 else []:
+        parts = [x.strip() for x in line.split(",")]
+        if len(parts) >= 3:
+            try:
+                gpus.append((parts[0], int(float(parts[1])), parts[2]))
+            except ValueError:
+                gpus.append((parts[0], 0, parts[2]))
+    return gpus
+
+
+def cuda_index_for(gpus):
+    """PyTorch CUDA builds that fit the driver, best first (tried in order, since each PyTorch
+    release only publishes a few CUDA versions). CUDA 13 needs driver 580+; CUDA 12 builds run on
+    525+ (Linux) / 528+ (Windows) and 12.8 is the first with RTX 50xx support; older drivers get 11.8."""
+    driver = gpus[0][2]
+    try:
+        major = int(driver.split(".")[0])
+    except ValueError:
+        major = 999
+    if major < (528 if os.name == "nt" else 525):
+        return "cu118"
+    if major >= 580:
+        return "cu130,cu128,cu126"
+    return "cu128,cu126"
+
+
+def choose_torch(a):
+    """Which PyTorch build to install: 'cpu', 'cuXXX', another index name, or 'default' (macOS / PyPI)."""
+    if a.torch_index:
+        return a.torch_index
+    if sys.platform == "darwin":
+        return "default"  # the macOS wheel includes the Apple GPU (MPS) backend
+    if a.cpu:
+        return "cpu"
+    gpus = nvidia_gpus()
+    if gpus:
+        name, mem, driver = gpus[0]
+        say(f"Found GPU: {name} ({mem / 1024:.1f} GB, driver {driver}). Training and chat will use it.")
+        return cuda_index_for(gpus)
+    if a.gpu:
+        say("--gpu: no NVIDIA driver found (nvidia-smi), installing a CUDA 12 build anyway.")
+        return "cu128,cu126"
+    return "cpu"
+
+
+def ensure_packages(py, variant, reinstall=False):
     with open(REQS, "rb") as f:
-        want = hashlib.sha256(f.read() + (b"gpu" if gpu else b"cpu")).hexdigest()
+        want = hashlib.sha256(f.read() + variant.encode()).hexdigest()
     stamp = STAMP if py == venv_python() else None
     if stamp and not reinstall and os.path.exists(stamp):
         with open(stamp) as f:
             if f.read().strip() == want:
                 return
-    if not stamp and not reinstall and not gpu and requirements_met(py):
+    have = torch_build(py)
+    gpu_wanted = variant.startswith(("cu", "rocm", "xpu"))
+    if not stamp and not reinstall and requirements_met(py) and (not gpu_wanted or have == "cuda"):
         return  # --no-venv and everything in requirements.txt is already there
     say("Installing Python packages (first run takes a few minutes) ...")
     pip(py, "--upgrade", "pip")
-    # The default PyTorch wheel on Linux/Windows bundles CUDA (several GB). This app trains on CPU,
-    # so install the CPU build unless asked otherwise. macOS wheels are already CPU/MPS only.
-    if not gpu and sys.platform != "darwin" and not has_module(py, "torch"):
-        if not pip(py, "torch", "--index-url", TORCH_CPU_INDEX, "--retries", "1", required=False):
-            say("Could not reach the PyTorch CPU index, installing the regular PyTorch build instead.")
-    elif gpu and sys.platform != "darwin" and has_module(py, "torch") and not torch_has_cuda_build(py):
-        say("Replacing the CPU build of PyTorch with the CUDA build ...")
-        pip(py, "--force-reinstall", "torch")
+    if variant != "default":
+        if have == "cpu" and gpu_wanted:
+            say(f"Replacing the CPU build of PyTorch with the GPU (CUDA) build, about 2.5 GB ...")
+            subprocess.call([py, "-m", "pip", "uninstall", "-y", "torch"], cwd=ROOT)
+            have = None
+        if have is None or reinstall:
+            # PyPI's torch is CPU-only on Windows and a large CUDA build on Linux, so always
+            # install from the PyTorch index that matches the hardware.
+            done = False
+            for v in variant.split(","):
+                if pip(py, "torch", "--index-url", TORCH_INDEX.format(v.strip()), "--retries", "2", required=False):
+                    done = True
+                    break
+            if not done:
+                if gpu_wanted:
+                    say(f"Could not install the {variant} build of PyTorch; trying the CPU build so the app still works.")
+                if not pip(py, "torch", "--index-url", TORCH_CPU_INDEX, "--retries", "1", required=False):
+                    say("Could not reach the PyTorch index, installing the regular PyTorch build instead.")
     pip(py, "-r", REQS)
+    if gpu_wanted:
+        check = ("import torch; ok = torch.cuda.is_available() or (hasattr(torch, 'xpu') and torch.xpu.is_available());"
+                 "print(torch.cuda.get_device_name(0) if torch.cuda.is_available() else ''); raise SystemExit(0 if ok else 1)")
+        r = subprocess.run([py, "-c", check], cwd=ROOT, capture_output=True, text=True)
+        if r.returncode == 0:
+            say(f"PyTorch sees the GPU: {r.stdout.strip() or variant}.")
+        else:
+            say("PyTorch was installed but can't use the GPU. Update the NVIDIA driver "
+                "(https://www.nvidia.com/Download/index.aspx), then run this again with --reinstall. "
+                "Until then everything runs on the CPU.")
     if stamp:
         with open(stamp, "w") as f:
             f.write(want)
@@ -178,7 +270,10 @@ def main():
     ap.add_argument("--port", type=int, default=7860)
     ap.add_argument("--no-browser", action="store_true", help="don't open a browser tab")
     ap.add_argument("--reinstall", action="store_true", help="reinstall the Python packages")
-    ap.add_argument("--gpu", action="store_true", help="install the default (CUDA) PyTorch build")
+    g = ap.add_mutually_exclusive_group()
+    g.add_argument("--gpu", action="store_true", help="install the CUDA PyTorch build even if no GPU is detected")
+    g.add_argument("--cpu", action="store_true", help="install the CPU PyTorch build and train on the CPU")
+    g.add_argument("--torch-index", help="PyTorch build to install: cu118, cu126, cu128, xpu (Intel Arc), cpu ...")
     ap.add_argument("--no-venv", action="store_true", help="use the current Python instead of .venv")
     ap.add_argument("--no-fast", action="store_true", help="don't install llama-cpp-python")
     a = ap.parse_args()
@@ -188,10 +283,12 @@ def main():
     os.chdir(ROOT)
 
     py = sys.executable if a.no_venv else ensure_venv()
-    ensure_packages(py, reinstall=a.reinstall, gpu=a.gpu)
+    ensure_packages(py, choose_torch(a), reinstall=a.reinstall)
     ensure_fast(py, skip=a.no_fast)
     ensure_dirs()
 
+    if a.cpu:
+        os.environ["TEXTLLM_DEVICE"] = "cpu"  # the app and every training job it starts stay on the CPU
     port = pick_port(a.host, a.port)
     shown = "127.0.0.1" if a.host == "0.0.0.0" else a.host
     url = f"http://{shown}:{port}"

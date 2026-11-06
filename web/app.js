@@ -101,7 +101,7 @@ async function poll() {
     const j = S.status.job;
     const pill = $("#jobpill");
     pill.classList.toggle("on", j.running);
-    $(".jobtext", pill).textContent = j.running ? `${labelKind(j.kind)}: ${j.name}` : "Idle · no job running";
+    $(".jobtext", pill).textContent = j.running ? `${labelKind(j.kind)}: ${j.name}` : j.external ? `Scheduled crawler: ${j.external.name || "training"}` : "Idle · no job running";
     const b = $("#nav-pending");
     b.hidden = !S.status.pending_feedback;
     b.textContent = S.status.pending_feedback;

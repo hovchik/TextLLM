@@ -117,7 +117,7 @@ def latest(run, quick=None):
     h = os.path.join(d, "history.jsonl")
     if not os.path.exists(h):
         return None
-    rows = [r for r in (json.loads(l) for l in open(h) if l.strip()) if not r.get("partial")]
+    rows = [r for r in (json.loads(l) for l in open(h) if l.strip()) if not r.get("partial") and not r.get("rejected")]
     if quick is not None:
         rows = [r for r in rows if r.get("quick") == quick]
     return json.load(open(os.path.join(d, rows[-1]["file"]))) if rows else None

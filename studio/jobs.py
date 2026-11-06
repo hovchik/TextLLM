@@ -16,10 +16,28 @@ def running():
     return JOB["proc"] is not None and JOB["proc"].poll() is None
 
 
+def external_job():
+    """A job started outside the Studio (the scheduled crawler training a model), from runs/_job.lock."""
+    try:
+        info = json.load(open(LOCK_PATH))
+    except (OSError, ValueError):
+        return None
+    if JOB["proc"] is not None and info.get("pid") == JOB["proc"].pid:
+        return None  # our own
+    from data.crawl import _alive
+
+    return info if _alive(info.get("pid")) else None
+
+
 def launch(kind, name, cmd, log_path, run=None, cleanup=()):
     with _lock:
         if running():
             raise RuntimeError(f"A job is already running ({JOB['kind']}: {JOB['name']}). Stop it first.")
+        ext = external_job()
+        if ext:
+            raise RuntimeError(f"The scheduled news crawler is training ({ext.get('name', 'crawl')}, "
+                               f"since {time.strftime('%H:%M', time.localtime(ext.get('started', 0)))}). "
+                               "Wait for it to finish.")
         os.makedirs(os.path.dirname(log_path), exist_ok=True)
         logf = open(log_path, "a")
         logf.write(f"\n$ {' '.join(cmd)}\n")
@@ -38,8 +56,9 @@ def launch(kind, name, cmd, log_path, run=None, cleanup=()):
 def _watch(proc):
     rc = proc.wait()
     try:
-        os.remove(LOCK_PATH)
-    except OSError:
+        if json.load(open(LOCK_PATH)).get("pid") == proc.pid:
+            os.remove(LOCK_PATH)
+    except (OSError, ValueError):
         pass
     for f in JOB["cleanup"]:
         try:
@@ -81,7 +100,7 @@ def tail(path, n=200):
 def status():
     p = JOB["proc"]
     return {
-        "running": running(),
+        "running": running(), "external": external_job(),
         "kind": JOB["kind"], "name": JOB["name"], "run": JOB["run"], "started": JOB["started"],
         "exit": None if p is None or p.poll() is None else p.returncode,
         "log": tail(JOB["log"], 60),

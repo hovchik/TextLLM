@@ -586,7 +586,7 @@ def fetch_items(f, c, s, min_chars, limit, languages=()):
 
 
 # ---------------------------------------------------------------- learning
-WEIGHT_FILES = ("ckpt.pt", "adapter", "train_state.pt", "meta.json")   # what a learn step changes
+WEIGHT_FILES = ("ckpt.pt", "adapter", "train_state.pt", "examples.pt", "meta.json")   # what a learn step changes
 
 
 def _requeue(batch):
@@ -636,8 +636,24 @@ def quick_score(run, since=0):
     if not os.path.exists(h):
         return None
     rows = [r for r in (json.loads(l) for l in open(h) if l.strip())
-            if r.get("quick") and not r.get("partial") and not r.get("max_tokens") and r["time"] >= since]
+            if r.get("quick") and not r.get("partial") and not r.get("max_tokens") and not r.get("rejected")
+            and r["time"] >= since]
     return rows[-1]["score"] if rows else None
+
+
+def reject_evals(run, since):
+    """Mark evaluations made after `since` as rejected: they scored weights that were undone."""
+    h = os.path.join(run, "eval", "history.jsonl")
+    if not os.path.exists(h):
+        return
+    rows = [json.loads(l) for l in open(h) if l.strip()]
+    for r in rows:
+        if r["time"] >= since:
+            r["rejected"] = True
+    tmp = h + ".tmp"
+    with open(tmp, "w") as f:
+        f.writelines(json.dumps(r) + "\n" for r in rows)
+    os.replace(tmp, h)
 
 
 def evaluate_quick(run):
@@ -665,48 +681,70 @@ def learn(run, min_docs, passes, gate=True, max_drop=5.0, c=None, run_id=None):
     if studio_busy():
         say("The Studio is running another job; the articles wait for the next run.")
         return None
+    stale = os.path.join(run, "_before_learn")
+    if os.path.isdir(stale):  # a previous learn step was killed before it was decided: undo it
+        say("a previous learn step never finished (power cut or kill): restoring the weights from before it")
+        reject_evals(run, os.path.getmtime(stale))
+        restore_weights(run, stale)
     before = quick_score(run, since=_weights_time(run)) if gate else None
     if gate and before is None:
         say("No quick check of the current weights yet, so one runs first (the baseline).")
         before = evaluate_quick(run)
     say(f"== teaching {os.path.basename(run)} {n} new article(s)")
+    with job_lock():
+        verdict, after = _learn_checked(run, passes, gate, max_drop, before)
+    if c is not None and run_id is not None:
+        c.execute("UPDATE runs SET score_before=?, score_after=?, verdict=? WHERE id=?", (before, after, verdict, run_id))
+        c.commit()
+    return os.path.basename(run) + ("" if verdict in ("learned", "kept") else f" ({verdict})")
+
+
+def _learn_checked(run, passes, gate, max_drop, before):
+    """Train, then (with the gate) evaluate and maybe undo. The article batch and the weight backup
+    stay until the whole step is decided, so a Stop or crash anywhere in it restores the old weights
+    and requeues the articles."""
+    import shutil
+
+    started = time.time()
     bk = backup_weights(run) if gate else None
-    batch = PENDING + f".{int(time.time())}.learning"
+    batch = PENDING + f".{int(started)}.learning"
     os.replace(PENDING, batch)  # new articles found while training go to a fresh pending.txt
+
+    def undo(reason):
+        _requeue(batch)
+        if bk and os.path.isdir(bk):
+            say("restoring the weights from before this learn step")
+            restore_weights(run, bk)
+            reject_evals(run, started)
+        raise SystemExit(f"{reason}; the articles stay queued for the next run")
+
     try:
         rc = run_child([sys.executable, "learn.py", "--run", run, "--text-file", batch, "--passes", str(passes)], ROOT)
     except KeyboardInterrupt:
         rc = 130
     if rc != 0:
-        _requeue(batch)
-        if bk:
-            say("restoring the weights from before this learn step")
-            restore_weights(run, bk)
-        raise SystemExit(f"training {'stopped' if rc == 130 else f'failed (exit {rc})'}; "
-                         "the articles stay queued for the next run")
-    os.remove(batch)
-    verdict = "learned"
-    after = None
-    if gate:
+        undo("training stopped" if rc == 130 else f"training failed (exit {rc})")
+    if not gate:
+        os.remove(batch)
+        return "learned", None
+    try:
         after = evaluate_quick(run)
-        if before is not None and after is not None:
-            say(f"== quick-check score {before} → {after}")
-            if after < before - max_drop:
-                say(f"  the model got worse by more than {max_drop} points: undoing this learn step "
-                    "(the articles stay in the corpus but are not retried)")
-                restore_weights(run, bk)
-                verdict = "rolled back"
-            else:
-                verdict = "kept"
-        else:
-            say("  no comparable scores, keeping the new weights")
-        if os.path.isdir(bk):
-            import shutil
-            shutil.rmtree(bk, ignore_errors=True)
-    if c is not None and run_id is not None:
-        c.execute("UPDATE runs SET score_before=?, score_after=?, verdict=? WHERE id=?", (before, after, verdict, run_id))
-        c.commit()
-    return os.path.basename(run) + ("" if verdict in ("learned", "kept") else f" ({verdict})")
+    except (KeyboardInterrupt, Exception) as e:
+        undo("stopped during the quick check" if isinstance(e, KeyboardInterrupt) else f"quick check failed ({e})")
+    verdict = "kept"
+    if before is not None and after is not None:
+        say(f"== quick-check score {before} → {after}")
+        if after < before - max_drop:
+            say(f"  the model got worse by more than {max_drop} points: undoing this learn step "
+                "(the articles stay in the corpus but are not retried)")
+            restore_weights(run, bk)
+            reject_evals(run, started)  # the score of the undone weights must not become the next baseline
+            verdict = "rolled back"
+    else:
+        say("  no comparable scores, keeping the new weights")
+    shutil.rmtree(bk, ignore_errors=True)
+    os.remove(batch)
+    return verdict, after
 
 
 # ---------------------------------------------------------------- locks and the OS schedule
@@ -768,6 +806,27 @@ def studio_busy():
     if not info or not _alive(info.get("pid")):
         return False
     return info["pid"] not in (os.getpid(), os.getppid())
+
+
+class job_lock:
+    """Hold runs/_job.lock while this crawl trains, so the Studio refuses to start a second job on
+    the same model. When the Studio itself started this crawl, the lock is already ours."""
+
+    def __enter__(self):
+        info = _read_lock(JOB_LOCK)
+        self.mine = not (info and _alive(info.get("pid")) and info["pid"] in (os.getpid(), os.getppid()))
+        if self.mine:
+            os.makedirs(os.path.dirname(JOB_LOCK), exist_ok=True)
+            json.dump({"pid": os.getpid(), "kind": "crawl", "name": "news & web (scheduled)", "started": time.time()},
+                      open(JOB_LOCK, "w"))
+        return self
+
+    def __exit__(self, *exc):
+        if self.mine:
+            try:
+                os.remove(JOB_LOCK)
+            except OSError:
+                pass
 
 
 def crawl_command(learn=None, min_docs=20, passes=2, languages="", gate=True):

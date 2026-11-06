@@ -1011,7 +1011,7 @@ def eval_overview():
     for m in jobs.runs():
         h = os.path.join(RUNS, m["name"], "eval", "history.jsonl")
         if os.path.exists(h):
-            rows = [r for r in (json.loads(l) for l in open(h) if l.strip()) if not r.get("partial")]
+            rows = [r for r in (json.loads(l) for l in open(h) if l.strip()) if not r.get("partial") and not r.get("rejected")]
             if rows:
                 out.append({"model": m["name"], "latest": rows[-1], "history": rows[-20:]})
     s = db.get_settings()

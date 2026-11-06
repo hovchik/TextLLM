@@ -55,6 +55,20 @@ def weights_stamp(run_dir):
                max((_newest(f) for f in glob.glob(os.path.join(run_dir, "*.gguf"))), default=0))
 
 
+def tokenizer_path(run_dir, meta):
+    """The from-scratch run's tokenizer. New runs keep a copy as <run>/tokenizer.json, so the run
+    folder works on its own after moving it to another PC; older runs stored an absolute path."""
+    cands = [os.path.join(run_dir, "tokenizer.json")]
+    if meta.get("tok"):
+        cands.append(meta["tok"] if os.path.isabs(meta["tok"]) else os.path.join(run_dir, meta["tok"]))
+    cands.append(os.path.join(ROOT, "tokenizer", "bpe.json"))
+    for p in cands:
+        if os.path.exists(p):
+            return p
+    raise FileNotFoundError(f"no tokenizer for {run_dir}: copy tokenizer/bpe.json from the old PC "
+                            f"to {cands[0]}")
+
+
 def has_llama_cpp():
     try:
         import llama_cpp  # noqa: F401
@@ -79,7 +93,7 @@ class Engine:
             from tokenizers import Tokenizer
             from model.gpt import GPT, GPTConfig
 
-            self.tok = Tokenizer.from_file(self.meta["tok"])
+            self.tok = Tokenizer.from_file(tokenizer_path(run_dir, self.meta))
             ck = torch.load(os.path.join(run_dir, "ckpt.pt"), map_location=self.device)
             self.model = GPT(GPTConfig(**ck["config"])).to(self.device).eval()
             self.model.load_state_dict(ck["model"])

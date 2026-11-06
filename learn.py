@@ -32,9 +32,11 @@ def learn_scratch(a, meta, text_dir, tmp):
     import torch
     from tokenizers import Tokenizer
 
+    from chat_engine import tokenizer_path
+
     ck = torch.load(os.path.join(a.run, "ckpt.pt"), map_location="cpu")
     cfg, step = ck["config"], ck["step"]
-    tok = Tokenizer.from_file(meta["tok"])
+    tok = Tokenizer.from_file(tokenizer_path(a.run, meta))
     eot = tok.token_to_id(EOT)
     ids = []
     for f in os.listdir(text_dir):

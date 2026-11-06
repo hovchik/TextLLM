@@ -3,6 +3,8 @@
 Single GPU:   python train.py --preset small
 Multi-GPU:    torchrun --nproc_per_node=8 train.py --preset 1b --batch 16 --grad-accum 4
 CPU run:      python train.py --preset cpu --vocab 8192 --batch 16 --grad-accum 4 --max-steps 20000 --warmup 500 --eval-every 250 --lr 1e-3
+Continue:     add --resume (same --out). The model size comes from the checkpoint, so it also works on
+              another PC after copying the run folder (see transfer.py).
 """
 import argparse, json, math, os, time
 from contextlib import nullcontext
@@ -78,9 +80,16 @@ def main():
     autocast = torch.autocast("cuda", dtype=dtype) if cuda else nullcontext()
 
     cfg = GPTConfig(vocab_size=a.vocab, **PRESETS[a.preset])
-    model = GPT(cfg).to(a.device)
     step, best = 0, float("inf")
     ckpt_path = os.path.join(a.out, "ckpt.pt")
+    ck = None
+    if a.resume and os.path.exists(ckpt_path):
+        # map_location: a checkpoint saved on a GPU machine loads on a CPU one and the other way round
+        ck = torch.load(ckpt_path, map_location=a.device, weights_only=False)
+        cfg = GPTConfig(**ck["config"])  # the saved size wins over --preset/--vocab
+    elif a.resume and master:
+        print(f"no checkpoint at {ckpt_path}; starting from step 0")
+    model = GPT(cfg).to(a.device)
 
     decay = [p for p in model.parameters() if p.dim() >= 2]
     no_decay = [p for p in model.parameters() if p.dim() < 2]
@@ -88,13 +97,12 @@ def main():
         [{"params": decay, "weight_decay": a.weight_decay}, {"params": no_decay, "weight_decay": 0.0}],
         lr=a.lr, betas=(0.9, 0.95), fused=cuda,
     )
-    if a.resume and os.path.exists(ckpt_path):
-        ck = torch.load(ckpt_path, map_location=a.device)
+    if ck is not None:
         model.load_state_dict(ck["model"])
         opt.load_state_dict(ck["opt"])
         step, best = ck["step"], ck["best_val"]
         if master:
-            print(f"resumed at step {step}")
+            print(f"resumed at step {step} (best val {best:.3f})")
     if master:
         print(f"{a.preset}: {model.num_params()/1e6:.1f}M params, "
               f"{a.batch * a.grad_accum * world * cfg.block_size:,} tokens/step")
@@ -108,6 +116,23 @@ def main():
 
     train = Loader(os.path.join(a.data, "train.bin"), a.batch, cfg.block_size, a.device, rank, world)
     val = Loader(os.path.join(a.data, "val.bin"), a.batch, cfg.block_size, a.device, rank, world)
+    if ck is not None and world == 1 and "rng" in ck:
+        # Pick up the random batch sampling where it stopped instead of replaying the first batches.
+        train.rng.bit_generator.state = ck["rng"]["train"]
+        val.rng.bit_generator.state = ck["rng"]["val"]
+        torch.set_rng_state(ck["rng"]["torch"].cpu())  # map_location may have moved it
+    ck = None  # free the memory
+
+    def save():
+        # Write to a temp file and swap it in, so a crash or power cut mid-save never leaves a
+        # broken ckpt.pt (the previous one stays until the new one is complete).
+        tmp = ckpt_path + ".tmp"
+        torch.save({"model": raw.state_dict(), "opt": opt.state_dict(), "config": asdict(cfg),
+                    "step": step, "best_val": best,
+                    "rng": {"train": train.rng.bit_generator.state, "val": val.rng.bit_generator.state,
+                            "torch": torch.get_rng_state()},
+                    "args": vars(a)}, tmp)
+        os.replace(tmp, ckpt_path)
 
     @torch.no_grad()
     def evaluate():
@@ -158,8 +183,7 @@ def main():
                 print(f"== step {step} val loss {vl:.3f} (ppl {math.exp(vl):.1f})")
                 log(kind="val", step=step, loss=vl)
                 best = min(best, vl)
-                torch.save({"model": raw.state_dict(), "opt": opt.state_dict(), "config": asdict(cfg),
-                            "step": step, "best_val": best}, ckpt_path)
+                save()
     if ddp:
         dist.destroy_process_group()
 

@@ -286,10 +286,19 @@ def train(r: TrainReq):
     out = os.path.join(RUNS, name)
     os.makedirs(out, exist_ok=True)
     if r.mode == "scratch":
-        if not os.path.exists(os.path.join(ROOT, "data/bin/train.bin")):
+        if not (r.resume and os.path.exists(os.path.join(out, "train_cmd.json"))) and \
+                not os.path.exists(os.path.join(ROOT, "data/bin/train.bin")):
             err("Prepare the training data first (Training → Data, steps 1–3).")
-        json.dump({"type": "scratch", "tok": os.path.join(ROOT, "tokenizer/bpe.json"), "preset": r.preset},
-                  open(os.path.join(out, "meta.json"), "w"))
+        tok_copy = os.path.join(out, "tokenizer.json")
+        if not (r.resume and os.path.exists(tok_copy)):
+            # Keep the tokenizer with the weights, so the run folder can be moved to another PC.
+            src = os.path.join(ROOT, "tokenizer/bpe.json")
+            if not os.path.exists(src):
+                err("Train the tokenizer first (Training → Data, step 2).")
+            shutil.copyfile(src, tok_copy)
+        meta_p = os.path.join(out, "meta.json")
+        if not (r.resume and os.path.exists(meta_p)):
+            json.dump({"type": "scratch", "tok": "tokenizer.json", "preset": r.preset}, open(meta_p, "w"))
         cmd = [PY, "train.py", "--out", out, "--preset", r.preset, "--vocab", str(r.vocab),
                "--max-steps", str(r.steps), "--batch", str(r.batch), "--grad-accum", str(r.accum), "--lr", str(r.lr),
                "--warmup", str(max(10, r.steps // 40)), "--eval-every", str(max(10, r.steps // 80))]
@@ -311,6 +320,22 @@ def train(r: TrainReq):
             cmd += ["--instructions", inst, "--book-share", str(r.book_share)]
         if r.gguf:
             cmd += ["--gguf"]
+        if r.resume:
+            cmd.append("--resume")
+    saved_cmd = os.path.join(out, "train_cmd.json")
+    if r.resume and os.path.exists(saved_cmd):
+        # Continue with the run's own settings (LR schedule, batch, data), not today's form values.
+        cmd = [PY] + json.load(open(saved_cmd))
+        cmd = [out if i > 0 and cmd[i - 1] == "--out" else c for i, c in enumerate(cmd)]
+        if "--resume" not in cmd:
+            cmd.append("--resume")
+        if "--max-steps" in cmd:  # "train longer": a bigger step count in the form extends the run
+            i = cmd.index("--max-steps") + 1
+            if int(cmd[i]) > 0 and r.steps > int(cmd[i]):
+                cmd[i] = str(r.steps)
+    else:
+        rel = lambda c: os.path.relpath(c, ROOT).replace(os.sep, "/") if os.path.isabs(c) and c.startswith(ROOT) else c
+        json.dump([rel(c) for c in cmd[1:] if c != "--resume"], open(saved_cmd, "w"))
     mp = os.path.join(out, "metrics.jsonl")
     if not r.resume and os.path.exists(mp):
         os.rename(mp, os.path.join(out, f"metrics.{int(time.time())}.jsonl"))
@@ -368,6 +393,47 @@ def run_detail(name: str):
         keep = set(id(r) for r in tr[::k]) | set(id(r) for r in tr[-1:])
         rows = [r for r in rows if r["kind"] != "train" or id(r) in keep]
     return {"summary": jobs.run_summary(d), "metrics": rows, "log": jobs.tail(os.path.join(d, "log.txt"), 200)}
+
+
+@app.get("/api/runs/{name}/export")
+def export_run(name: str, data: bool = False):
+    """Download the run as one .zip to continue training it on another PC (transfer.py)."""
+    import transfer
+
+    d = run_dir(name)
+    if jobs.running() and jobs.JOB["run"] == name:
+        err("Stop the training first (the last checkpoint is kept), then export.", 409)
+    exp = os.path.join(RUNS, "_exports")
+    os.makedirs(exp, exist_ok=True)
+    for f in os.listdir(exp):  # keep only the newest export around; they can be large
+        os.remove(os.path.join(exp, f))
+    fn = f"{os.path.basename(d)}{'-with-data' if data else ''}.textllm.zip"
+    out = transfer.export(d, os.path.join(exp, fn), with_data=data, log=lambda m: None)
+    return FileResponse(out, filename=fn, media_type="application/zip")
+
+
+@app.post("/api/runs/import")
+async def import_run(file: UploadFile = File(...), name: str = Form(""), force: bool = Form(False)):
+    import transfer
+
+    tmp = os.path.join(RUNS, "_uploads", f"import-{int(time.time() * 1000)}.zip")
+    os.makedirs(os.path.dirname(tmp), exist_ok=True)
+    try:
+        with open(tmp, "wb") as f:
+            while chunk := await file.read(1 << 20):
+                f.write(chunk)
+        msgs = []
+        try:
+            got = transfer.import_bundle(tmp, name.strip() or None, force, log=msgs.append)
+        except SystemExit as e:
+            err(str(e), 409 if "exists" in str(e) else 400)
+        except Exception as e:  # noqa: BLE001  (bad zip, disk full, …)
+            err(f"Import failed: {e}", 400)
+    finally:
+        if os.path.exists(tmp):
+            os.remove(tmp)
+    ENGINES.clear()
+    return {"ok": True, "name": got, "log": "\n".join(msgs)}
 
 
 @app.delete("/api/runs/{name}")

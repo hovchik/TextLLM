@@ -28,6 +28,7 @@ const I = {
   plus: '<svg viewBox="0 0 24 24"><path d="M12 5v14M5 12h14"/></svg>',
   play: '<svg viewBox="0 0 24 24"><path d="M7 4v16l13-8z"/></svg>',
   stop: '<svg viewBox="0 0 24 24"><rect x="6" y="6" width="12" height="12" rx="2"/></svg>',
+  download: '<svg viewBox="0 0 24 24"><path d="M12 4v12m-5-5 5 5 5-5M4 16v3a1 1 0 0 0 1 1h14a1 1 0 0 0 1-1v-3"/></svg>',
   upload: '<svg viewBox="0 0 24 24"><path d="M12 16V4m-5 5 5-5 5 5M4 16v3a1 1 0 0 0 1 1h14a1 1 0 0 0 1-1v-3"/></svg>',
   model: '<svg viewBox="0 0 24 24"><path d="M12 3 4 7.5v9L12 21l8-4.5v-9zM4 7.5l8 4.5 8-4.5M12 12v9"/></svg>',
   chat: '<svg viewBox="0 0 24 24"><path d="M4 5h16v11H8l-4 4z"/></svg>',
@@ -265,7 +266,7 @@ function trainNew() {
         <label class="field">Tokens / example<input class="input" id="f-seq" type="number" value="512"></label>
         <label class="field">LoRA rank<input class="input" id="f-lorar" type="number" value="8"><span class="hint">8 below 1B · 16 for 2B+</span></label>
         <label class="field">Passes over the data<input class="input" id="f-epochs" type="number" step="0.5" value="0"><span class="hint">0 = use training steps</span></label>
-      </div><label class="row" style="margin-top:12px"><span class="switch"><input type="checkbox" id="f-resume"><span></span></span> Resume from the last checkpoint (from scratch only)</label></details></div>
+      </div><label class="row" style="margin-top:12px"><span class="switch"><input type="checkbox" id="f-resume"><span></span></span> Resume from the last checkpoint</label></details></div>
       <div class="row end"><button class="btn primary" id="start">${I.play} Start training</button></div>
     </div>
     <div class="card" style="display:flex;flex-direction:column;gap:14px"><h2>What to expect</h2><div id="expect" class="muted"></div></div>
@@ -386,15 +387,45 @@ async function trainTexts() {
   };
 }
 
+const IMPORT_BAR = `<div class="row" style="justify-content:space-between;margin-bottom:12px"><span class="hint">Moving from another PC? Export the model there (open it → Export), then import the .zip here and press Resume.</span>
+  <label class="btn sm">${I.upload} Import a model (.zip)<input type="file" id="imp-file" accept=".zip" hidden></label></div>`;
+
+function wireImport() {
+  const inp = $("#imp-file");
+  if (!inp) return;
+  inp.onchange = async () => {
+    const f = inp.files[0];
+    if (!f) return;
+    const fd = new FormData(); fd.append("file", f);
+    toast(`Importing <b>${esc(f.name)}</b>…`);
+    try {
+      let r;
+      try { r = await api("/api/runs/import", { method: "POST", body: fd }); }
+      catch (e) {
+        if (!/already exists/.test(e.message)) throw e;
+        const nn = prompt(`${e.message}\n\nType another name to keep both, or leave it empty to replace the existing one:`, "");
+        if (nn === null) return;
+        const fd2 = new FormData(); fd2.append("file", f);
+        if (nn.trim()) fd2.append("name", nn.trim()); else fd2.append("force", "true");
+        r = await api("/api/runs/import", { method: "POST", body: fd2 });
+      }
+      const warn = (r.log || "").split("\n").filter((l) => /^(Note|Warning)/.test(l));
+      toast(`Imported <b>${esc(r.name)}</b>. Open it and press Resume to keep training.${warn.map((w) => "<br>" + esc(w)).join("")}`, warn.length ? "" : "ok");
+      route(); setTimeout(() => openRun(r.name), 400);
+    } catch (e) { fail(e); } finally { inp.value = ""; }
+  };
+}
+
 function drawRuns(rs) {
   const body = $("#tbody");
   if (!body) return;
-  if (!rs.length) { body.innerHTML = `<div class="card empty"><div class="big">🏁</div>No runs yet.<br><a class="btn primary" style="margin-top:14px" href="#/training/new">Start a training</a></div>`; return; }
-  body.innerHTML = `<div class="card"><table><thead><tr><th>Model</th><th>Type</th><th>Progress</th><th>Level</th><th>Val loss</th><th>Updated</th></tr></thead><tbody>
+  if (!rs.length) { body.innerHTML = IMPORT_BAR + `<div class="card empty"><div class="big">🏁</div>No runs yet.<br><a class="btn primary" style="margin-top:14px" href="#/training/new">Start a training</a></div>`; wireImport(); return; }
+  body.innerHTML = IMPORT_BAR + `<div class="card"><table><thead><tr><th>Model</th><th>Type</th><th>Progress</th><th>Level</th><th>Val loss</th><th>Updated</th></tr></thead><tbody>
     ${rs.map((r) => `<tr class="click" data-run="${esc(r.name)}"><td><b>${esc(r.name)}</b> ${r.running ? '<span class="pill good">● running</span>' : r.ready ? "" : '<span class="pill">no weights yet</span>'}</td>
       <td>${typePill(r.type)}</td><td style="min-width:160px"><div class="bar"><i style="width:${(r.progress * 100).toFixed(1)}%"></i></div><div class="hint">${num(r.step)} / ${num(r.max_steps)}${r.eta_sec ? " · ETA " + dur(r.eta_sec) : ""}</div></td>
       <td>${levelBar(r.level)}</td><td>${num(r.val_loss, 3)}</td><td class="muted">${ago(r.updated)}</td></tr>`).join("")}</tbody></table></div>`;
   $$("tr[data-run]").forEach((t) => (t.onclick = () => openRun(t.dataset.run)));
+  wireImport();
 }
 
 async function openRun(name) {
@@ -409,7 +440,7 @@ async function openRun(name) {
       const s = d.summary;
       $("#r-title", m).textContent = s.name;
       $("#r-sub", m).innerHTML = `${typePill(s.type)} ${s.base ? esc(s.base) : s.preset ? esc(s.preset) + " size" : ""} ${s.running ? '<span class="pill good">● training</span>' : ""}`;
-      $("#r-btns", m).innerHTML = `${s.ready ? `<button class="btn sm primary" id="r-chat">${I.chat} Chat</button>` : ""}${s.ready && !s.running ? `<button class="btn sm" id="r-eval" title="Score it on the 60 fixed prompts">Evaluate</button><button class="btn sm ghost" id="r-quick" title="8 prompts, a few minutes">Quick check</button>` : ""}${s.type === "lora" && s.ready && !s.running ? `<button class="btn sm ${s.fast ? "ghost" : ""}" id="r-gguf" title="Merge, convert to GGUF and quantize to 4-bit">${s.fast ? "⚡ Fast copy ✓" : "⚡ Make fast CPU copy"}</button>` : ""}${s.type === "scratch" && !s.running ? `<button class="btn sm" id="r-resume">${I.play} Resume</button>` : ""}${s.running ? `<button class="btn sm danger" id="r-stop">${I.stop} Stop</button>` : `<button class="btn sm ghost" id="r-del">${I.trash}</button>`}`;
+      $("#r-btns", m).innerHTML = `${s.ready ? `<button class="btn sm primary" id="r-chat">${I.chat} Chat</button>` : ""}${s.ready && !s.running ? `<button class="btn sm" id="r-eval" title="Score it on the 60 fixed prompts">Evaluate</button><button class="btn sm ghost" id="r-quick" title="8 prompts, a few minutes">Quick check</button>` : ""}${s.type === "lora" && s.ready && !s.running ? `<button class="btn sm ${s.fast ? "ghost" : ""}" id="r-gguf" title="Merge, convert to GGUF and quantize to 4-bit">${s.fast ? "⚡ Fast copy ✓" : "⚡ Make fast CPU copy"}</button>` : ""}${s.ready && !s.running ? `<button class="btn sm" id="r-resume" title="Continue training from the last checkpoint">${I.play} Resume</button><button class="btn sm ghost" id="r-export" title="Download as one .zip to continue on another PC">${I.download} Export</button>` : ""}${s.running ? `<button class="btn sm danger" id="r-stop">${I.stop} Stop</button>` : `<button class="btn sm ghost" id="r-del">${I.trash}</button>`}`;
       $("#r-stats", m).innerHTML = [
         ["Progress", `${(s.progress * 100).toFixed(0)}%`], ["Step", `${num(s.step)} / ${num(s.max_steps)}`], ["ETA", s.running ? dur(s.eta_sec) : "—"],
         ["Train loss", num(s.train_loss, 3)], ["Val loss", num(s.val_loss, 3)], ["Perplexity", num(s.perplexity, 1)],
@@ -427,7 +458,14 @@ async function openRun(name) {
       on("#r-gguf", async () => { try { await api(`/api/runs/${encodeURIComponent(s.name)}/gguf`, { method: "POST" }); toast("Making the fast CPU copy…", "ok"); poll(); load(); } catch (e) { fail(e); } });
       on("#r-stop", async () => { await api("/api/stop", { method: "POST" }).catch(fail); toast("Stopped. The last checkpoint is kept."); load(); });
       on("#r-resume", async () => {
-        try { await api("/api/train", { json: { mode: "scratch", name: s.name, resume: true, preset: s.preset || "cpu", steps: s.max_steps, vocab: S.status?.data?.vocab || 8192 } }); toast("Resumed", "ok"); load(); } catch (e) { fail(e); }
+        try { await api("/api/train", { json: { mode: s.type, name: s.name, resume: true, preset: s.preset || "cpu", base: s.base || undefined, steps: s.max_steps, vocab: S.status?.data?.vocab || 8192 } }); toast("Resumed", "ok"); load(); } catch (e) { fail(e); }
+      });
+      on("#r-export", () => {
+        const data = s.type === "scratch" && confirm(`Export ${s.name}.\n\nOK = also include the training data (bigger file; the other PC continues on exactly the same text).\nCancel = model only.`);
+        const link = document.createElement("a");
+        link.href = `/api/runs/${encodeURIComponent(s.name)}/export${data ? "?data=true" : ""}`;
+        link.download = ""; document.body.appendChild(link); link.click(); link.parentNode.removeChild(link);
+        toast("Packing the model… the download starts in a moment.", "ok");
       });
       on("#r-del", async () => { if (!confirm(`Delete ${s.name} and its weights?`)) return; await api(`/api/runs/${encodeURIComponent(s.name)}`, { method: "DELETE" }).catch(fail); close(); route(); });
     };

@@ -2,15 +2,23 @@
 
 A small GPT-style model trained on public-domain books (Project Gutenberg) and openly licensed web text (FineWeb-Edu).
 
-## Setup
+## Quick start: one command
+```bash
+./run.sh             # macOS / Linux
+run.bat              # Windows (or double-click it)
+python run.py        # any OS
+```
+The first run creates a virtual environment in `.venv`, installs the packages (the CPU build of PyTorch on Linux and Windows), and creates the data folders. Then it starts the Studio and opens http://127.0.0.1:7860 in your browser. Later runs skip the install unless `requirements.txt` changed. Stop it with Ctrl+C.
+
+Options: `--port 8000`, `--host 0.0.0.0` (other devices on your network), `--no-browser`, `--reinstall`, `--gpu` (CUDA PyTorch), `--no-venv` (use your current Python). If the port is busy it uses the next free one.
+
+## Manual setup
 ```bash
 pip install -r requirements.txt
-```
-
-## Easiest: Text LLM Studio (web app)
-```bash
 python app.py        # open http://127.0.0.1:7860
 ```
+
+## Text LLM Studio (web app)
 | Page | What it does |
 |---|---|
 | **Dashboard** | KPIs, learning curves, setup checklist and your models at a glance |

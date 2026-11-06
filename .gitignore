@@ -5,3 +5,4 @@ runs/
 checkpoints/
 tokenizer/bpe.json
 *.pt
+.venv/

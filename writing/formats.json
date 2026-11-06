@@ -1,0 +1,110 @@
+{
+  "_comment": "Writing formats used by Chat, training data and evaluation. Edit limits here when a platform changes them. chars = hard character limit, target_chars = what the prompt asks for, hashtags = [min, max].",
+  "formats": {
+    "free": {
+      "label": "Free chat",
+      "group": "Other",
+      "system": "You are a skilled writer. Follow the request exactly and write clear, natural text.",
+      "fields": [],
+      "steps": "single",
+      "sampling": {"temperature": 0.8, "top_p": 0.95, "top_k": 40, "presence_penalty": 0.5, "max_tokens": 400}
+    },
+    "x_post": {
+      "label": "X post",
+      "group": "Social post",
+      "chars": 280,
+      "target_chars": 240,
+      "hashtags": [0, 2],
+      "system": "You write posts for X (Twitter). Rules:\n- One post, at most {target_chars} characters.\n- Start with the most interesting point; no preamble.\n- Plain, punchy language. At most 1 emoji.\n- Use between {hashtags_min} and {hashtags_max} hashtags, at the end.\n- Output only the post.",
+      "fields": ["tone", "audience", "hashtags"],
+      "steps": "best_of",
+      "candidates": 3,
+      "sampling": {"temperature": 0.9, "top_p": 0.95, "top_k": 20, "presence_penalty": 1.0, "max_tokens": 120}
+    },
+    "threads_post": {
+      "label": "Threads post",
+      "group": "Social post",
+      "chars": 500,
+      "target_chars": 400,
+      "hashtags": [0, 1],
+      "system": "You write posts for Threads. Rules:\n- One post, at most {target_chars} characters.\n- Conversational, warm tone; one idea.\n- At most 2 emojis and at most {hashtags_max} hashtag.\n- Output only the post.",
+      "fields": ["tone", "audience"],
+      "steps": "best_of",
+      "candidates": 3,
+      "sampling": {"temperature": 0.9, "top_p": 0.95, "top_k": 20, "presence_penalty": 1.0, "max_tokens": 180}
+    },
+    "linkedin_post": {
+      "label": "LinkedIn post",
+      "group": "Social post",
+      "chars": 3000,
+      "target_chars": 1300,
+      "hashtags": [0, 3],
+      "hook_words": 12,
+      "ends_with_question": true,
+      "system": "You write LinkedIn posts. Rules:\n- First line is a hook of at most {hook_words} words.\n- 3-5 short paragraphs, one idea each, blank line between.\n- Plain, confident tone. At most 1 emoji. At most {hashtags_max} hashtags, at the end.\n- End with one question to the reader.\n- Stay under {target_chars} characters.\n- Output only the post.",
+      "fields": ["takeaway", "audience", "tone", "cta"],
+      "steps": "best_of",
+      "candidates": 2,
+      "sampling": {"temperature": 0.8, "top_p": 0.95, "top_k": 20, "presence_penalty": 1.0, "max_tokens": 400}
+    },
+    "instagram_caption": {
+      "label": "Instagram caption",
+      "group": "Social post",
+      "chars": 2200,
+      "target_chars": 600,
+      "hashtags": [3, 10],
+      "max_hashtags": 30,
+      "system": "You write Instagram captions. Rules:\n- A vivid first line, then 2-4 short lines.\n- Emojis are welcome but not more than 4.\n- Finish with a blank line and a block of {hashtags_min}-{hashtags_max} relevant hashtags.\n- Stay under {target_chars} characters in total.\n- Output only the caption.",
+      "fields": ["mood", "audience", "hashtags"],
+      "steps": "best_of",
+      "candidates": 2,
+      "sampling": {"temperature": 0.9, "top_p": 0.95, "top_k": 20, "presence_penalty": 1.0, "max_tokens": 250}
+    },
+    "facebook_post": {
+      "label": "Facebook post",
+      "group": "Social post",
+      "chars": 63206,
+      "target_chars": 800,
+      "hashtags": [0, 2],
+      "system": "You write Facebook posts. Rules:\n- Friendly, personal tone; 1-3 short paragraphs.\n- At most 2 emojis and {hashtags_max} hashtags.\n- Stay under {target_chars} characters.\n- Output only the post.",
+      "fields": ["tone", "audience", "cta"],
+      "steps": "best_of",
+      "candidates": 2,
+      "sampling": {"temperature": 0.85, "top_p": 0.95, "top_k": 20, "presence_penalty": 1.0, "max_tokens": 300}
+    },
+    "story": {
+      "label": "Short story",
+      "group": "Long form",
+      "words": [300, 1500],
+      "system": "You are a fiction writer. Write a complete short story with a clear beginning, middle and end, concrete details, and natural dialogue. Show, don't tell. Do not add a title unless asked. About {words} words.",
+      "outline_prompt": "Plan a short story for this request. Write 5 numbered beats, one line each: setup, inciting moment, rising tension, climax, ending. Request: {request}",
+      "fields": ["genre", "characters", "setting", "length", "ending"],
+      "steps": "outline",
+      "sampling": {"temperature": 0.95, "top_p": 0.95, "top_k": 40, "presence_penalty": 1.5, "max_tokens": 1024}
+    },
+    "essay": {
+      "label": "Essay",
+      "group": "Long form",
+      "words": [400, 1200],
+      "system": "You are an essayist. Write a focused essay: state the thesis in the first paragraph, develop 3-5 points with examples, and end with a conclusion that adds something new. Clear paragraphs, no bullet lists, no headings unless asked. About {words} words.",
+      "outline_prompt": "Plan an essay for this request. Write the thesis in one sentence, then 3-5 numbered points, one line each. Request: {request}",
+      "fields": ["audience", "stance", "length"],
+      "steps": "outline",
+      "sampling": {"temperature": 0.7, "top_p": 0.95, "top_k": 40, "presence_penalty": 1.0, "max_tokens": 1024}
+    }
+  },
+  "field_labels": {
+    "tone": "Tone",
+    "audience": "Audience",
+    "hashtags": "Hashtags (number)",
+    "takeaway": "Key takeaway",
+    "cta": "Call to action",
+    "mood": "Mood",
+    "genre": "Genre",
+    "characters": "Characters",
+    "setting": "Setting",
+    "length": "Length (words)",
+    "ending": "Ending",
+    "stance": "Stance"
+  }
+}

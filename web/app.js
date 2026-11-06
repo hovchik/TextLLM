@@ -107,7 +107,7 @@ async function poll() {
     S.onStatus && S.onStatus(S.status);
   } catch {}
 }
-const labelKind = (k) => ({ training: "Training", data: "Preparing data", texts: "Learning texts", feedback: "Learning from ratings" }[k] || k);
+const labelKind = (k) => ({ training: "Training", data: "Preparing data", texts: "Learning texts", feedback: "Learning from ratings", eval: "Evaluating", export: "Making fast CPU copy" }[k] || k);
 $("#jobpill").onclick = () => (location.hash = "#/training/live");
 
 // ---------------------------------------------------------------- router
@@ -202,6 +202,15 @@ const modelCard = (m) => `<div class="card model-card">
 </div>`;
 
 // ================================================================ TRAINING
+// Base models for fine-tuning (all Apache 2.0). Qwen3.5 and Gemma 4 load through their multimodal class.
+const BASES = [
+  { id: "Qwen/Qwen3-0.6B", n: "Qwen3 0.6B · CPU default", h: "Apache 2.0 · text-only · fast on CPU, GGUF works", r: 8 },
+  { id: "Qwen/Qwen3-1.7B", n: "Qwen3 1.7B · better writing", h: "Apache 2.0 · LoRA on CPU overnight", r: 16 },
+  { id: "Qwen/Qwen3.5-0.8B", n: "Qwen3.5 0.8B · newest (experimental)", h: "Apache 2.0 · multimodal checkpoint; needs the latest transformers and a llama.cpp that supports it", r: 8 },
+  { id: "Qwen/Qwen3.5-2B", n: "Qwen3.5 2B · newest (experimental)", h: "Apache 2.0 · as above; slower on CPU", r: 16 },
+  { id: "HuggingFaceTB/SmolLM3-3B", n: "SmolLM3 3B · fully open", h: "Apache 2.0 · train on a free GPU, chat via GGUF on CPU", r: 16 },
+  { id: "Qwen/Qwen2.5-0.5B-Instruct", n: "Qwen2.5 0.5B · previous default", h: "Apache 2.0 · kept for comparison", r: 8 },
+];
 const PRESETS = [
   { id: "tiny", n: "Tiny", p: "4M", h: "Testing only · minutes on CPU" },
   { id: "cpu", n: "CPU", p: "14M", h: "Laptop/desktop · ~1 day", tag: "CPU" },
@@ -237,8 +246,12 @@ function trainNew() {
         ${PRESETS.map((p) => `<div class="opt ${p.id === "cpu" ? "on" : ""}" data-v="${p.id}">${p.tag ? `<span class="tag">${p.tag}</span>` : ""}<b>${p.n}</b><span>${p.p} params</span><span class="hint">${p.h}</span></div>`).join("")}
       </div></div>
       <div id="basebox" hidden><h3>2 · Base model</h3><div class="grid g2" style="margin-top:10px">
-        <label class="field">Hugging Face model<input class="input" id="f-base" value="Qwen/Qwen2.5-0.5B-Instruct"><span class="hint">0.5B runs on CPU; try Qwen/Qwen2.5-1.5B-Instruct on a GPU.</span></label>
-        <label class="field">Book examples<input class="input" id="f-examples" type="number" value="4000"><span class="hint">Passages taken from your corpus</span></label>
+        <label class="field">Base model<select class="input" id="f-basepick">${BASES.map((b) => `<option value="${b.id}">${esc(b.n)}</option>`).join("")}<option value="">Other (type a Hugging Face id)…</option></select><span class="hint" id="f-basehint"></span></label>
+        <label class="field">Hugging Face model id<input class="input" id="f-base" value="${BASES[0].id}"></label>
+        <label class="row" style="flex-wrap:nowrap"><span class="switch"><input type="checkbox" id="f-inst" checked><span></span></span> Use the writing instructions (posts, stories, essays)</label>
+        <label class="field"><span>Book passages in the mix <b id="f-bsv">20</b>%</span><input type="range" id="f-bookshare" min="0" max="100" step="5" value="20"><span class="hint">Keeps a literary style; the plan suggests at most 20%</span></label>
+        <label class="row" style="flex-wrap:nowrap"><span class="switch"><input type="checkbox" id="f-gguf" checked><span></span></span> Make a fast CPU copy after training (GGUF, 4-bit)</label>
+        <label class="field">Book examples (no instructions)<input class="input" id="f-examples" type="number" value="4000"><span class="hint">Used when there is no instruction set</span></label>
       </div></div>
       <div><h3>3 · Settings</h3><div class="grid g3" style="margin-top:10px">
         <label class="field">Model name<input class="input" id="f-name" value="my-writer"></label>
@@ -250,6 +263,8 @@ function trainNew() {
         <label class="field">Grad accumulation<input class="input" id="f-accum" type="number" value="4"></label>
         <label class="field">Vocab size<input class="input" id="f-vocab" type="number" value="${S.status?.data?.vocab || 8192}"><span class="hint">must match tokenizer</span></label>
         <label class="field">Tokens / example<input class="input" id="f-seq" type="number" value="512"></label>
+        <label class="field">LoRA rank<input class="input" id="f-lorar" type="number" value="8"><span class="hint">8 below 1B · 16 for 2B+</span></label>
+        <label class="field">Passes over the data<input class="input" id="f-epochs" type="number" step="0.5" value="0"><span class="hint">0 = use training steps</span></label>
       </div><label class="row" style="margin-top:12px"><span class="switch"><input type="checkbox" id="f-resume"><span></span></span> Resume from the last checkpoint (from scratch only)</label></details></div>
       <div class="row end"><button class="btn primary" id="start">${I.play} Start training</button></div>
     </div>
@@ -257,24 +272,27 @@ function trainNew() {
   </div>`;
   const expect = () => {
     $("#expect").innerHTML = st.mode === "lora"
-      ? `<p>The model already writes well; fine-tuning shifts its <b>style</b> toward your books and texts.</p><p>On CPU each step takes roughly a minute, so 300 steps is a few hours. On a free Colab/Kaggle GPU it's minutes.</p><p>After training, chat with it and <b>rate answers</b>: every rating teaches it what you like.</p>`
+      ? `<p>The base model already writes well; fine-tuning teaches it <b>formats</b> (post lengths, hooks, essay structure) from the writing instructions, plus a little <b>style</b> from your books.</p><p>Build the instructions first under <a href="#/training/data"><u>Data</u></a> → step 4. ${S.status?.data?.instructions ? `<b>${num(S.status.data.instructions)}</b> examples are ready.` : "None built yet."}</p><p>On CPU each step takes roughly a minute, so 300 steps is a few hours. On a free Colab/Kaggle GPU it's minutes.</p><p>Then <b>Evaluate</b> it on Analytics and rate answers in Chat.</p>`
       : `<p>A from-scratch model starts from <b>random letters</b> and climbs the 6 quality levels as it reads.</p>${levelBar({ n: 4, label: "Grammatical sentences" })}<p style="margin-top:12px">With the <b>CPU</b> size, expect book-like sentences that drift after a few lines, after about a day. Bigger sizes need a GPU.</p><p>It continues the text you type rather than following instructions.</p>`;
   };
   const setMode = (m) => {
     st.mode = m;
     $$("#modes .opt").forEach((o) => o.classList.toggle("on", o.dataset.v === m));
     $("#sizebox").hidden = m !== "scratch"; $("#basebox").hidden = m === "scratch";
-    Object.entries(m === "scratch" ? { steps: 20000, lr: 0.001, batch: 16, accum: 4, name: "my-writer" } : { steps: 300, lr: 0.0002, batch: 2, accum: 8, name: "my-qwen-writer" })
+    Object.entries(m === "scratch" ? { steps: 20000, lr: 0.001, batch: 16, accum: 4, name: "my-writer" } : { steps: 300, lr: 0.0002, batch: 2, accum: 8, name: "my-social-writer" })
       .forEach(([k, v]) => ($("#f-" + k).value = v));
     expect();
   };
   $$("#modes .opt").forEach((o) => (o.onclick = () => setMode(o.dataset.v)));
   $$("#presets .opt").forEach((o) => (o.onclick = () => { st.preset = o.dataset.v; $$("#presets .opt").forEach((x) => x.classList.toggle("on", x === o)); }));
+  const baseHint = () => { const b = BASES.find((x) => x.id === $("#f-basepick").value); $("#f-basehint").textContent = b ? b.h : "Any causal LM on Hugging Face"; if (b) { $("#f-base").value = b.id; $("#f-lorar").value = b.r; } };
+  $("#f-basepick").onchange = baseHint; baseHint();
+  $("#f-bookshare").oninput = (e) => ($("#f-bsv").textContent = e.target.value);
   expect();
   $("#start").onclick = async () => {
     const v = (k) => $("#f-" + k).value;
     try {
-      await api("/api/train", { json: { mode: st.mode, name: v("name"), resume: $("#f-resume").checked, preset: st.preset, vocab: +v("vocab"), steps: +v("steps"), batch: +v("batch"), accum: +v("accum"), lr: +v("lr"), base: v("base"), examples: +v("examples"), seq: +v("seq") } });
+      await api("/api/train", { json: { mode: st.mode, name: v("name"), resume: $("#f-resume").checked, preset: st.preset, vocab: +v("vocab"), steps: +v("steps"), batch: +v("batch"), accum: +v("accum"), lr: +v("lr"), base: v("base"), examples: +v("examples"), seq: +v("seq"), instructions: $("#f-inst").checked, book_share: +v("bookshare") / 100, lora_r: +v("lorar"), epochs: +v("epochs"), gguf: $("#f-gguf").checked } });
       toast(`Training <b>${esc(v("name"))}</b> started`, "ok");
       location.hash = "#/training/runs";
       setTimeout(() => openRun(v("name")), 400);
@@ -294,15 +312,19 @@ function trainData() {
         <button class="btn" data-step="tokenizer">${I.play} Run</button></div>
       <div class="step ${d.train_tokens ? "done" : ""}"><div class="num">${d.train_tokens ? "✓" : 3}</div><div><b>Encode the corpus</b><div class="hint">${d.train_tokens ? `${num(d.train_tokens / 1e6, 1)}M tokens ready to train` : "Converts every text into token files for fast training"}</div></div>
         <button class="btn" data-step="encode">${I.play} Run</button></div>
+      <div class="step ${d.instructions ? "done" : ""}"><div class="num">${d.instructions ? "✓" : 4}</div><div><b>Build writing instructions</b> <span class="pill">for fine-tuning</span><div class="hint">${d.instructions ? `${num(d.instructions)} examples of posts, stories and essays` : "Public-domain stories and essays from Gutenberg, your liked and corrected chat answers, and (optional) OpenAssistant + Dolly"}</div>
+        <div class="row" style="margin-top:8px"><label class="row hint"><span class="switch"><input type="checkbox" id="d-hfsets" checked><span></span></span> Include oasst2 (Apache 2.0) and Dolly (CC BY-SA 3.0)</label></div>
+        <div class="hint" style="margin-top:6px">Your own posts and synthetic posts from a bigger model: see <code>data/build_instructions.py --help</code>.</div></div>
+        <button class="btn" data-step="instructions">${I.play} Run</button></div>
     </div></div>
     <div class="card"><h2>Tips</h2><ul class="muted" style="padding-left:18px">
-      <li>Only <b>from-scratch</b> training needs steps 2 and 3. Fine-tuning reads the downloaded text directly.</li>
+      <li>Only <b>from-scratch</b> training needs steps 2 and 3. Fine-tuning uses step 4 plus a share of the downloaded books.</li>
       <li>Want your own books in the corpus? Add them under <a href="#/training/texts"><u>Your texts</u></a> → "Add to training data", then re-run steps 2–3.</li>
       <li>Progress and logs show at the top of this page while a step runs.</li></ul></div></div>
     <div class="card" style="margin-top:16px"><div class="card-head"><h2>Log</h2></div><pre class="console" id="dlog">${esc(S.status.job.kind === "data" ? S.status.job.log : "No data job yet.")}</pre></div>`;
   $$("[data-step]").forEach((b) => (b.onclick = async () => {
     try {
-      await api("/api/data", { json: { step: b.dataset.step, books: +$("#d-books").value, web_gb: +$("#d-web").value, vocab: +$("#d-vocab").value } });
+      await api("/api/data", { json: { step: b.dataset.step, books: +$("#d-books").value, web_gb: +$("#d-web").value, vocab: +$("#d-vocab").value, hf_sets: $("#d-hfsets").checked } });
       toast("Started", "ok"); poll();
     } catch (e) { fail(e); }
   }));
@@ -387,11 +409,12 @@ async function openRun(name) {
       const s = d.summary;
       $("#r-title", m).textContent = s.name;
       $("#r-sub", m).innerHTML = `${typePill(s.type)} ${s.base ? esc(s.base) : s.preset ? esc(s.preset) + " size" : ""} ${s.running ? '<span class="pill good">● training</span>' : ""}`;
-      $("#r-btns", m).innerHTML = `${s.ready ? `<button class="btn sm primary" id="r-chat">${I.chat} Chat</button>` : ""}${s.type === "scratch" && !s.running ? `<button class="btn sm" id="r-resume">${I.play} Resume</button>` : ""}${s.running ? `<button class="btn sm danger" id="r-stop">${I.stop} Stop</button>` : `<button class="btn sm ghost" id="r-del">${I.trash}</button>`}`;
+      $("#r-btns", m).innerHTML = `${s.ready ? `<button class="btn sm primary" id="r-chat">${I.chat} Chat</button>` : ""}${s.ready && !s.running ? `<button class="btn sm" id="r-eval" title="Score it on the 60 fixed prompts">Evaluate</button><button class="btn sm ghost" id="r-quick" title="8 prompts, a few minutes">Quick check</button>` : ""}${s.type === "lora" && s.ready && !s.running ? `<button class="btn sm ${s.fast ? "ghost" : ""}" id="r-gguf" title="Merge, convert to GGUF and quantize to 4-bit">${s.fast ? "⚡ Fast copy ✓" : "⚡ Make fast CPU copy"}</button>` : ""}${s.type === "scratch" && !s.running ? `<button class="btn sm" id="r-resume">${I.play} Resume</button>` : ""}${s.running ? `<button class="btn sm danger" id="r-stop">${I.stop} Stop</button>` : `<button class="btn sm ghost" id="r-del">${I.trash}</button>`}`;
       $("#r-stats", m).innerHTML = [
         ["Progress", `${(s.progress * 100).toFixed(0)}%`], ["Step", `${num(s.step)} / ${num(s.max_steps)}`], ["ETA", s.running ? dur(s.eta_sec) : "—"],
         ["Train loss", num(s.train_loss, 3)], ["Val loss", num(s.val_loss, 3)], ["Perplexity", num(s.perplexity, 1)],
         ["Speed", s.tokens_per_sec ? num(s.tokens_per_sec) + " tok/s" : "—"], ["Trained for", dur(s.train_seconds)],
+        ["Eval score", s.eval_score != null ? `${num(s.eval_score, 1)}${s.eval_quick ? " (quick)" : ""}` : "—"],
       ].map(([l, v]) => `<div class="stat"><div class="l">${l}</div><div class="v">${v}</div></div>`).join("") + `<div class="stat" style="grid-column:span 2"><div class="l">Level</div><div style="margin-top:6px">${levelBar(s.level)}</div></div>`;
       const kinds = [["train", "Training", Charts.PALETTE[0]], ["val", "Validation", Charts.PALETTE[1]], ["feedback", "From ratings", Charts.PALETTE[2]]];
       Charts.line($("#r-chart", m), kinds.map(([k, n, c]) => ({ name: n, color: c, area: k === "train", points: d.metrics.filter((x) => x.kind === k).map((x) => ({ x: x.step, y: x.loss })) })).filter((x) => x.points.length), { xLabel: "step", empty: "Waiting for the first steps…" });
@@ -399,6 +422,9 @@ async function openRun(name) {
       log.textContent = d.log || "No log yet."; if (atEnd) log.scrollTop = 1e9;
       const on = (id, f) => { const b = $(id, m); if (b) b.onclick = f; };
       on("#r-chat", () => { close(); localStorage.setItem("chatModel", s.name); location.hash = "#/chat"; });
+      on("#r-eval", () => startEval(s.name, false).then(load));
+      on("#r-quick", () => startEval(s.name, true).then(load));
+      on("#r-gguf", async () => { try { await api(`/api/runs/${encodeURIComponent(s.name)}/gguf`, { method: "POST" }); toast("Making the fast CPU copy…", "ok"); poll(); load(); } catch (e) { fail(e); } });
       on("#r-stop", async () => { await api("/api/stop", { method: "POST" }).catch(fail); toast("Stopped. The last checkpoint is kept."); load(); });
       on("#r-resume", async () => {
         try { await api("/api/train", { json: { mode: "scratch", name: s.name, resume: true, preset: s.preset || "cpu", steps: s.max_steps, vocab: S.status?.data?.vocab || 8192 } }); toast("Resumed", "ok"); load(); } catch (e) { fail(e); }
@@ -410,30 +436,38 @@ async function openRun(name) {
   });
 }
 
+async function startEval(name, quick) {
+  try { await api("/api/eval", { json: { model: name, quick } }); toast(`${quick ? "Quick check" : "Evaluation"} of <b>${esc(name)}</b> started`, "ok"); poll(); }
+  catch (e) { fail(e); }
+}
+
 // ================================================================ CHAT
 const SUGGEST = [
-  ["Write a short story", "about a lighthouse keeper who finds a message in a bottle"],
-  ["Write a LinkedIn post", "announcing that I trained my own language model"],
-  ["Describe a place", "a rainy harbour town at dawn, in the style of a 19th-century novel"],
-  ["Continue this opening", "\"It was the last train of the night, and only two passengers remained.\""],
+  ["Short story", "A lighthouse keeper finds a message in a bottle", "story"],
+  ["LinkedIn post", "I trained my own language model on public-domain books", "linkedin_post"],
+  ["Essay", "Why reading old books still matters", "essay"],
+  ["X post", "Our small bakery now opens at 7am on weekdays", "x_post"],
 ];
-const C = { conv: null, models: [], busy: false, temp: 0.8, max: 300, prefsFor: null };
+// temp/max: null = use the chosen format's defaults (writing/formats.json)
+const C = { conv: null, models: [], busy: false, temp: null, max: null, prefsFor: null, formats: [], format: "free", fields: {} };
+const fmtLabel = (id) => (C.formats.find((f) => f.id === id) || {}).label || id;
 
 pages.chat = async () => {
   main.innerHTML = `<div class="chat">
     <div class="convs"><div class="convs-head"><button class="btn primary" style="width:100%" id="newchat">${I.plus} New chat</button></div><div class="convs-list" id="convs"></div></div>
     <div class="thread">
-      <div class="thread-head"><select class="input" id="model"></select><span id="model-info" class="row" style="gap:6px"></span><span class="spacer"></span>
+      <div class="thread-head"><select class="input" id="model"></select><select class="input" id="format" title="What to write" style="max-width:190px"></select><span id="model-info" class="row" style="gap:6px"></span><span class="spacer"></span>
         <div style="position:relative"><button class="iconbtn" id="settings-btn" title="Settings">${I.sliders}</button><div class="popover" id="settings" hidden>
-          <label class="field"><span>Creativity <b id="tv">${C.temp}</b></span><input type="range" id="temp" min="0" max="1.5" step="0.05" value="${C.temp}"><span class="hint">Low = focused and predictable · high = surprising</span></label>
-          <label class="field"><span>Max length <b id="mv">${C.max}</b> tokens</span><input type="range" id="max" min="32" max="1024" step="16" value="${C.max}"></label></div></div></div>
+          <label class="field"><span>Creativity <b id="tv">auto</b></span><input type="range" id="temp" min="0" max="1.5" step="0.05" value="0.8"><span class="hint">Low = focused and predictable · high = surprising</span></label>
+          <label class="field"><span>Max length <b id="mv">auto</b> tokens</span><input type="range" id="max" min="32" max="1024" step="16" value="400"></label>
+          <button class="btn sm ghost" id="samp-reset">Use the format's defaults</button></div></div></div>
       <div class="msgs" id="msgs"><div class="msgs-inner" id="inner"></div></div>
-      <div class="composer"><div class="composer-box"><textarea id="input" rows="1" placeholder="Ask for a story, a post, an article…"></textarea><button class="send" id="send" title="Send">${I.send}</button></div>
-        <div class="note">Rate answers with ★ — each rating teaches the model what you like.</div></div>
+      <div class="composer"><div class="fmt-fields" id="fmt-fields"></div><div class="composer-box"><textarea id="input" rows="1" placeholder="Ask for a story, a post, an article…"></textarea><button class="send" id="send" title="Send">${I.send}</button></div>
+        <div class="note">Pick a format for posts, stories and essays · rate answers with ★ — each rating teaches the model what you like.</div></div>
     </div></div>`;
-  C.models = await api("/api/models").catch(() => []);
-  const pref = (() => { try { return localStorage.getItem("chatModel"); } catch { return null; } })() || S.user.prefs.model;
-  $("#model").innerHTML = C.models.length ? C.models.map((m) => `<option value="${esc(m.name)}" ${m.name === pref ? "selected" : ""}>${esc(m.name)} · ${m.type === "lora" ? "fine-tuned" : "from scratch"}</option>`).join("") : `<option value="">No trained models yet</option>`;
+  [C.models, C.formats] = await Promise.all([api("/api/models").catch(() => []), api("/api/formats").catch(() => [])]);
+  const pref = (() => { try { return localStorage.getItem("chatModel"); } catch { return null; } })() || S.user.prefs.model || (C.models.find((m) => m.default) || {}).name;
+  $("#model").innerHTML = C.models.length ? C.models.map((m) => `<option value="${esc(m.name)}" ${m.name === pref ? "selected" : ""}>${esc(m.name)} · ${m.type === "lora" ? "fine-tuned" : "from scratch"}${m.default ? " · default" : ""}</option>`).join("") : `<option value="">No trained models yet</option>`;
   const modelInfo = () => {
     const m = C.models.find((x) => x.name === $("#model").value);
     $("#model-info").innerHTML = m ? `${m.type === "lora" ? "" : levelBar(m.level)} <span class="pill">${starsText(m.avg_rating)} · ${m.ratings} ratings</span>` : "";
@@ -444,6 +478,14 @@ pages.chat = async () => {
   document.addEventListener("click", (e) => { const p = $("#settings"); if (p && !p.contains(e.target)) p.hidden = true; }, { once: false });
   $("#temp").oninput = (e) => ($("#tv").textContent = C.temp = +e.target.value);
   $("#max").oninput = (e) => ($("#mv").textContent = C.max = +e.target.value);
+  $("#samp-reset").onclick = () => { C.temp = C.max = null; drawSampling(); };
+  const groups = [...new Set(C.formats.map((f) => f.group))];
+  $("#format").innerHTML = groups.map((g) => `<optgroup label="${esc(g)}">${C.formats.filter((f) => f.group === g).map((f) => `<option value="${f.id}">${esc(f.label)}</option>`).join("")}</optgroup>`).join("");
+  try { C.format = localStorage.getItem("chatFormat") || C.format; } catch {}
+  if (!C.formats.some((f) => f.id === C.format)) C.format = "free";
+  $("#format").value = C.format;
+  $("#format").onchange = () => { C.format = $("#format").value; try { localStorage.setItem("chatFormat", C.format); } catch {} drawFields(); drawSampling(); };
+  drawFields(); drawSampling();
   const input = $("#input");
   input.oninput = () => { input.style.height = "auto"; input.style.height = Math.min(input.scrollHeight, 200) + "px"; };
   input.onkeydown = (e) => { if (e.key === "Enter" && !e.shiftKey) { e.preventDefault(); send(); } };
@@ -452,6 +494,21 @@ pages.chat = async () => {
   await drawConvs();
   if (C.conv) openConv(C.conv); else drawThread([]);
 };
+
+function drawSampling() {
+  const f = C.formats.find((x) => x.id === C.format);
+  const s = f ? f.sampling : { temperature: 0.8, max_tokens: 400 };
+  $("#temp").value = C.temp ?? s.temperature; $("#tv").textContent = C.temp ?? `auto (${s.temperature})`;
+  $("#max").value = C.max ?? s.max_tokens; $("#mv").textContent = C.max ?? `auto (${s.max_tokens})`;
+}
+function drawFields() {
+  const f = C.formats.find((x) => x.id === C.format);
+  const box = $("#fmt-fields");
+  if (!f || !f.fields.length) { box.innerHTML = ""; return; }
+  const lim = f.chars ? `${num(f.chars)} characters max` : f.words ? `${f.words[0]}–${f.words[1]} words` : "";
+  box.innerHTML = `<span class="pill">${esc(f.label)}${lim ? " · " + lim : ""}</span>` + f.fields.map((x) => `<input class="input sm" data-field="${x.id}" placeholder="${esc(x.label)}" value="${esc(C.fields[x.id] || "")}">`).join("");
+  $$("[data-field]", box).forEach((i) => (i.oninput = () => (C.fields[i.dataset.field] = i.value)));
+}
 
 async function drawConvs() {
   const list = await api("/api/conversations").catch(() => []);
@@ -473,8 +530,8 @@ function drawThread(messages) {
   if (!messages.length) {
     inner.innerHTML = `<div class="welcome"><div class="logo" style="width:54px;height:54px;margin:0 auto 18px;border-radius:16px">${I.logo}</div><h1>What should we write today?</h1>
       <p class="muted">${C.models.length ? "Pick a model above and ask for a story, a post or any text." : 'No trained model yet. <a href="#/training/new"><u>Train one first</u></a>.'}</p>
-      <div class="chips">${SUGGEST.map(([t, s]) => `<div class="chip" data-p="${esc(t + " " + s)}"><b>${t}</b><span>${esc(s)}</span></div>`).join("")}</div></div>`;
-    $$(".chip").forEach((c) => (c.onclick = () => { $("#input").value = c.dataset.p; send(); }));
+      <div class="chips">${SUGGEST.map(([t, s, f]) => `<div class="chip" data-p="${esc(s)}" data-f="${f}"><b>${t}</b><span>${esc(s)}</span></div>`).join("")}</div></div>`;
+    $$(".chip").forEach((c) => (c.onclick = () => { C.format = c.dataset.f; $("#format").value = C.format; drawFields(); drawSampling(); $("#input").value = c.dataset.p; send(); }));
     return;
   }
   const answers = {};
@@ -483,7 +540,12 @@ function drawThread(messages) {
   bindAnswers();
   $("#msgs").scrollTop = 1e9;
 }
-const userHtml = (u) => `<div class="msg user" data-uid="${u.id}"><div class="bubble">${esc(u.content)}</div></div>`;
+const userHtml = (u) => {
+  const fl = u.fields ? (() => { try { return JSON.parse(u.fields); } catch { return {}; } })() : {};
+  const tag = u.format && u.format !== "free" ? `<div class="fmt-tag">${esc(fmtLabel(u.format))}${Object.values(fl).length ? " · " + esc(Object.values(fl).join(" · ")) : ""}</div>` : "";
+  return `<div class="msg user" data-uid="${u.id}"><div class="bubble">${tag}${esc(u.content)}</div></div>`;
+};
+const checkPill = (score) => score == null ? "" : `<span class="pill ${score >= 100 ? "good" : score >= 70 ? "" : "warn"}" title="Automatic format checks: length, hashtags, hook, repetition">checks ${Math.round(score)}%</span>`;
 const fmtBody = (t) => esc(t).split(/\n{2,}/).map((p) => `<p>${p}</p>`).join("");
 function answerHtml(a, alt = "") {
   return `<div class="msg" data-mid="${a.id}" data-uid="${a.prompt_id}"><div class="avatar">${I.logo}</div><div class="answer">
@@ -491,7 +553,7 @@ function answerHtml(a, alt = "") {
     ${a.correction ? `<div class="correction"><b>Your better answer · the model learns from this</b>${esc(a.correction)}</div>` : ""}
     <div class="actions"><span class="stars" title="Rate this answer">${[1, 2, 3, 4, 5].map((n) => `<button data-r="${n}" class="${a.rating >= n ? "on" : ""}" title="${["Bad", "Weak", "OK", "Good", "Great"][n - 1]}">${I.star}</button>`).join("")}</span>
       <button class="act" data-act="improve">${I.edit} Improve</button><button class="act" data-act="regen">${I.redo} Try again</button><button class="act" data-act="copy">${I.copy} Copy</button>
-      <span class="hint" data-status>${a.trained_in ? "✓ learned" : a.rating ? "Rated · will be learned" : ""}</span></div>
+      ${checkPill(a.check_score)}<span class="hint" data-status>${a.trained_in ? (a.trained_in.startsWith("gate-rejected") ? "held back by the quality gate" : "✓ learned") : a.rating ? "Rated · will be learned" : ""}</span></div>
   </div></div>`;
 }
 function bindAnswers() {
@@ -551,12 +613,12 @@ async function send(regenUid) {
   const inner = $("#inner");
   if (!regenUid) {
     if (!C.conv) inner.innerHTML = "";
-    inner.insertAdjacentHTML("beforeend", `<div class="msg user"><div class="bubble">${esc(text)}</div></div>`);
+    inner.insertAdjacentHTML("beforeend", userHtml({ content: text, format: C.format, fields: JSON.stringify(C.fields) }));
     input.value = ""; input.style.height = "auto";
   }
   const holder = document.createElement("div");
   holder.className = "msg";
-  holder.innerHTML = `<div class="avatar">${I.logo}</div><div class="answer"><div class="body cursor"></div></div>`;
+  holder.innerHTML = `<div class="avatar">${I.logo}</div><div class="answer"><div class="hint" data-live-status></div><details class="outline" hidden><summary>Plan</summary><pre></pre></details><div class="body cursor"></div></div>`;
   if (regenUid) {
     const sibs = $$(`.msg[data-uid="${regenUid}"]`);
     sibs[sibs.length - 1].after(holder);
@@ -565,7 +627,7 @@ async function send(regenUid) {
   $("#msgs").scrollTop = 1e9;
   let full = "", done = null;
   try {
-    const r = await fetch("/api/chat", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ model, message: text, conversation_id: C.conv, regenerate: regenUid || null, temperature: C.temp, max_tokens: C.max }) });
+    const r = await fetch("/api/chat", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ model, message: text, conversation_id: C.conv, regenerate: regenUid || null, format: C.format, fields: C.fields, temperature: C.temp, max_tokens: C.max }) });
     if (!r.ok) throw new Error((await r.json()).detail || r.statusText);
     const rd = r.body.getReader(), dec = new TextDecoder();
     let buf = "";
@@ -577,7 +639,10 @@ async function send(regenUid) {
       while ((i = buf.indexOf("\n")) >= 0) {
         const ev = JSON.parse(buf.slice(0, i)); buf = buf.slice(i + 1);
         if (ev.type === "start") { if (!C.conv) { C.conv = ev.conversation_id; drawConvs(); } }
-        if (ev.type === "delta") { full += ev.text; body.innerHTML = fmtBody(full); const m = $("#msgs"); if (m.scrollHeight - m.scrollTop - m.clientHeight < 120) m.scrollTop = 1e9; }
+        if (ev.type === "text") { full = ev.text; body.innerHTML = fmtBody(full); const m = $("#msgs"); if (m.scrollHeight - m.scrollTop - m.clientHeight < 120) m.scrollTop = 1e9; }
+        if (ev.type === "status") $("[data-live-status]", holder).textContent = ev.text;
+        if (ev.type === "outline") { const o = $(".outline", holder); o.hidden = false; $("pre", o).textContent = ev.text; $("[data-live-status]", holder).textContent = "Writing from the plan…"; }
+        if (ev.type === "check") $("[data-live-status]", holder).innerHTML = checkPill(ev.check.score);
         if (ev.type === "error") toast(esc(ev.error), "err");
         if (ev.type === "done") done = ev;
       }
@@ -590,8 +655,8 @@ async function send(regenUid) {
 // ================================================================ ANALYTICS
 pages.analytics = async () => {
   main.innerHTML = `<div class="page"><div class="empty">Loading…</div></div>`;
-  let a;
-  try { a = await api("/api/analytics"); } catch (e) { return fail(e); }
+  let a, ev;
+  try { [a, ev] = await Promise.all([api("/api/analytics"), api("/api/eval")]); } catch (e) { return fail(e); }
   const dist = [1, 2, 3, 4, 5].map((n) => ({ label: "★".repeat(n), value: a.rating_distribution[n] || 0, color: ["#f87171", "#fb923c", "#fbbf24", "#a3e635", "#34d399"][n - 1] }));
   const liked = (a.rating_distribution[4] || 0) + (a.rating_distribution[5] || 0);
   main.innerHTML = `<div class="page">
@@ -603,6 +668,7 @@ pages.analytics = async () => {
       ${kpi("Liked answers", a.counts.rated ? `${Math.round((liked / a.counts.rated) * 100)}%` : "—", I.star, "rated 4–5 stars")}
       ${kpi("Average rating", a.counts.avg_rating ? `${(+a.counts.avg_rating).toFixed(2)}★` : "—", I.spark, `${num(a.counts.rated)} ratings`)}
     </div>
+    ${evalSection(a, ev)}
     <div class="grid g2">
       <div class="card"><div class="card-head"><h2>Validation loss</h2><span class="hint">all models · lower is better</span></div><div id="a-curves"></div></div>
       <div class="card"><div class="card-head"><h2>Ratings per day</h2><span class="hint">bar = count · hover for average</span></div><div id="a-daily"></div></div>
@@ -621,7 +687,67 @@ pages.analytics = async () => {
   const rounds = a.trend.map((t) => ({ label: `${t.model}${t.trained_in ? " · " + t.trained_in.split("@")[1].slice(5) : " · new"}`, value: +(+t.avg).toFixed(2), color: t.trained_in ? Charts.PALETTE[0] : Charts.PALETTE[1], note: `${t.n} ratings` }));
   Charts.bars($("#a-trend"), rounds, { max: 5, fmt: (v) => v.toFixed(1) + "★", empty: "Shows up after the first feedback training" });
   $$("tr[data-run]").forEach((t) => (t.onclick = () => openRun(t.dataset.run)));
+  bindEval(a, ev);
 };
+
+// ---------------------------------------------------------------- evaluation, blind A/B, promotion
+function evalSection(a, ev) {
+  const fmts = Object.keys(ev.formats).filter((f) => f !== "free");
+  const ready = a.runs.filter((r) => r.ready);
+  const opts = (sel) => ready.map((r) => `<option value="${esc(r.name)}" ${r.name === sel ? "selected" : ""}>${esc(r.name)}${r.name === ev.default_model ? " (default)" : ""}</option>`).join("");
+  const byModel = Object.fromEntries(ev.evals.map((e) => [e.model, e.latest]));
+  const cell = (v) => v == null ? '<td class="faint">—</td>' : `<td><span class="pill ${v >= 90 ? "good" : v >= 70 ? "" : "warn"}">${num(v, 0)}</span></td>`;
+  const pf = a.per_format || [];
+  return `<div class="card"><div class="card-head"><h2>Writing quality</h2><span class="hint">automatic checks on the fixed prompt set · 0–100 per format</span></div>
+    <div class="table-scroll"><table><thead><tr><th>Model</th><th>Overall</th>${fmts.map((f) => `<th>${esc(ev.formats[f])}</th>`).join("")}<th>Evaluated</th><th></th></tr></thead><tbody>
+      ${ready.map((r) => { const l = byModel[r.name]; return `<tr><td><b>${esc(r.name)}</b> ${r.name === ev.default_model ? '<span class="pill good">default</span>' : ""} ${r.fast ? '<span class="pill" title="Chat uses the quantized GGUF copy">⚡ fast</span>' : ""}</td>${cell(l?.score)}${fmts.map((f) => cell(l?.per_format?.[f])).join("")}
+        <td class="muted">${l ? `${ago(l.time)}${l.quick ? " · quick" : ""}` : "never"}</td><td style="text-align:right;white-space:nowrap"><button class="btn sm" data-eval="${esc(r.name)}">Evaluate</button> <button class="btn sm ghost" data-quick="${esc(r.name)}">Quick</button></td></tr>`; }).join("") || `<tr><td colspan="${fmts.length + 4}" class="empty">No trained models yet</td></tr>`}
+    </tbody></table></div></div>
+  <div class="grid g2">
+    <div class="card" style="display:flex;flex-direction:column;gap:12px"><div class="card-head"><h2>Compare and promote</h2></div>
+      <p class="hint" style="margin:0">A new model becomes the default only if it wins at least 55% of blind votes and no format's checks drop by more than 5 points.</p>
+      <div class="grid g2"><label class="field">New model<select class="input" id="g-cand">${opts(ready[0]?.name)}</select></label>
+        <label class="field">Current model<select class="input" id="g-cur">${opts(ev.default_model || ready[1]?.name)}</select></label></div>
+      <label class="field">Judge model (optional)<input class="input" id="g-judge" placeholder="e.g. Qwen/Qwen3-4B or /path/to/judge.gguf · empty = you vote"><span class="hint">A bigger Apache 2.0 model votes on every pair, in both orders, to cancel position bias.</span></label>
+      <div class="row"><button class="btn" id="g-pairs">Make A/B pairs</button><button class="btn" id="g-check">Check the gate</button><span class="spacer"></span><button class="btn primary" id="g-promote">Make default</button></div>
+      <div id="g-result" class="muted"></div></div>
+    <div class="card" style="display:flex;flex-direction:column;gap:12px"><div class="card-head"><h2>Blind vote</h2><span class="hint" id="v-left"></span></div><div id="vote"></div>
+      ${ev.pairs.length ? `<table><thead><tr><th>New vs current</th><th>Votes</th><th>New wins</th></tr></thead><tbody>${ev.pairs.map((p) => `<tr><td>${esc(p.run_a)} vs ${esc(p.run_b)}</td><td>${p.votes} <span class="faint">(${p.open} open)</span></td><td>${p.win_rate == null ? "—" : Math.round(p.win_rate * 100) + "%"}</td></tr>`).join("")}</tbody></table>` : ""}</div>
+  </div>
+  <div class="card"><div class="card-head"><h2>Ratings by format</h2><span class="hint">from Chat</span></div><table><thead><tr><th>Format</th><th>Answers</th><th>Rated</th><th>Avg rating</th><th>Avg checks</th><th>Corrected</th></tr></thead><tbody>
+    ${pf.map((r) => `<tr><td>${esc(ev.formats[r.format] || r.format)}</td><td>${num(r.answers)}</td><td>${num(r.rated)}</td><td>${starsText(r.avg)}</td><td>${r.checks == null ? "—" : num(r.checks, 0) + "%"}</td><td>${num(r.corrected)} ${r.answers ? `<span class="faint">(${Math.round((r.corrected / r.answers) * 100)}%)</span>` : ""}</td></tr>`).join("") || `<tr><td colspan="6" class="empty">No answers yet</td></tr>`}
+  </tbody></table></div>`;
+}
+function bindEval(a, ev) {
+  $$("[data-eval]").forEach((b) => (b.onclick = () => startEval(b.dataset.eval, false)));
+  $$("[data-quick]").forEach((b) => (b.onclick = () => startEval(b.dataset.quick, true)));
+  const cand = () => $("#g-cand").value, cur = () => $("#g-cur").value;
+  const showGate = (g) => {
+    const verdict = g.pass === true ? '<span class="pill good">passes</span>' : g.pass === false ? '<span class="pill bad">does not pass</span>' : '<span class="pill warn">not enough evidence</span>';
+    $("#g-result").innerHTML = `${verdict}<ul style="padding-left:18px;margin:8px 0 0">${g.reasons.map((r) => `<li>${esc(r)}</li>`).join("")}</ul>`;
+  };
+  $("#g-pairs").onclick = async () => {
+    if (!cand() || cand() === cur()) return toast("Pick two different models.", "err");
+    try { await api("/api/pairs", { json: { candidate: cand(), current: cur(), judge: $("#g-judge").value } }); toast("Making pairs (evaluates any model without results first)…", "ok"); poll(); } catch (e) { fail(e); }
+  };
+  $("#g-check").onclick = async () => { try { showGate(await api(`/api/gate?candidate=${encodeURIComponent(cand())}&current=${encodeURIComponent(cur())}`)); } catch (e) { fail(e); } };
+  $("#g-promote").onclick = async () => {
+    try { await api("/api/promote", { json: { model: cand() } }); toast(`<b>${esc(cand())}</b> is now the default model`, "ok"); route(); }
+    catch (e) {
+      if (confirm(`${e.message}\n\nMake it the default anyway?`)) { await api("/api/promote", { json: { model: cand(), force: true } }).catch(fail); route(); }
+    }
+  };
+  const drawVote = (r) => {
+    $("#v-left").textContent = r.left ? `${r.left} pairs left` : "";
+    const p = r.pair;
+    if (!p) { $("#vote").innerHTML = `<div class="empty" style="padding:18px">No pairs to vote on. Use <b>Make A/B pairs</b>.</div>`; return; }
+    $("#vote").innerHTML = `<div class="hint"><b>${esc(ev.formats[p.format] || p.format)}</b> · ${esc(p.prompt)}</div>
+      <div class="grid g2"><div class="ab"><div class="body">${fmtBody(p.left)}</div></div><div class="ab"><div class="body">${fmtBody(p.right)}</div></div></div>
+      <div class="row" style="justify-content:center"><button class="btn" data-v="left">Left is better</button><button class="btn ghost" data-v="tie">Tie</button><button class="btn" data-v="right">Right is better</button></div>`;
+    $$("[data-v]", $("#vote")).forEach((b) => (b.onclick = async () => { try { drawVote(await api(`/api/pairs/${p.id}/vote`, { json: { choice: b.dataset.v } })); } catch (e) { fail(e); } }));
+  };
+  api("/api/pairs/next").then(drawVote).catch(() => {});
+}
 
 // ================================================================ FEEDBACK
 pages.feedback = async () => {
@@ -641,7 +767,8 @@ pages.feedback = async () => {
       <div class="card" style="display:flex;flex-direction:column;gap:14px"><h2>Automatic learning</h2>
         <label class="row"><span class="switch"><input type="checkbox" id="auto" ${st.auto_train ? "checked" : ""}><span></span></span> Train automatically</label>
         <label class="field">After this many new ratings<input class="input" type="number" id="thr" min="1" value="${st.auto_threshold}"></label>
-        <p class="hint" style="margin:0">Starts when the app is idle. Fine-tuned models use supervised + preference (DPO) training; from-scratch models re-read liked answers.</p></div>
+        <label class="row"><span class="switch"><input type="checkbox" id="gatefb" ${st.gate_on_feedback !== false ? "checked" : ""}><span></span></span> Quality gate: undo if quick checks get worse</label>
+        <p class="hint" style="margin:0">Starts when the app is idle. Fine-tuned models use supervised + preference (DPO) training; from-scratch models re-read liked answers. The gate runs a quick check before and after (a few minutes on CPU).</p></div>
     </div>
     <div class="card"><div class="card-head"><h2>All rated answers</h2><div class="tabs" id="ff"><button class="on" data-f="all">All</button><button data-f="liked">Liked</button><button data-f="disliked">Disliked</button><button data-f="corrected">Corrected</button><button data-f="pending">Not learned yet</button></div></div>
       <div id="fb-table"></div></div></div>`;
@@ -650,14 +777,14 @@ pages.feedback = async () => {
     $("#fb-table").innerHTML = rows.length ? `<table><thead><tr><th style="width:24%">Prompt</th><th>Answer</th><th>Rating</th><th>Model</th><th>From</th><th>Status</th></tr></thead><tbody>
       ${rows.map((r) => `<tr class="click" data-conv="${r.conversation_id}"><td><div class="clamp">${esc(r.prompt)}</div></td><td><div class="clamp">${esc(r.content)}</div>${r.correction ? `<div class="hint" style="color:var(--good)">✎ corrected</div>` : ""}${r.comment ? `<div class="hint">“${esc(r.comment)}”</div>` : ""}</td>
         <td style="white-space:nowrap;color:var(--star)">${r.rating ? "★".repeat(r.rating) + '<span class="faint">' + "★".repeat(5 - r.rating) + "</span>" : "—"}</td><td>${esc(r.model)}</td><td class="muted">${esc(r.author || "—")}</td>
-        <td>${r.trained_in ? `<span class="pill good" title="${esc(r.trained_in)}">learned</span>` : '<span class="pill warn">waiting</span>'}</td></tr>`).join("")}</tbody></table>`
+        <td>${r.trained_in ? (r.trained_in.startsWith("gate-rejected") ? `<span class="pill bad" title="Training on these made the quick checks worse, so it was undone. Rate again to retry.">held back</span>` : `<span class="pill good" title="${esc(r.trained_in)}">learned</span>`) : '<span class="pill warn">waiting</span>'}</td></tr>`).join("")}</tbody></table>`
       : `<div class="empty"><div class="big">⭐</div>Nothing here yet. Rate answers in <a href="#/chat"><u>Chat</u></a>.</div>`;
     $$("tr[data-conv]").forEach((t) => (t.onclick = () => { C.conv = +t.dataset.conv; location.hash = "#/chat"; }));
   };
   draw("all");
   $$("#ff button").forEach((b) => (b.onclick = () => { $$("#ff button").forEach((x) => x.classList.toggle("on", x === b)); draw(b.dataset.f); }));
-  const save = async () => { try { S.status.settings = await api("/api/settings", { json: { auto_train: $("#auto").checked, auto_threshold: Math.max(1, +$("#thr").value) } }); toast("Saved", "ok"); } catch (e) { fail(e); } };
-  $("#auto").onchange = save; $("#thr").onchange = save;
+  const save = async () => { try { S.status.settings = await api("/api/settings", { json: { auto_train: $("#auto").checked, auto_threshold: Math.max(1, +$("#thr").value), gate_on_feedback: $("#gatefb").checked } }); toast("Saved", "ok"); } catch (e) { fail(e); } };
+  $("#auto").onchange = save; $("#thr").onchange = save; $("#gatefb").onchange = save;
   $$("[data-train]").forEach((b) => (b.onclick = async () => {
     try { await api("/api/feedback/train", { json: { model: b.dataset.train } }); toast(`🎓 <b>${esc(b.dataset.train)}</b> is learning from your ratings`, "ok"); openRun(b.dataset.train); poll(); } catch (e) { fail(e); }
   }));

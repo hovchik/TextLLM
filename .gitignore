@@ -6,3 +6,7 @@ checkpoints/
 tokenizer/bpe.json
 *.pt
 .venv/
+data/instructions/
+data/cache/
+tools/
+*.gguf

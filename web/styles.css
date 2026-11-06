@@ -261,3 +261,12 @@ tr.click { cursor: pointer; } tr.click:hover td { background: var(--surface2); }
   .chat { grid-template-columns: 1fr; height: calc(100vh - 56px); } .convs { display: none; }
   .chips { grid-template-columns: 1fr; }
 }
+
+/* writing formats */
+.fmt-fields { max-width: 780px; margin: 0 auto 8px; display: flex; flex-wrap: wrap; gap: 6px; align-items: center; }
+.fmt-fields .input.sm { width: auto; flex: 1 1 140px; padding: 6px 10px; font-size: 13px; border-radius: 8px; }
+.fmt-tag { font-size: 11px; color: var(--muted); margin-bottom: 4px; text-transform: uppercase; letter-spacing: .04em; }
+.answer .outline { margin: 4px 0 8px; font-size: 13px; color: var(--muted); }
+.answer .outline pre { white-space: pre-wrap; margin: 6px 0 0; font-family: inherit; }
+.ab { border: 1px solid var(--border); border-radius: 12px; padding: 12px 14px; background: var(--bg2); max-height: 340px; overflow: auto; font-size: 14px; }
+.table-scroll { overflow-x: auto; }

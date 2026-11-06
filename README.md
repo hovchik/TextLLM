@@ -1,6 +1,8 @@
 # Text LLM
 
-A small GPT-style model trained on public-domain books (Project Gutenberg) and openly licensed web text (FineWeb-Edu).
+A writing model for social posts, stories and essays: a small open model fine-tuned on rights-cleared writing data and run fast on CPU, plus a from-scratch GPT trained on public-domain books (Project Gutenberg) and openly licensed web text (FineWeb-Edu).
+
+The fine-tuned path is the one to use for writing; see [Phase 2](#phase-2-a-writing-model-for-posts-stories-and-essays-lora).
 
 ## Quick start: one command
 ```bash
@@ -23,8 +25,8 @@ python app.py        # open http://127.0.0.1:7860
 |---|---|
 | **Dashboard** | KPIs, learning curves, setup checklist and your models at a glance |
 | **Training** | New model wizard (from scratch or fine-tune), data preparation, *Your texts* (upload PDF/DOC/DOCX/TXT/MD/HTML, links, folders → learn → delete), and all runs with live progress, ETA, loss chart, level and log |
-| **Chat** | Conversations with any trained model, streaming answers, ★ ratings, *Improve* (write the answer you wanted), *Try again* |
-| **Analytics** | Validation loss across models, ratings per day, rating distribution, whether feedback training helped, leaderboard, job history |
+| **Chat** | Conversations with any trained model, a format picker (posts, stories, essays) with a small form, streaming answers, automatic format checks, ★ ratings, *Improve* (write the answer you wanted), *Try again* |
+| **Analytics** | Writing-quality scores per format, blind A/B votes, promotion of the default model, ratings per format, validation loss, ratings per day, leaderboard, job history |
 | **Feedback** | Every rated answer, "Train now" per model, and automatic learning after N new ratings |
 | **Users** | Add people, set their role (admin or user), reset passwords, remove accounts |
 | **Settings** | Your display name, password and chat defaults (model, creativity, length) |
@@ -119,12 +121,59 @@ The architecture is a pre-norm decoder with RMSNorm, rotary position embeddings,
 Checkpoints are written to `checkpoints/ckpt.pt` at every evaluation.
 The default `--max-steps 100000` with batch 16×8×1024 is about 13B tokens, so lower it if you want a shorter run.
 
-## Phase 2: fine-tune an open model (LoRA)
-`finetune/finetune_lora.py` teaches `Qwen/Qwen2.5-0.5B-Instruct` (Apache-2.0) to continue book passages in chat form.
-That gives it a literary style while it keeps following requests like "write a story about…" or "write a post about…".
-You can add your own examples with `--extra my_examples.jsonl`, one `{"prompt": "...", "response": "..."}` per line.
+## Phase 2: a writing model for posts, stories and essays (LoRA)
+The recommended path on CPU: fine-tune a small Apache 2.0 instruct model on writing instructions, run it as a
+4-bit GGUF, write with per-format templates, and only promote a new model when it measurably wins.
+
+**1. Build the writing instructions** (Training → Data → step 4, or):
 ```bash
-python finetune/finetune_lora.py --raw data/raw/gutenberg --out runs/finetune-qwen --max-steps 300
+python data/build_instructions.py --from-studio --hf-sets
+python data/build_instructions.py --my-posts my_posts.txt          # your own posts, separated by --- lines
+# optional, on a free Colab/Kaggle GPU (or a 1.7-4B GGUF on CPU, ~50 per format):
+python data/build_instructions.py --synth-model Qwen/Qwen3-8B --synth-per-format 300 --backtranslate Qwen/Qwen3-8B
 ```
-On CPU this is slow. My rough guess is about a minute per step, so 300 steps is several hours, but I haven't measured it.
-On a free Colab or Kaggle GPU, use `--base Qwen/Qwen2.5-1.5B-Instruct --batch 8 --seq 1024` for better writing.
+| Source | License |
+|---|---|
+| Gutenberg books tagged "Short stories" / "Essays", split into single pieces with a matching request | public domain (US) |
+| Your liked and corrected chat answers, your own posts | yours |
+| Posts written by an Apache 2.0 model (best of 3 by the automatic checks) | Apache 2.0 output |
+| OpenAssistant oasst2 / Databricks Dolly 15k, capped at ~12% | Apache 2.0 / CC BY-SA 3.0 (keep attribution) |
+
+Each example records its `source` and `license`; counts are in `data/instructions/stats.json`.
+Sets scraped from Reddit or social platforms are not used.
+
+**2. Fine-tune** (Training → New model → Fine-tune, or):
+```bash
+python finetune/finetune_lora.py --base Qwen/Qwen3-0.6B --out runs/my-social-writer \
+    --instructions data/instructions/train.jsonl --book-share 0.2 --lora-r 8 --epochs 2 --gguf
+```
+- Base models in the wizard: Qwen3 0.6B (CPU default) and 1.7B, Qwen3.5 0.8B / 2B (newest, multimodal checkpoints, marked
+  experimental), SmolLM3 3B, and the previous Qwen2.5 0.5B. All Apache 2.0. Thinking mode is always off for writing.
+- Book continuation is capped at `--book-share` (20%) of the mix, so the model learns formats and keeps some style.
+- CPU speed-ups: threads = physical cores, bfloat16 autocast on CPUs with AVX-512 BF16 or AMX, length-bucketed
+  batches (short posts aren't padded to essay length), and a disk cache of the tokenized examples.
+- On a free GPU use `--base Qwen/Qwen3-1.7B --batch 8 --seq 1024 --lora-r 16`, then copy the run folder back.
+
+**3. Fast CPU chat.** `--gguf` (on by default in the wizard) merges the adapter, converts it with llama.cpp's
+`convert_hf_to_gguf.py` and quantizes it to Q4_K_M with llama-cpp-python. Chat and evaluation use
+`runs/<name>/model-Q4_K_M.gguf` whenever it is newer than the adapter; feedback training rebuilds it.
+Run it by hand with `python export_gguf.py --run runs/my-social-writer` (or the run's "Make fast CPU copy" button).
+`run.py` installs a prebuilt llama-cpp-python once; without it everything still works through PyTorch, just slower.
+The converter comes from a llama.cpp checkout (`--llama-cpp PATH`, `$LLAMA_CPP_DIR`, or a shallow clone into `tools/`).
+
+**4. Formats in Chat.** Pick X post, Threads post, LinkedIn post, Instagram caption, Facebook post, Short story or
+Essay. Each has a system prompt, a small form (tone, audience, takeaway, hashtags, length…) and its own sampling.
+Posts are checked (length limit, hashtags, hook, closing question) and regenerated up to 3 times if they fail;
+stories and essays are planned first (outline, shown above the answer) and then written from the plan.
+Limits and prompts live in `writing/formats.json`, so a platform change is a one-line edit.
+
+**5. Evaluate and promote.**
+```bash
+python evaluate.py --run runs/my-social-writer            # 60 fixed prompts (writing/eval_prompts.jsonl)
+python evaluate.py --run runs/my-social-writer --quick    # 8 prompts, a few minutes
+python evaluate.py --pairs runs/my-social-writer runs/old-writer [--judge Qwen/Qwen3-4B]
+```
+Analytics shows the scores per format, a blind A/B voting card, ratings per format, and a **Make default** button.
+A model becomes the default only if it wins at least 55% of at least 10 blind votes and no format's checks drop by more
+than 5 points (`studio/gate.py`). Automatic feedback training runs a quick check before and after and restores the
+previous adapter if any format drops by more than 5 points (switch: Feedback → Quality gate).

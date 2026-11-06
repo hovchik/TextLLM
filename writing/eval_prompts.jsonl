@@ -1,0 +1,60 @@
+{"id": "x_post-01", "format": "x_post", "message": "Announce that our small bakery now opens at 7am on weekdays", "fields": {"tone": "cheerful", "hashtags": "1"}}
+{"id": "x_post-02", "format": "x_post", "message": "Share one lesson from running every morning for a year", "fields": {"tone": "reflective"}}
+{"id": "x_post-03", "format": "x_post", "message": "A tip for staying focused when working from home", "fields": {"tone": "practical", "audience": "remote workers"}}
+{"id": "x_post-04", "format": "x_post", "message": "React to the first snow of the winter in the city", "fields": {"tone": "playful", "hashtags": "0"}}
+{"id": "x_post-05", "format": "x_post", "message": "Invite people to a free community book swap this Saturday", "fields": {"tone": "friendly", "hashtags": "2"}}
+{"id": "threads_post-01", "format": "threads_post", "message": "Why I started writing a journal again", "fields": {"tone": "honest"}}
+{"id": "threads_post-02", "format": "threads_post", "message": "Ask followers for their favourite underrated novel", "fields": {"tone": "curious"}}
+{"id": "threads_post-03", "format": "threads_post", "message": "A small win from today: fixed a bug that took three days", "fields": {"tone": "relieved", "audience": "developers"}}
+{"id": "linkedin_post-01", "format": "linkedin_post", "message": "What I learned from my first year as a team lead", "fields": {"takeaway": "Listening beats having answers", "audience": "new managers", "tone": "humble"}}
+{"id": "linkedin_post-02", "format": "linkedin_post", "message": "Our team shipped a feature by cutting scope in half", "fields": {"takeaway": "Smaller launches teach faster", "audience": "product teams", "cta": "no"}}
+{"id": "linkedin_post-03", "format": "linkedin_post", "message": "Why I hire for curiosity over experience", "fields": {"takeaway": "Curious people grow into roles", "audience": "founders and hiring managers", "tone": "confident"}}
+{"id": "linkedin_post-04", "format": "linkedin_post", "message": "Lessons from a failed product launch", "fields": {"takeaway": "Talk to users before building", "audience": "startup people", "tone": "candid"}}
+{"id": "linkedin_post-05", "format": "linkedin_post", "message": "Celebrate a colleague who mentored five juniors this year", "fields": {"takeaway": "Mentoring multiplies a team", "tone": "warm", "cta": "no"}}
+{"id": "instagram_caption-01", "format": "instagram_caption", "message": "Photo of a sunrise hike in the mountains", "fields": {"mood": "peaceful", "hashtags": "5"}}
+{"id": "instagram_caption-02", "format": "instagram_caption", "message": "Homemade pasta night with friends", "fields": {"mood": "cozy"}}
+{"id": "instagram_caption-03", "format": "instagram_caption", "message": "Before-and-after of a balcony garden", "fields": {"mood": "proud", "audience": "plant lovers"}}
+{"id": "instagram_caption-04", "format": "instagram_caption", "message": "A rainy day in an old bookshop", "fields": {"mood": "dreamy", "hashtags": "4"}}
+{"id": "facebook_post-01", "format": "facebook_post", "message": "Thank neighbours who helped after the storm", "fields": {"tone": "grateful"}}
+{"id": "facebook_post-02", "format": "facebook_post", "message": "Announce a family-friendly charity run next month", "fields": {"tone": "upbeat", "cta": "Sign up via the link in the comments"}}
+{"id": "facebook_post-03", "format": "facebook_post", "message": "Share a memory of our grandmother's garden", "fields": {"tone": "nostalgic"}}
+{"id": "story-01", "format": "story", "message": "A lighthouse keeper finds a message in a bottle addressed to her", "fields": {"genre": "literary", "length": "500"}}
+{"id": "story-02", "format": "story", "message": "A boy trades his only toy for a strange seed", "fields": {"genre": "fable", "ending": "bittersweet"}}
+{"id": "story-03", "format": "story", "message": "Two rivals stuck in a lift during a blackout", "fields": {"genre": "comedy", "characters": "two chess players", "length": "600"}}
+{"id": "story-04", "format": "story", "message": "A detective solves a theft at a village fair", "fields": {"genre": "mystery", "setting": "English village, 1920s"}}
+{"id": "story-05", "format": "story", "message": "The last bus driver in a city where everyone now flies", "fields": {"genre": "science fiction"}}
+{"id": "story-06", "format": "story", "message": "A grandmother teaches her grandson to bake bread during a storm", "fields": {"genre": "family", "ending": "warm"}}
+{"id": "story-07", "format": "story", "message": "A soldier returns home and his dog does not recognise him", "fields": {"genre": "drama", "length": "700"}}
+{"id": "story-08", "format": "story", "message": "A cartographer discovers a town that is not on any map", "fields": {"genre": "fantasy"}}
+{"id": "story-09", "format": "story", "message": "A night shift nurse and a patient who tells stories", "fields": {"genre": "literary", "ending": "open"}}
+{"id": "story-10", "format": "story", "message": "A thief who only steals books", "fields": {"genre": "crime", "characters": "an elderly thief", "ending": "surprising"}}
+{"id": "story-11", "format": "story", "message": "A violinist loses her hearing before the big concert", "fields": {"genre": "drama"}}
+{"id": "story-12", "format": "story", "message": "Children build a raft to cross a flooded valley", "fields": {"genre": "adventure", "length": "800"}}
+{"id": "story-13", "format": "story", "message": "A robot learns to tell jokes at a retirement home", "fields": {"genre": "comedy", "ending": "happy"}}
+{"id": "story-14", "format": "story", "message": "A letter arrives fifty years late", "fields": {"genre": "romance"}}
+{"id": "story-15", "format": "story", "message": "A fisherman bargains with the sea", "fields": {"genre": "folk tale", "setting": "northern coast"}}
+{"id": "story-16", "format": "story", "message": "The first day at a school where teachers are ghosts", "fields": {"genre": "children's story", "length": "400"}}
+{"id": "story-17", "format": "story", "message": "A chef must cook for the critic who ruined his father", "fields": {"genre": "drama", "ending": "redemptive"}}
+{"id": "story-18", "format": "story", "message": "A mountain village votes on whether to let the road in", "fields": {"genre": "literary"}}
+{"id": "story-19", "format": "story", "message": "An astronaut hears music on the far side of the moon", "fields": {"genre": "science fiction", "ending": "mysterious"}}
+{"id": "story-20", "format": "story", "message": "A shy librarian enters a poetry slam", "fields": {"genre": "comedy", "length": "600"}}
+{"id": "essay-01", "format": "essay", "message": "Is boredom good for creativity?", "fields": {"stance": "yes, in moderation", "length": "600"}}
+{"id": "essay-02", "format": "essay", "message": "Why handwriting still matters in a digital age", "fields": {"audience": "teachers"}}
+{"id": "essay-03", "format": "essay", "message": "The value of reading old books", "fields": {"length": "700"}}
+{"id": "essay-04", "format": "essay", "message": "Should cities ban cars from their centres?", "fields": {"stance": "for", "audience": "city residents"}}
+{"id": "essay-05", "format": "essay", "message": "What makes a good friend", "fields": {"length": "500"}}
+{"id": "essay-06", "format": "essay", "message": "The case for learning a second language as an adult", "fields": {"audience": "busy professionals"}}
+{"id": "essay-07", "format": "essay", "message": "How walking changes the way we think", "fields": {}}
+{"id": "essay-08", "format": "essay", "message": "Is social media making us lonelier?", "fields": {"stance": "balanced"}}
+{"id": "essay-09", "format": "essay", "message": "The ethics of keeping pets in apartments", "fields": {"stance": "balanced", "length": "600"}}
+{"id": "essay-10", "format": "essay", "message": "Why failure should be taught in schools", "fields": {"audience": "parents"}}
+{"id": "essay-11", "format": "essay", "message": "Silence as a lost luxury", "fields": {"length": "600"}}
+{"id": "essay-12", "format": "essay", "message": "Should work weeks be four days long?", "fields": {"stance": "for", "audience": "employers"}}
+{"id": "essay-13", "format": "essay", "message": "What libraries are for in the 21st century", "fields": {}}
+{"id": "essay-14", "format": "essay", "message": "The pleasure of doing things slowly", "fields": {"length": "500"}}
+{"id": "essay-15", "format": "essay", "message": "Can art be judged objectively?", "fields": {"stance": "no"}}
+{"id": "essay-16", "format": "essay", "message": "The role of rituals in modern life", "fields": {}}
+{"id": "essay-17", "format": "essay", "message": "Why we should plant more trees in schools", "fields": {"audience": "local council", "length": "500"}}
+{"id": "essay-18", "format": "essay", "message": "Is ambition a virtue?", "fields": {"stance": "it depends"}}
+{"id": "essay-19", "format": "essay", "message": "What travel teaches that books cannot", "fields": {"length": "600"}}
+{"id": "essay-20", "format": "essay", "message": "The importance of keeping promises to yourself", "fields": {"audience": "students"}}

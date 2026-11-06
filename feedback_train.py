@@ -10,8 +10,13 @@ Fine-tuned (LoRA) models learn three ways:
 From-scratch models only continue text, so they continue-train on prompt + liked answer.
 
 Feedback that was used is marked so it isn't trained on twice.
+
+--gate (on for automatic training): score the model on a quick evaluation before and after; if
+any format's automatic-check score drops by more than 5 points, the previous adapter is restored
+so a bad batch of ratings cannot quietly make the model worse. If the run had a fast GGUF copy,
+it is rebuilt after training.
 """
-import argparse, json, math, os, random, subprocess, sys, tempfile, time
+import argparse, json, math, os, random, shutil, subprocess, sys, tempfile, time
 
 ROOT = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, ROOT)
@@ -33,19 +38,18 @@ def train_lora(a, meta, examples):
     import torch
     import torch.nn.functional as F
     from peft import PeftModel
-    from transformers import AutoModelForCausalLM, AutoTokenizer
+    from writing import hf
 
     dev = "cuda" if torch.cuda.is_available() else "cpu"
+    hf.set_threads()
     ad = os.path.join(a.run, "adapter")
-    tok = AutoTokenizer.from_pretrained(ad)
-    model = AutoModelForCausalLM.from_pretrained(meta["base"]).to(dev)
+    tok = hf.load_tokenizer(ad)
+    model = hf.load_causal_lm(meta["base"]).to(dev)
     model = PeftModel.from_pretrained(model, ad, is_trainable=True)
     model.train()
 
     def prompt_text(msgs):
-        if tok.chat_template:
-            return tok.apply_chat_template(msgs, tokenize=False, add_generation_prompt=True)
-        return "".join(f"### {m['role'].title()}:\n{m['content']}\n\n" for m in msgs) + "### Response:\n"
+        return hf.chat_text(tok, msgs)
 
     def encode(msgs, answer):
         p = tok(prompt_text(msgs), add_special_tokens=False)["input_ids"][-(a.seq // 2):]
@@ -130,6 +134,18 @@ def train_scratch(a, examples):
     return rc == 0
 
 
+def quick_score(run, fresh=False):
+    """Summary of a quick evaluation; reuses the last one if the weights haven't changed since."""
+    import evaluate
+    from chat_engine import Engine, weights_stamp
+
+    last = evaluate.latest(run, quick=True)
+    if last and not fresh and last.get("backend") == "hf" and last["time"] >= weights_stamp(run):
+        return last["summary"]
+    # Short answers keep this to a few minutes on CPU; the HF backend sees the new adapter at once.
+    return evaluate.run_eval(run, quick=True, max_tokens=300, engine=Engine(run, backend="hf"))["summary"]
+
+
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--run", required=True)
@@ -138,6 +154,7 @@ def main():
     ap.add_argument("--lr", type=float, default=5e-5)
     ap.add_argument("--beta", type=float, default=0.1, help="DPO strength")
     ap.add_argument("--seq", type=int, default=768)
+    ap.add_argument("--gate", action="store_true", help="undo the training if quick checks get worse")
     a = ap.parse_args()
     a.run = os.path.abspath(a.run)
     meta = json.load(open(os.path.join(a.run, "meta.json")))
@@ -156,7 +173,34 @@ def main():
     if not examples:
         say("nothing to train on yet: rate some answers in Chat first")
         return
-    ok = train_lora(a, meta, examples) is None if meta["type"] == "lora" else train_scratch(a, examples)
+    if meta["type"] == "lora":
+        from chat_engine import gguf_path
+
+        had_gguf = bool(gguf_path(a.run))
+        before = quick_score(a.run) if a.gate else None
+        ad, prev = os.path.join(a.run, "adapter"), os.path.join(a.run, "adapter.prev")
+        shutil.rmtree(prev, ignore_errors=True)
+        shutil.copytree(ad, prev)
+        ok = train_lora(a, meta, examples) is None
+        if ok and a.gate:
+            after = quick_score(a.run, fresh=True)
+            from studio.gate import check_drops
+
+            drops = check_drops(after, before)
+            if drops:
+                say("⚠️ quick checks got worse (" + ", ".join(f"{k}: {c} → {n}" for k, (n, c) in drops.items()) +
+                    "); restoring the previous adapter. These ratings are marked 'gate-rejected' and won't be "
+                    "retried until someone rates them again.")
+                shutil.rmtree(ad)
+                shutil.copytree(prev, ad)
+                if ids:
+                    feedback.mark_trained(ids, f"gate-rejected@{time.strftime('%Y-%m-%d %H:%M')}")
+                sys.exit(3)
+            say(f"gate passed: quick score {before and before['score']} → {after['score']}")
+        if ok and had_gguf:
+            subprocess.call([sys.executable, os.path.join(ROOT, "export_gguf.py"), "--run", a.run], cwd=ROOT)
+    else:
+        ok = train_scratch(a, examples)
     if ok and ids:
         feedback.mark_trained(ids, f"{run_name}@{time.strftime('%Y-%m-%d %H:%M')}")
     say("✅ done. The model has learned from your ratings." if ok else "training failed")

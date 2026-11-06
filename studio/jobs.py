@@ -97,7 +97,16 @@ def data_status():
         "custom_files": len(custom),
         "tokenizer": os.path.exists(tokp), "vocab": vocab,
         "train_tokens": os.path.getsize(tb) // 2 if os.path.exists(tb) else 0,
+        "instructions": _instruction_stats(),
     }
+
+
+def _instruction_stats():
+    p = os.path.join(ROOT, "data/instructions/stats.json")
+    try:
+        return json.load(open(p)).get("train", 0)
+    except (OSError, ValueError):
+        return 0
 
 
 LEVELS = [(6.5, 1, "Random letters"), (5.0, 2, "Real words"), (4.0, 3, "Short phrases"),
@@ -147,6 +156,15 @@ def run_summary(run_dir):
         eta = (total - step) / rate if rate > 0 else None
     last_val = va[-1]["loss"] if va else None
     ready = os.path.exists(os.path.join(run_dir, "ckpt.pt")) if scratch else os.path.isdir(os.path.join(run_dir, "adapter"))
+    from chat_engine import gguf_path
+
+    ev_p = os.path.join(run_dir, "eval", "history.jsonl")
+    ev = None
+    if os.path.exists(ev_p):
+        try:
+            ev = [r for r in (json.loads(l) for l in open(ev_p) if l.strip()) if not r.get("partial")][-1]
+        except (ValueError, IndexError):
+            ev = None
     times = [r["time"] for r in rows]
     return {
         "name": name, "type": "scratch" if scratch else "lora",
@@ -160,6 +178,8 @@ def run_summary(run_dir):
         "lr": tr[-1].get("lr") if tr else None,
         "level": level(last_val, scratch),
         "feedback_steps": len(fb),
+        "fast": bool(not scratch and gguf_path(run_dir)),
+        "eval_score": ev["score"] if ev else None, "eval_quick": ev.get("quick") if ev else None,
         # active time only: gaps over 15 minutes between log lines are pauses, not training
         "train_seconds": sum(min(b - a, 900) for a, b in zip(sorted(times), sorted(times)[1:])),
         "updated": max(times) if times else os.path.getmtime(run_dir),

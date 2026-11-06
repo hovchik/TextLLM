@@ -296,9 +296,13 @@ def adopt_legacy(outdir):
     with open(last, "rb") as f:
         data = f.read()
     cut = data.rfind(sep)
-    cut = 0 if cut < 0 else data.index(b"\n", cut) + 1
+    cut = 0 if cut < 0 else cut + len(sep)
     with open(last, "r+b") as f:
         f.truncate(cut)
+        if cut:                               # end on a newline even if it was never written
+            f.seek(cut)
+            f.write(b"\n")
+            cut += 1
     chars -= len(data) - cut
     print(f"FineWeb-Edu: continuing an earlier run ({docs:,} documents, {chars / 1e9:.2f} GB already saved)")
     return {"sha": None, "file": None, "row_group": 0, "skip_rows": docs, "chars": chars,
@@ -354,35 +358,38 @@ def fineweb(outdir, max_gb, mode="stream", tries=30, cache="data/cache/fineweb",
             else:
                 src = HttpFile(url, size, session, tries)
             pf = retry(lambda: pq.ParquetFile(src), f"opening {path}", tries)
-            rg0 = st["row_group"] if st["file"] == path else 0
-            st["file"] = path
-            for rg in range(rg0, pf.num_row_groups):
-                rows = pf.metadata.row_group(rg).num_rows
-                if st["skip_rows"] >= rows:           # already saved by an earlier run
-                    st["skip_rows"] -= rows
-                    continue
-                texts = pf.read_row_group(rg, columns=["text"]).column("text").to_pylist()
-                used = st["skip_rows"]
-                for t in texts[used:]:
-                    w.write(t)
-                    used += 1
-                    st["chars"] += len(t)
-                    bar.update(len(t))
+            try:
+                rg0 = st["row_group"] if st["file"] == path else 0
+                st["file"] = path
+                for rg in range(rg0, pf.num_row_groups):
+                    rows = pf.metadata.row_group(rg).num_rows
+                    if st["skip_rows"] >= rows:           # already saved by an earlier run
+                        st["skip_rows"] -= rows
+                        continue
+                    texts = pf.read_row_group(rg, columns=["text"]).column("text").to_pylist()
+                    used = st["skip_rows"]
+                    for t in texts[used:]:
+                        w.write(t)
+                        used += 1
+                        st["chars"] += len(t)
+                        bar.update(len(t))
+                        if st["chars"] >= budget:
+                            break
+                    st["shard"], st["shard_bytes"] = w.checkpoint()
+                    if used < rows:                       # budget reached mid-chunk: remember where
+                        st["row_group"], st["skip_rows"] = rg, used
+                    else:
+                        st["row_group"], st["skip_rows"] = rg + 1, 0
+                    save_state(state_path, st)
                     if st["chars"] >= budget:
-                        break
-                st["shard"], st["shard_bytes"] = w.checkpoint()
-                if used < rows:                       # budget reached mid-chunk: remember where
-                    st["row_group"], st["skip_rows"] = rg, used
+                        return
+                if path != names[-1]:
+                    st["file"], st["row_group"] = names[names.index(path) + 1], 0
                 else:
-                    st["row_group"], st["skip_rows"] = rg + 1, 0
+                    st["end"] = True
                 save_state(state_path, st)
-                if st["chars"] >= budget:
-                    return
-            if path != names[-1]:
-                st["file"], st["row_group"] = names[names.index(path) + 1], 0
-            else:
-                st["end"] = True
-            save_state(state_path, st)
+            finally:
+                pf.close()        # Windows can't delete a file that is still open
             if local and not keep_parquet:
                 os.remove(local)
         print("FineWeb-Edu: reached the end of the dataset")

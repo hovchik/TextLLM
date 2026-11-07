@@ -1,21 +1,26 @@
-torch
-tokenizers
-numpy
-tqdm
-requests
-pyarrow
-datasets
-transformers>=4.51
-peft
-safetensors
-sentencepiece
-protobuf
-accelerate
-pypdf
-python-docx
-trafilatura
-beautifulsoup4
-fastapi
-uvicorn
-python-multipart
-langdetect
+# Core packages: everything the Studio, training, fine-tuning and chat need.
+# run.py installs PyTorch first from the index that matches your hardware (CPU or CUDA),
+# so the torch line here only sets the version range.
+# Ranges are tested together (Python 3.10-3.13, 2026-11); the upper bounds stop a future
+# major release from breaking an existing install.
+torch>=2.4,<3
+tokenizers>=0.21,<1
+numpy>=1.26,<3
+tqdm>=4.66
+requests>=2.31,<3
+pyarrow>=15
+datasets>=3.0,<6
+transformers>=4.51,<6
+peft>=0.15,<1
+safetensors>=0.4,<1
+sentencepiece>=0.2
+protobuf>=4.25
+accelerate>=1.0,<2
+pypdf>=4.0
+python-docx>=1.1
+trafilatura>=1.12
+beautifulsoup4>=4.12
+fastapi>=0.110
+uvicorn>=0.29
+python-multipart>=0.0.9
+langdetect>=1.0.9

@@ -11,6 +11,7 @@
     python run.py --torch-index cu128   # pick the PyTorch build yourself (cu118, cu126, cu128, cu130, xpu, cpu ...)
     python run.py --no-venv          # use the current Python instead of .venv
     python run.py --no-fast          # skip llama-cpp-python (fast quantized chat on CPU)
+    python run.py --lite             # skip the AI toolkit extras (requirements-ai.txt / -gpu.txt)
 
 What it does:
   1. Creates a virtual environment in .venv (first run only).
@@ -22,8 +23,11 @@ What it does:
   3. Tries once to install llama-cpp-python (prebuilt CPU wheel), which makes chat with
      fine-tuned models several times faster through 4-bit GGUF copies. If it can't be
      installed, everything still works, just slower.
-  4. Creates the folders the app writes to (runs/, data/raw/, data/bin/).
-  5. Starts the web app (app.py) and opens it in your browser. If the port is busy it
+  4. Installs the AI toolkit (requirements-ai.txt: TRL, lm-eval, sentence-transformers, FAISS,
+     dedup tools, GGUF, TensorBoard) and, with an NVIDIA GPU, requirements-gpu.txt
+     (bitsandbytes, Liger kernels). Best effort: a package that fails is reported and skipped.
+  5. Creates the folders the app writes to (runs/, data/raw/, data/bin/).
+  6. Starts the web app (app.py) and opens it in your browser. If the port is busy it
      uses the next free one.
 Stop it with Ctrl+C.
 
@@ -39,6 +43,9 @@ TORCH_INDEX = "https://download.pytorch.org/whl/{}"
 TORCH_CPU_INDEX = TORCH_INDEX.format("cpu")
 LLAMA_CPU_INDEX = "https://abetlen.github.io/llama-cpp-python/whl/cpu"
 FAST_STAMP = os.path.join(VENV, ".fast-attempted")
+AI_REQS = os.path.join(ROOT, "requirements-ai.txt")
+GPU_REQS = os.path.join(ROOT, "requirements-gpu.txt")
+EXTRAS_STAMP = os.path.join(VENV, ".extras.sha256")
 
 
 def say(msg):
@@ -73,13 +80,25 @@ def pip(py, *args, required=True):
     return ok
 
 
-def requirements_met(py):
-    """True if every package in requirements.txt is installed for this Python."""
-    names = [l.split("#")[0].strip() for l in open(REQS)]
-    code = ("import sys, importlib.metadata as m\n"
-            "for n in sys.argv[1:]:\n"
-            "    m.version(n.split('[')[0].split('=')[0].split('<')[0].split('>')[0].strip())")
-    return subprocess.call([py, "-c", code, *[n for n in names if n]], cwd=ROOT,
+def req_lines(path):
+    """Requirement lines of a requirements file, without comments and blank lines."""
+    with open(path) as f:
+        return [l.split("#")[0].strip() for l in f if l.split("#")[0].strip()]
+
+
+def requirements_met(py, path=REQS):
+    """True if every package in a requirements file (default requirements.txt) is installed for
+    this Python. Lines whose environment marker doesn't apply here (e.g. Linux only) are skipped."""
+    code = ("import sys, importlib.metadata as m, re\n"
+            "for line in sys.argv[1:]:\n"
+            "    req, _, marker = line.partition(';')\n"
+            "    if marker.strip():\n"
+            "        try:\n"
+            "            from packaging.markers import Marker\n"
+            "            if not Marker(marker.strip()).evaluate(): continue\n"
+            "        except ImportError: pass\n"
+            "    m.version(re.split(r'[\\[<>=!~ ]', req.strip())[0])")
+    return subprocess.call([py, "-c", code, *req_lines(path)], cwd=ROOT,
                            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL) == 0
 
 
@@ -223,6 +242,44 @@ def ensure_fast(py, skip=False):
         open(stamp, "w").write("ok" if ok else "failed")
 
 
+def ensure_extras(py, gpu, skip=False, reinstall=False):
+    """Best effort: the AI toolkit (requirements-ai.txt) and, on NVIDIA GPUs, requirements-gpu.txt.
+    Reinstalled only when those files change; a package that can't be installed is skipped."""
+    if skip:
+        return
+    files = [AI_REQS] + ([GPU_REQS] if gpu else [])
+    digest = hashlib.sha256()
+    for path in files:
+        with open(path, "rb") as f:
+            digest.update(f.read())
+    want = digest.hexdigest()
+    stamp = EXTRAS_STAMP if py == venv_python() else None
+    if not reinstall:
+        if stamp and os.path.exists(stamp):
+            with open(stamp) as f:
+                if f.read().strip() == want:
+                    return
+        if not stamp and all(requirements_met(py, p) for p in files):
+            return
+    say("Installing the AI toolkit (" + " + ".join(os.path.basename(p) for p in files) + ", optional) ...")
+    failed = []
+    for path in files:
+        if pip(py, "-r", path, "--retries", "2", required=False):
+            continue
+        # One package failing makes pip install nothing, so retry them one at a time.
+        for line in req_lines(path):
+            if not pip(py, line, "--retries", "1", required=False):
+                failed.append(line.split(";")[0].strip())
+    if failed:
+        say("Skipped (the app works without them): " + ", ".join(failed) +
+            ". Try again later with: run.bat --reinstall")
+    else:
+        say("AI toolkit installed. Check it any time with: python stack_check.py")
+    if stamp:
+        with open(stamp, "w") as f:
+            f.write(want)
+
+
 def ensure_dirs():
     for d in ("runs", os.path.join("data", "raw"), os.path.join("data", "bin")):
         os.makedirs(os.path.join(ROOT, d), exist_ok=True)
@@ -276,6 +333,7 @@ def main():
     g.add_argument("--torch-index", help="PyTorch build to install: cu118, cu126, cu128, xpu (Intel Arc), cpu ...")
     ap.add_argument("--no-venv", action="store_true", help="use the current Python instead of .venv")
     ap.add_argument("--no-fast", action="store_true", help="don't install llama-cpp-python")
+    ap.add_argument("--lite", action="store_true", help="don't install the AI toolkit extras")
     a = ap.parse_args()
 
     if sys.version_info < (3, 9):
@@ -283,8 +341,10 @@ def main():
     os.chdir(ROOT)
 
     py = sys.executable if a.no_venv else ensure_venv()
-    ensure_packages(py, choose_torch(a), reinstall=a.reinstall)
+    variant = choose_torch(a)
+    ensure_packages(py, variant, reinstall=a.reinstall)
     ensure_fast(py, skip=a.no_fast)
+    ensure_extras(py, gpu=variant.startswith("cu"), skip=a.lite, reinstall=a.reinstall)
     ensure_dirs()
 
     if a.cpu:

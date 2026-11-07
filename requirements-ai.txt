@@ -1,0 +1,18 @@
+# AI toolkit: optional extras that work on any PC (CPU or GPU). run.py installs these after
+# requirements.txt; if one fails, the app still runs. Skip with: run.bat --lite
+# See the README section "AI toolkit" for what each one unlocks.
+
+# Training recipes: SFT, DPO, ORPO, KTO and GRPO trainers built on transformers + peft
+trl>=0.20,<2
+# Standard benchmarks (HellaSwag, ARC, MMLU, ...) for any Hugging Face or GGUF model
+lm-eval>=0.4.8,<0.5
+# Text embeddings + a vector index: semantic search, retrieval (RAG), clustering, dedup by meaning
+sentence-transformers>=3.0,<7
+faiss-cpu>=1.8,<2
+# Corpus cleaning: near-duplicate detection (MinHash LSH) and fast fuzzy matching
+datasketch>=1.6,<3
+rapidfuzz>=3.6,<4
+# Read and write GGUF files (the format llama.cpp uses for fast quantized CPU chat)
+gguf>=0.10,<1
+# Loss curves and metrics in a browser tab: tensorboard --logdir runs
+tensorboard>=2.16,<3

@@ -10,3 +10,4 @@ data/instructions/
 data/cache/
 tools/
 *.gguf
+data/clean/

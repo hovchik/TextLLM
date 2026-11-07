@@ -120,6 +120,39 @@ python data/crawl.py --add https://example.org/feed.xml --license cc-by --name "
 - The schedule runs while the Studio is open. With the Studio closed, use Windows Task Scheduler
   or cron to run `python data/crawl.py --learn runs/my-model`.
 
+### Public posts from Mastodon and Bluesky
+
+The same page can add a **Mastodon** or **Bluesky** source. Posts are read through each network's
+public, documented API without logging in (nothing is scraped from web pages):
+
+| Network | Link to add | Reads |
+|---|---|---|
+| Mastodon | `https://<server>/tags/poetry` | posts with a hashtag |
+| | `https://<server>/@user` | one account's public posts |
+| | `https://<server>/public/local` | the server's local timeline |
+| Bluesky | `https://bsky.app/profile/<handle>` | one account's posts |
+| | `https://bsky.app/profile/<handle>/feed/<name>` | a custom feed |
+| | `https://bsky.app/hashtag/writing`, `https://bsky.app/search?q=...` | hashtag or search |
+
+```bash
+python data/crawl.py --add https://bsky.app/hashtag/shortstory --kind bluesky --license cc-stated --terms-ok
+```
+
+- **Rights.** A public post is still its author's copyright. With the license **Only openly licensed
+  authors** (`cc-stated`) a post is kept only when its author's profile says CC0, CC BY or CC BY-SA
+  (NC/ND refused); that license is recorded per post. "I have the rights" fits your own account.
+  Every social source also needs the admin to confirm that the server's terms allow it.
+  mastodon.social and mastodon.online forbid collecting posts for LLM training, so they are refused.
+- **Opt-outs and filters.** Skipped: non-public posts, replies, boosts/reposts, content warnings,
+  accounts with Mastodon's `noindex`, Bluesky's `!no-unauthenticated`, or #nobot / #noai /
+  #notraining / #nosearch in the profile, and posts under 120 characters.
+- **Personal data.** The training text never names the author: @mentions become `@someone`, links
+  are removed, e-mail addresses and phone numbers are replaced. The post link and author handle are
+  kept only in `attribution.jsonl`, because CC BY requires attribution.
+- **Not offered:** Reddit (its Data API terms forbid training AI models on its content), X/Twitter
+  (paid API, terms forbid training), Facebook, Instagram, Threads, LinkedIn and TikTok (no public
+  API for this, terms forbid scraping). Adding one of their links explains why.
+
 ## CPU-only quick path (recommended for a laptop or desktop)
 CPU training is about 100× slower than a GPU, so this path uses a 14M-parameter model, an 8k vocabulary, and roughly 3,000 books.
 The `--gutenberg-max 3000` flag takes the first 3,000 English books in the catalog (about 1 GB, roughly 300M tokens).

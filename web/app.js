@@ -408,7 +408,8 @@ async function trainTexts() {
 }
 
 // ---------------------------------------------------------------- news & web crawler
-const KIND_LABEL = { feed: "RSS / Atom feed", page: "Single page", links: "Page of links" };
+const KIND_LABEL = { feed: "RSS / Atom feed", page: "Single page", links: "Page of links", mastodon: "Mastodon", bluesky: "Bluesky" };
+const SOCIAL = { mastodon: "https://example.social/tags/poetry", bluesky: "https://bsky.app/profile/alice.bsky.social" };
 async function trainNews() {
   const [st, models] = await Promise.all([api("/api/crawler"), api("/api/models").catch(() => [])]);
   const L = st.licenses, cs = st.settings, ss = st.stats, LN = st.language_names || {};
@@ -436,10 +437,13 @@ async function trainNews() {
       <div class="grid g2" style="margin-top:10px">
         <label class="field">Link<input class="input" id="n-url" placeholder="https://example.org/feed.xml"></label>
         <label class="field">Name<input class="input" id="n-name" placeholder="Example News"></label>
-        <label class="field">What is it?<select class="input" id="n-kind"><option value="feed">RSS / Atom feed (best)</option><option value="links">Page of links: read the articles it links to</option><option value="page">Single page or article</option></select></label>
+        <label class="field">What is it?<select class="input" id="n-kind"><option value="feed">RSS / Atom feed (best)</option><option value="links">Page of links: read the articles it links to</option><option value="page">Single page or article</option><option value="mastodon">Mastodon: hashtag, account or server timeline</option><option value="bluesky">Bluesky: account, feed, hashtag or search</option></select></label>
         <label class="field">License of the texts<select class="input" id="n-lic">${Object.entries(L).map(([k, l]) => `<option value="${k}">${esc(l.label)}: ${esc(l.note)}</option>`).join("")}</select></label>
-        <label class="field">Articles per run<input class="input" id="n-max" type="number" min="1" max="500" value="30"></label>
+        <label class="field"><span id="n-max-l">Articles per run</span><input class="input" id="n-max" type="number" min="1" max="500" value="30"></label>
       </div>
+      <div id="n-social" hidden style="margin-top:10px" class="hint">
+        <p style="margin:0 0 8px">Reads public posts through the network's public API. Links like <span class="mono">https://server/tags/poetry</span>, <span class="mono">https://server/@user</span>, <span class="mono">https://bsky.app/profile/handle</span> or <span class="mono">https://bsky.app/hashtag/writing</span>. Replies, boosts, posts with a content warning and authors who opt out (#nobot, #noai, noindex) are skipped. Names, @mentions, links, e-mails and phone numbers are removed from the text. Posts are public but still copyrighted by their authors, so <b>Only openly licensed authors</b> is the safe choice. Reddit, X, Facebook, Instagram, Threads and LinkedIn are not offered: their terms forbid it.</p>
+        <label class="row"><span class="switch"><input type="checkbox" id="n-terms"><span></span></span> <span>I checked this server's terms, and they allow downloading public posts for AI training.</span></label></div>
       <div id="n-rights" hidden style="margin-top:10px" class="hint"><label class="row"><span class="switch"><input type="checkbox" id="n-ok"><span></span></span> <span>I own these texts or have the owner's permission to use them for training, and I take responsibility for it.</span></label></div>
       <div class="row end" style="margin-top:12px"><button class="btn primary" id="n-add">${I.plus} Add source</button></div></div>
     <div class="card"><div class="card-head"><h2>Latest articles</h2>${Object.keys(ss.languages || {}).length ? `<span class="hint">${Object.entries(ss.languages).slice(0, 6).map(([k, v]) => `${esc(langName(k))} ${num(v)}`).join(" · ")}</span>` : ""}</div>
@@ -466,6 +470,7 @@ async function trainNews() {
       <li>Most news sites are <b>copyrighted</b>. This project only trains on public-domain or openly licensed text, so the built-in sources are Wikinews and Global Voices (CC BY) and NASA (US government, public domain).</li>
       <li>Sources marked <span class="pill warn">Copyrighted / unknown</span> or <span class="pill warn">I have the rights</span> are skipped until you confirm the rights. You are responsible for them.</li>
       <li>Not allowed: CC BY-ND or NC-ND sites, and sites whose terms forbid text and data mining.</li>
+      <li>Social posts are public but <b>copyrighted by their authors</b>. With <span class="pill good">Only openly licensed authors</span> a Mastodon or Bluesky post is kept only if its author's profile says CC0, CC BY or CC BY-SA. mastodon.social forbids collecting posts for AI training, so it is refused.</li>
       <li>Every article's link, title and license is kept in <span class="mono">data/raw/news/attribution.jsonl</span>, as CC BY requires.</li></ul></div>
     <div class="card"><h2>How it reads the web</h2><ul class="muted" style="padding-left:18px">
       <li>Obeys robots.txt and waits at least 3 seconds between requests to a site.</li>
@@ -475,10 +480,19 @@ async function trainNews() {
   </div></div>`;
   const refresh = () => trainNews();
   const toggleRights = () => ($("#n-rights").hidden = !!(L[$("#n-lic").value] || {}).ok);
-  $("#n-lic").onchange = toggleRights; toggleRights();
+  const toggleKind = () => {
+    const k = $("#n-kind").value, soc = k in SOCIAL;
+    $("#n-social").hidden = !soc;
+    $("#n-url").placeholder = SOCIAL[k] || "https://example.org/feed.xml";
+    $("#n-max-l").textContent = soc ? "Posts per run" : "Articles per run";
+    $$("#n-lic option").forEach((o) => { const forSocial = ["cc-stated", "own-rights", "unknown"].includes(o.value); o.hidden = soc ? !forSocial : !!(L[o.value] || {}).social; o.disabled = o.hidden; });
+    if ($("#n-lic").selectedOptions[0].hidden) $("#n-lic").value = soc ? "cc-stated" : "cc-by";
+    toggleRights();
+  };
+  $("#n-lic").onchange = toggleRights; $("#n-kind").onchange = toggleKind; toggleKind();
   $("#n-add").onclick = async () => {
     try {
-      await api("/api/crawler/sources", { json: { url: $("#n-url").value, name: $("#n-name").value, kind: $("#n-kind").value, license: $("#n-lic").value, max_items: +$("#n-max").value, rights_confirmed: $("#n-ok").checked } });
+      await api("/api/crawler/sources", { json: { url: $("#n-url").value, name: $("#n-name").value, kind: $("#n-kind").value, license: $("#n-lic").value, max_items: +$("#n-max").value, rights_confirmed: $("#n-ok").checked, terms_confirmed: $("#n-terms").checked } });
       toast("Source added", "ok"); refresh();
     } catch (e) { fail(e); }
   };

@@ -29,6 +29,10 @@ Learning is checked. Before --learn trains the model its weights are copied asid
 quick evaluation (evaluate.py --quick) runs and, if the score fell by more than --max-drop points,
 the old weights are put back. --no-gate skips this.
 
+Social networks: sources of kind "mastodon" or "bluesky" read public posts through those networks'
+public APIs (see data/social.py for links, rights and personal-data handling). Each one is off until
+an admin adds it and confirms the server's terms allow it.
+
 Languages: --languages en,hy keeps only articles in those languages (data/lang.py guesses).
 
 Without the Studio: --install-schedule 6 registers the crawl with Windows Task Scheduler (or
@@ -46,6 +50,7 @@ sys.path.insert(0, ROOT)
 import graceful  # noqa: E402
 from data.ingest import EOT, clean, from_docx, from_html, from_pdf  # noqa: E402
 from data import lang as langmod  # noqa: E402
+from data import social  # noqa: E402
 from graceful import run_child  # noqa: E402
 
 STATE = os.path.join(ROOT, "runs", "_crawler")
@@ -73,7 +78,10 @@ LICENSES = {
                    "note": "your own site, or written permission from the owner"},
     "unknown": {"label": "Copyrighted / unknown", "ok": False,
                 "note": "most news sites. Only with permission; you take responsibility"},
+    "cc-stated": {"label": "Only openly licensed authors", "ok": True, "social": True,
+                  "note": "social sources: keeps a post only if its author's profile states CC0, CC BY or CC BY-SA"},
 }
+SOCIAL_LICENSES = ("cc-stated", "own-rights", "unknown")   # a hashtag or timeline has no license of its own
 # Not offered as licenses because they forbid it: CC BY-ND / CC BY-NC-ND (no derivatives),
 # and sites whose terms forbid text and data mining.
 
@@ -125,18 +133,35 @@ def check_source(s):
     url = (s.get("url") or "").strip()
     if urlsplit(url).scheme not in ("http", "https") or not urlsplit(url).netloc:
         raise ValueError("The link must start with http:// or https://")
-    if s.get("kind", "feed") not in ("feed", "page", "links"):
-        raise ValueError("Kind must be feed, page or links.")
+    kind = s.get("kind", "feed")
+    if kind not in ("feed", "page", "links") + social.KINDS:
+        raise ValueError("Kind must be feed, page, links, mastodon or bluesky.")
+    why = social.not_supported(url)
+    if why:
+        raise ValueError(why)
     if s.get("license") not in LICENSES:
         raise ValueError("Choose a license: " + ", ".join(LICENSES))
+    if kind in social.KINDS:
+        social.parse_target(kind, url)   # raises a helpful ValueError for a link it can't read
+        if s["license"] not in SOCIAL_LICENSES:
+            raise ValueError("A social source mixes many authors, so choose 'Only openly licensed authors', "
+                             "'I have the rights' or 'Copyrighted / unknown'.")
+        if not s.get("terms_confirmed"):
+            raise ValueError("Confirm that this server's terms allow downloading public posts for AI training.")
+    elif LICENSES[s["license"]].get("social"):
+        raise ValueError("That license is only for Mastodon and Bluesky sources.")
     if not LICENSES[s["license"]]["ok"] and not s.get("rights_confirmed"):
         raise ValueError("For this license, confirm that you have the right to use these texts.")
     name = (s.get("name") or urlsplit(url).netloc).strip()[:80]
-    return {"id": s.get("id") or slug(name), "name": name, "url": url, "kind": s.get("kind", "feed"),
-            "license": s["license"], "rights_confirmed": bool(s.get("rights_confirmed")),
-            "enabled": bool(s.get("enabled", True)), "max_items": max(1, min(500, int(s.get("max_items") or 30))),
-            "home": s.get("home") or f"{urlsplit(url).scheme}://{urlsplit(url).netloc}",
-            "credit": (s.get("credit") or name).strip()[:200], "created": s.get("created") or time.time()}
+    out = {"id": s.get("id") or slug(name), "name": name, "url": url, "kind": kind,
+           "license": s["license"], "rights_confirmed": bool(s.get("rights_confirmed")),
+           "enabled": bool(s.get("enabled", True)), "max_items": max(1, min(500, int(s.get("max_items") or 30))),
+           "home": s.get("home") or f"{urlsplit(url).scheme}://{urlsplit(url).netloc}",
+           "credit": (s.get("credit") or name).strip()[:200], "created": s.get("created") or time.time()}
+    if kind in social.KINDS:
+        out["terms_confirmed"] = True
+        out["min_chars"] = max(20, min(5000, int(s.get("min_chars") or 120)))
+    return out
 
 
 def add_source(s):
@@ -159,6 +184,8 @@ def update_source(sid, changes):
             merged = {**s, **{k: v for k, v in changes.items() if k != "id"}}
             if "license" in changes and "rights_confirmed" not in changes and changes["license"] != s["license"]:
                 merged["rights_confirmed"] = False  # a new license needs a fresh confirmation
+            if "url" in changes and "terms_confirmed" not in changes and changes["url"] != s["url"]:
+                merged["terms_confirmed"] = False   # another server needs its terms checked again
             srcs[i] = check_source({**merged, "id": sid})
             save_sources(srcs)
             return srcs[i]
@@ -173,6 +200,8 @@ def delete_source(sid):
 
 
 def allowed(s):
+    if s.get("kind") in social.KINDS and not s.get("terms_confirmed"):
+        return False
     return s.get("enabled") and (LICENSES.get(s.get("license"), {}).get("ok") or s.get("rights_confirmed"))
 
 
@@ -524,6 +553,72 @@ def _append(path, doc):
         os.fsync(f.fileno())
 
 
+def save_text(c, s, url, title, text, published, languages=(), lang=None, extra=None):
+    """Write one cleaned document to the corpus, pending.txt and attribution.jsonl, and mark its item
+    done. Returns its language, or False when it was skipped (other language, duplicate)."""
+    lang = lang or langmod.detect(text)
+    if languages and lang not in languages:
+        c.execute("UPDATE items SET status='skipped', error=?, lang=?, fetched=? WHERE url=?",
+                  (f"language {lang or 'unknown'}", lang, time.time(), url))
+        c.commit()
+        return False
+    h = text_hash(text)
+    if c.execute("SELECT 1 FROM hashes WHERE hash=?", (h,)).fetchone():
+        c.execute("UPDATE items SET status='skipped', error='duplicate', fetched=? WHERE url=?", (time.time(), url))
+        c.commit()
+        return False
+    doc = (f"{title}\n\n{text}" if title and not text.startswith(title) else text) + f"\n{EOT}\n"
+    _append(os.path.join(OUT, s["id"], time.strftime("%Y-%m") + ".txt"), doc)
+    _append(PENDING, doc)
+    _append(ATTRIBUTION, json.dumps({"url": url, "title": title, "source": s["name"], "license": s["license"],
+                                     "credit": s.get("credit"), "published": published,
+                                     "fetched": time.strftime("%Y-%m-%d"), **(extra or {})}, ensure_ascii=False) + "\n")
+    c.execute("INSERT OR IGNORE INTO hashes(hash, url) VALUES(?,?)", (h, url))
+    c.execute("UPDATE items SET status='done', chars=?, text_hash=?, fetched=?, error=NULL, lang=?, excerpt=? "
+              "WHERE url=?", (len(text), h, time.time(), lang, text[:1500], url))
+    c.commit()
+    return lang
+
+
+def fetch_social(f, c, s, languages=()):
+    """Read a Mastodon or Bluesky source: posts come with their text, so there is no second download.
+    Returns (added, skipped)."""
+    added = skipped = failed = 0
+    for p in social.posts(f, s):
+        url = p["url"]
+        old = c.execute("SELECT status, attempts FROM items WHERE url=?", (url,)).fetchone()
+        if old and (old["status"] in ("done", "skipped") or old["attempts"] >= 3):
+            continue   # decided in an earlier run; queued/failed ones (a save that broke) are retried
+        if not old:
+            c.execute("INSERT INTO items(url, source, title, published, found) VALUES(?,?,?,?,?)",
+                      (url, s["id"], "", p["published"], time.time()))
+        reason = p["skip"] or (f"only {len(p['text'])} characters" if len(p["text"]) < s.get("min_chars", 120) else None)
+        if reason:
+            c.execute("UPDATE items SET status='skipped', error=?, fetched=? WHERE url=?", (reason, time.time(), url))
+            c.commit()
+            skipped += 1
+            continue
+        lang = p["lang"] if p["lang"] and len(p["text"]) < 400 else None   # short posts: trust the author's tag
+        extra = {"author": p["author"], "license": p["license"]} if p["license"] != s["license"] else {"author": p["author"]}
+        try:
+            saved = save_text(c, s, url, "", p["text"], p["published"], languages, lang, extra)
+        except OSError as e:   # e.g. disk full: keep the post retryable instead of losing it
+            c.execute("UPDATE items SET status='failed', attempts=attempts+1, error=?, fetched=? WHERE url=?",
+                      (f"{type(e).__name__}: {e}"[:300], time.time(), url))
+            c.commit()
+            failed += 1
+            say(f"  ✗ {url}: {type(e).__name__}: {str(e)[:120]}")
+            continue
+        if saved is False:
+            skipped += 1
+            continue
+        added += 1
+        say(f"  ✓ {p['text'][:70].replace(chr(10), ' ')} ({len(p['text']):,} chars, {p['license']})")
+    if skipped:
+        say(f"  {skipped} post(s) skipped (replies, boosts, opt-outs, no open license, too short, duplicates)")
+    return added, failed
+
+
 def fetch_items(f, c, s, min_chars, limit, languages=()):
     added = failed = 0
     rows = c.execute("SELECT * FROM items WHERE source=? AND status IN ('queued','failed') AND attempts < 3 "
@@ -549,29 +644,10 @@ def fetch_items(f, c, s, min_chars, limit, languages=()):
                           (f"only {len(text)} characters", time.time(), url))
                 c.commit()
                 continue
-            lang = langmod.detect(text)
-            if languages and lang not in languages:
-                c.execute("UPDATE items SET status='skipped', error=?, lang=?, fetched=? WHERE url=?",
-                          (f"language {lang or 'unknown'}", lang, time.time(), url))
-                c.commit()
-                continue
-            h = text_hash(text)
-            if c.execute("SELECT 1 FROM hashes WHERE hash=?", (h,)).fetchone():
-                c.execute("UPDATE items SET status='skipped', error='duplicate', fetched=? WHERE url=?",
-                          (time.time(), url))
-                c.commit()
-                continue
             title = r["title"] or ""
-            doc = (f"{title}\n\n{text}" if title and not text.startswith(title) else text) + f"\n{EOT}\n"
-            _append(os.path.join(OUT, s["id"], time.strftime("%Y-%m") + ".txt"), doc)
-            _append(PENDING, doc)
-            _append(ATTRIBUTION, json.dumps({"url": url, "title": title, "source": s["name"], "license": s["license"],
-                                             "credit": s.get("credit"), "published": r["published"],
-                                             "fetched": time.strftime("%Y-%m-%d")}, ensure_ascii=False) + "\n")
-            c.execute("INSERT OR IGNORE INTO hashes(hash, url) VALUES(?,?)", (h, url))
-            c.execute("UPDATE items SET status='done', chars=?, text_hash=?, fetched=?, error=NULL, lang=?, excerpt=? "
-                      "WHERE url=?", (len(text), h, time.time(), lang, text[:1500], url))
-            c.commit()
+            lang = save_text(c, s, url, title, text, r["published"], languages)
+            if lang is False:
+                continue
             added += 1
             say(f"  ✓ {title[:70] or url} ({len(text):,} chars, {langmod.name(lang)})")
         except KeyboardInterrupt:
@@ -928,6 +1004,18 @@ def _crawl(only, delay, min_chars, learn_run, min_docs, passes, languages, gate,
     try:
         for s in srcs:
             say(f"== {s['name']} ({LICENSES[s['license']]['label']}) {s['url']}")
+            if s["kind"] in social.KINDS:
+                try:
+                    a, b = fetch_social(f, c, s, languages)
+                except KeyboardInterrupt:
+                    raise
+                except Exception as e:
+                    a, b = 0, 1
+                    say(f"  ! could not read the source: {type(e).__name__}: {str(e)[:200]}")
+                added, failed = added + a, failed + b
+                c.execute("UPDATE runs SET added=?, failed=? WHERE id=?", (added, failed, run_id))
+                c.commit()
+                continue
             try:
                 say(f"  {discover(f, c, s)} new link(s)")
             except KeyboardInterrupt:
@@ -975,13 +1063,17 @@ def main():
     ap.add_argument("--list", action="store_true", help="show the sources and exit")
     ap.add_argument("--add", metavar="URL", help="add a source")
     ap.add_argument("--name")
-    ap.add_argument("--kind", default="feed", choices=["feed", "page", "links"])
+    ap.add_argument("--kind", default="feed", choices=["feed", "page", "links", "mastodon", "bluesky"])
     ap.add_argument("--license", choices=list(LICENSES))
     ap.add_argument("--i-have-rights", action="store_true", help="confirm rights for own-rights/unknown sources")
+    ap.add_argument("--terms-ok", action="store_true",
+                    help="social sources: confirm the server's terms allow downloading public posts for AI training")
+    ap.add_argument("--min-post-chars", type=int, default=120, help="social sources: skip shorter posts")
     a = ap.parse_args()
     if a.add:
         s = add_source({"url": a.add, "name": a.name, "kind": a.kind, "license": a.license,
-                        "rights_confirmed": a.i_have_rights})
+                        "rights_confirmed": a.i_have_rights, "terms_confirmed": a.terms_ok,
+                        "min_chars": a.min_post_chars})
         say(f"added {s['id']}")
         return
     if a.install_schedule:
@@ -993,7 +1085,7 @@ def main():
         return
     if a.list:
         for s in load_sources():
-            say(f"{'on ' if allowed(s) else 'off'}  {s['id']:<20} {s['kind']:<5} {LICENSES[s['license']]['label']:<22} {s['url']}")
+            say(f"{'on ' if allowed(s) else 'off'}  {s['id']:<20} {s['kind']:<8} {LICENSES[s['license']]['label']:<22} {s['url']}")
         return
     langs = [l.strip().lower() for l in a.languages.split(",") if l.strip()]
     crawl(a.source, a.delay, a.min_chars, os.path.abspath(a.learn) if a.learn else None, a.min_docs, a.passes,

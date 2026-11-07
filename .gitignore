@@ -12,3 +12,4 @@ tools/
 *.gguf
 data/my_posts/
 docs/manual-build/manual.html
+data/cluster/

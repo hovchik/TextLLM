@@ -23,14 +23,15 @@ This manual walks through every page of the Studio in the order you would normal
 7. Training: News & web
 8. Training: Your style
 9. Training: Corpus
-10. Training: Runs, run details, Resume, Export and Import
-11. Chat
-12. Analytics
-13. Feedback
-14. Users
-15. Settings and hardware
-16. Command-line equivalents
-17. Troubleshooting
+10. Training: Cluster (several PCs train one model)
+11. Training: Runs, run details, Resume, Export and Import
+12. Chat
+13. Analytics
+14. Feedback
+15. Users
+16. Settings and hardware
+17. Command-line equivalents
+18. Troubleshooting
 
 # 1. Installing and starting the Studio
 
@@ -56,7 +57,7 @@ Useful options for `run.bat` / `run.sh` / `run.py`:
 | `--reinstall` | reinstall all packages |
 | `--no-venv` | use your current Python instead of `.venv` |
 
-**GPU.** With an NVIDIA graphics card, `run.bat` finds it with `nvidia-smi` and installs the CUDA build of PyTorch automatically. Apple Silicon Macs use the Apple GPU. Everything else trains on the CPU. Which device is used is shown on the Dashboard and can be changed under Settings → Hardware (section 15).
+**GPU.** With an NVIDIA graphics card, `run.bat` finds it with `nvidia-smi` and installs the CUDA build of PyTorch automatically. Apple Silicon Macs use the Apple GPU. Everything else trains on the CPU. Which device is used is shown on the Dashboard and can be changed under Settings → Hardware (section 16).
 
 These installer flags are the only options that are not in the Studio itself, because they run before the Studio starts. Every other script option has a control in the web app.
 
@@ -242,7 +243,33 @@ Each row shows files, size, documents, estimated tokens and when it was updated.
 
 After deleting a source, run Data step 3 (Encode) again so from-scratch training sees the change. Rebuild the tokenizer (step 2) only before training a new model, never for a model you will resume (see section 5). Fine-tuning reads the folders directly. Models already trained keep what they learned.
 
-# 10. Training: Runs
+# 10. Training: Cluster (several PCs train one model)
+
+Several computers, at home or anywhere on the internet, can train **one** from-scratch model together. Every PC uses what it has: an NVIDIA GPU, an Apple GPU or just the CPU. One PC is the **coordinator**: it holds the prepared data and the model. The others are **workers**.
+
+![A running cluster with three PCs](manual/12d-cluster.png)
+
+**How it works.** Training goes in rounds (5 minutes by default). At the start of a round every PC holds the same model and trains on its own share of the text for the round's minutes. A GPU simply does more steps than a CPU, and nobody waits for the slowest PC. Then each PC sends how far its copy moved; the coordinator averages the moves (weighted by how much text each PC read) and takes one step with the average. Everyone continues from the result. The internet only carries about one model copy each way per PC per round (CPU size: 28 MB; Small: 220 MB), not data on every step, so a home connection is enough.
+
+**Start a cluster** (on the PC with the data):
+
+1. Run Data steps 1–3 first (section 5).
+2. Training → **Cluster** → *Start a cluster on this PC*: name, model size, rounds, minutes per round, learning rate, port (7861). Leave **This PC trains too** on to use this PC as a worker as well.
+3. Press **Start the cluster**. The card at the top shows the address and the secret, plus a ready-made command for other PCs, with a **Copy** button.
+
+**Join from another PC:** either open its Studio → Training → Cluster → *Join a cluster*, paste the address and secret, and press **Join**; or, on a PC without the Studio, run `run.bat --join http://ADDRESS:7861 --secret SECRET` (`./run.sh` on Linux/macOS). The first run installs everything, including the GPU build of PyTorch when there is an NVIDIA card. The worker downloads its share of the text once (200 MB by default, resumable), then trains. **Leave** (or Ctrl+C) takes it out; it can rejoin at any time.
+
+![This PC helping a cluster](manual/12e-cluster-join.png)
+
+**Over the internet.** The simplest safe way is a free private network such as **Tailscale** or ZeroTier installed on every PC; then use the coordinator's Tailscale address (100.x.y.z). The other way is to forward TCP port 7861 on the coordinator's router to it and use your public IP. The secret keeps strangers out, but the traffic itself is not encrypted, so prefer Tailscale.
+
+**What speedup to expect.** Roughly 0.6–0.9× each extra PC's own speed: four similar PCs train about 3× faster than one. A GPU worker adds much more than a CPU one. Rounds of 5–10 minutes keep the traffic low; shorter rounds help quality a little but cost more upload.
+
+**Advanced:** secret (made up for you), workers needed before the first round, final learning rate, warmup, weight decay, outer learning rate (0.7) and momentum (0.9), how often to check quality, this PC's batch size, and **Resume** (continue a stopped cluster model from its last round; workers reconnect by themselves). Workers' advanced options: batch size, gradient accumulation, "stop early" seconds for a slow upload, and using the PC's own prepared data instead of downloading (only with the same tokenizer).
+
+The result is an ordinary from-scratch run under Runs: chat with it, export it, or keep training it alone with Resume. Cluster mode is for from-scratch models; fine-tuning (LoRA) still runs on one PC.
+
+# 11. Training: Runs
 
 Every model you train is a **run** in `runs/<name>/`.
 
@@ -285,7 +312,7 @@ Buttons (which ones appear depends on the run's state):
 
 This works between Windows and Linux, and between GPU and CPU computers. A fine-tuned model's base model (for example Qwen3 0.6B) is not inside the zip; the new PC downloads it once.
 
-# 11. Chat
+# 12. Chat
 
 Chat is where you (and regular users) write with the models.
 
@@ -314,7 +341,7 @@ Under every answer:
 
 With **About today's news**, the answer lists the articles it is based on, with links.
 
-# 12. Analytics
+# 13. Analytics
 
 Admins see how the models learn and how people rate them.
 
@@ -329,7 +356,7 @@ Admins see how the models learn and how people rate them.
 
 Further down: **ratings by format**, **validation loss** for all models, **ratings per day**, **rating distribution**, **Did feedback training help?** (average rating per training round), the **model leaderboard** (click a model to open its details) and **recent jobs** with their result.
 
-# 13. Feedback
+# 14. Feedback
 
 Every rating and correction becomes training data. Liked answers and corrections teach the model what to write; disliked answers teach it what to avoid.
 
@@ -342,7 +369,7 @@ Every rating and correction becomes training data. Liked answers and corrections
 
 How the learning works: fine-tuned models train on liked and corrected answers directly and use a DPO preference loss when a liked or corrected answer can be paired with a disliked one. From-scratch models re-read the prompts with their liked answers. Feedback that was used is marked *learned* and is not trained on again.
 
-# 14. Users
+# 15. Users
 
 Admins add people and set their role.
 
@@ -354,7 +381,7 @@ Each row shows the person, their role (change it in the drop-down; you can't cha
 
 **Add user** asks for a username, an optional display name, a password (at least 6 characters; they can change it later) and the role: **User** (Chat and Settings only) or **Admin** (everything).
 
-# 15. Settings and hardware
+# 16. Settings and hardware
 
 ![Settings (admin view with Hardware)](manual/17-settings.png)
 
@@ -363,7 +390,7 @@ Each row shows the person, their role (change it in the drop-down; you can't cha
 - **Password:** current password and a new one twice. Other devices get signed out.
 - **Hardware** (admins only): **Train and chat on** automatic, CPU, or a specific GPU. It applies to the next training job and reloads chat models. If you have an NVIDIA card but only the CPU build of PyTorch is installed, the hint tells you to close the Studio and run `run.bat --gpu`.
 
-# 16. Command-line equivalents
+# 17. Command-line equivalents
 
 Everything in this manual can also be done from a terminal in the project folder (activate `.venv` first). The most useful commands:
 
@@ -382,11 +409,13 @@ python data/own_posts.py --profile me --name "Me" --x-archive twitter.zip --i-ow
 python evaluate.py --run runs/my-social-writer --quick
 python transfer.py export --run runs/my-model --with-data
 python transfer.py import my-model.textllm.zip
+python cluster.py coordinator --out runs/cluster-writer --preset cpu --vocab 8192 --local-worker
+python cluster.py worker --join http://ADDRESS:7861 --secret SECRET    # or: run.bat --join ... --secret ...
 ```
 
 See README.md for every option.
 
-# 17. Troubleshooting
+# 18. Troubleshooting
 
 | Problem | What to do |
 |---|---|
@@ -400,6 +429,8 @@ See README.md for every option.
 | A PDF gives no text | It's a scan: run OCR (`ocrmypdf`) first. |
 | A news source is "skipped until you confirm the rights" | Its license is copyrighted/unknown: tick that you have permission, or remove it. |
 | Chat is slow with a fine-tuned model | Open the run and press **Make fast CPU copy**. |
+| A worker keeps saying "coordinator not reachable" | Check the address and port, that the coordinator's firewall allows port 7861, and that both PCs are on Tailscale (or the port is forwarded). The worker retries by itself. |
+| "403 wrong secret" when joining | Copy the secret again from the coordinator's Cluster page; a new secret is made each time a cluster starts unless you set one. |
 | Learning from news or ratings was "undone" | The quality gate saw the quick-check score drop; the previous model was kept. |
 
 Only use texts you have the right to use. This project trains on public-domain and openly licensed text, plus your own writing.

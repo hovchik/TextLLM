@@ -228,6 +228,39 @@ and **Open Library dumps** (catalog metadata only, no book text). **Dolma's book
 It saves a checkpoint every 250 steps (about 20 minutes on 4 cores, sooner on more), so you can try `generate.py` while it trains.
 Expect grammatical, book-flavoured prose that drifts after a few sentences. It won't produce coherent stories or follow instructions.
 
+## Train on several PCs at once (cluster, over the internet)
+
+Several computers (CPU or GPU, any mix, at home or across the internet) can train one from-scratch
+model together. In the Studio: **Training → Cluster → Start a cluster on this PC** on the PC with
+the prepared data, then on every other PC either **Join a cluster** in its Studio or:
+
+```
+run.bat --join http://ADDRESS:7861 --secret SECRET      # ./run.sh on Linux/macOS; installs everything first
+```
+
+It uses local training with periodic averaging (DiLoCo-style), not per-step DDP, because internet
+latency would make synchronous training crawl:
+
+* Training runs in rounds (5 min by default). Each PC trains on its own share of the text for the
+  round's time with its own AdamW, as many steps as it manages (a GPU does more than a CPU).
+* Each PC uploads how far its weights moved (bf16). The coordinator averages the moves weighted by
+  tokens and takes one Nesterov-momentum outer step (lr 0.7, momentum 0.9). Workers then download
+  only the bf16 change. Traffic per PC per round ≈ one model copy each way: 28 MB for the CPU size,
+  220 MB for Small.
+* PCs can join or leave at any time; a slow PC never holds the others up; a stopped coordinator
+  resumes with `--resume` and the workers reconnect by themselves. Workers without data download
+  their share of `train.bin` once (resumable).
+* Expect about 0.6–0.9× each extra PC's own speed (four similar PCs ≈ 3× one PC).
+* Over the internet use Tailscale/ZeroTier (simplest and encrypted) or forward TCP 7861. Every request
+  needs the shared secret; weights are loaded with `torch.load(weights_only=True)`, never as pickled code.
+
+Every PC uses its own clone of this repository (`git clone`, then `run.bat --join ...`); nothing has to be published or shared except the address and secret. Keep the clones on the same version (`git pull` on all of them): a worker from a different version is refused with a clear message.
+
+The result is a normal run (`runs/<name>/ckpt.pt`): chat, export or keep training it with `train.py --resume`.
+From the command line: `python cluster.py coordinator --out runs/cluster-writer --preset cpu --vocab 8192 --local-worker`
+and `python cluster.py worker --join http://ADDRESS:7861 --secret SECRET` (see `python cluster.py worker -h`).
+Cluster mode covers from-scratch models; LoRA fine-tuning still runs on one PC.
+
 ## Move a model to another PC and keep training
 Both kinds of model can be stopped on one PC and continued on another (CPU or GPU, Windows or Linux).
 A checkpoint holds the weights, the optimizer state, the step and LR schedule, the random state of

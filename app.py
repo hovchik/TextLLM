@@ -225,8 +225,27 @@ _DEVICE = None
 def device_info():
     global _DEVICE
     if _DEVICE is None:
-        _DEVICE = devices.info()  # doesn't change while the app runs
+        # doesn't change while the app runs, except when the device setting changes (apply_device)
+        _DEVICE = {**devices.info(), "choice": db.get_settings().get("device", "auto"),
+                   "choices": devices.available()}
     return _DEVICE
+
+
+_ENV_DEVICE = os.environ.get("TEXTLLM_DEVICE")  # set outside the Studio: wins while the setting is "auto"
+
+
+def apply_device(dev):
+    """Send training jobs (they inherit os.environ) and chat to this device; see devices.pick()."""
+    global _DEVICE
+    if dev and dev != "auto":
+        os.environ["TEXTLLM_DEVICE"] = dev
+    elif _ENV_DEVICE:
+        os.environ["TEXTLLM_DEVICE"] = _ENV_DEVICE
+    else:
+        os.environ.pop("TEXTLLM_DEVICE", None)
+    _DEVICE = None
+    with _engine_lock:
+        ENGINES.clear()  # chat models reload on the new device
 
 
 @app.get("/api/status")
@@ -263,10 +282,56 @@ class DataReq(BaseModel):
     common_pile_subsets: str = "news,public_domain_review,pressbooks,cccc"
     vocab: int = 8192
     hf_sets: bool = True
+    # downloading (flaky connections: "download" keeps partial files and resumes)
+    fineweb_mode: str = "stream"       # stream | download
+    keep_parquet: bool = False
+    retries: int = 30
+    workers: int = 8
+    common_corpus_lang: str = "en"
+    # tokenizer
+    sample_files: int = 40
+    val_frac: float = 0.005
+    # writing instructions
+    inst_gutenberg: bool = True
+    inst_stories: int = 1200
+    inst_essays: int = 1200
+    inst_books: int = 300
+    inst_my_posts: bool = True         # the files uploaded under "Your own posts"
+    synth_model: str = ""              # Apache 2.0 model (HF id or .gguf path) that writes example posts
+    synth_per_format: int = 200
+    backtranslate: str = ""            # model that writes the request for each text
+    seed: int = 0
+
+
+MY_POSTS = os.path.join(ROOT, "data", "my_posts")
+
+
+def model_ref(v, what):
+    """A Hugging Face id or a local path, never something that looks like a command-line flag."""
+    v = (v or "").strip().strip('"')
+    if v and (v.startswith("-") or not re.fullmatch(r"[\w .:/\\~@+-]{1,300}", v)):
+        err(f"{what}: give a Hugging Face model id or a file path")
+    return v
+
+
+def my_posts_files():
+    return sorted(glob.glob(os.path.join(MY_POSTS, "*.txt")) + glob.glob(os.path.join(MY_POSTS, "*.jsonl")))
 
 
 @app.post("/api/data")
 def data(r: DataReq):
+    inst = [PY, "data/build_instructions.py", "--from-studio", "--stories", str(max(0, r.inst_stories)),
+            "--essays", str(max(0, r.inst_essays)), "--books", str(max(1, r.inst_books)), "--seed", str(r.seed)]
+    inst += [] if r.inst_gutenberg else ["--no-gutenberg"]
+    inst += ["--hf-sets"] if r.hf_sets else []
+    if r.inst_my_posts:
+        for p in my_posts_files():
+            inst += ["--my-posts", p]
+    synth, bt = model_ref(r.synth_model, "Synthetic posts model"), model_ref(r.backtranslate, "Back-translation model")
+    if synth:
+        inst += ["--synth-model", synth, "--synth-per-format", str(max(1, min(5000, r.synth_per_format)))]
+    if bt:
+        inst += ["--backtranslate", bt]
     cmds = {
         "download": [PY, "data/build_corpus.py", "--gutenberg-max", str(r.books), "--fineweb-gb", str(r.web_gb),
                      "--gutenberg-method", r.gutenberg_method if r.gutenberg_method in ("mirror", "harvest") else "mirror",
@@ -279,15 +344,47 @@ def data(r: DataReq):
                      "--wikipedia-lang", re.sub(r"[^a-z0-9-]", "", r.wikipedia_lang.lower()) or "en",
                      "--common-pile-gb", str(max(0.0, r.common_pile_gb)),
                      "--common-pile-subsets", re.sub(r"[^a-z0-9_,]", "", r.common_pile_subsets)
-                     or "news,public_domain_review,pressbooks,cccc"],
-        "tokenizer": [PY, "tokenizer/train_tokenizer.py", "--vocab", str(r.vocab)],
-        "encode": [PY, "tokenizer/train_tokenizer.py", "--encode"],
+                     or "news,public_domain_review,pressbooks,cccc",
+                     "--common-corpus-lang", re.sub(r"[^a-z-]", "", r.common_corpus_lang.lower()) or "en",
+                     "--fineweb-mode", "download" if r.fineweb_mode == "download" else "stream",
+                     "--retries", str(max(0, min(1000, r.retries))), "--workers", str(max(1, min(64, r.workers)))]
+                    + (["--keep-parquet"] if r.keep_parquet else []),
+        "tokenizer": [PY, "tokenizer/train_tokenizer.py", "--vocab", str(r.vocab),
+                      "--sample-files", str(max(1, r.sample_files))],
+        "encode": [PY, "tokenizer/train_tokenizer.py", "--encode", "--val-frac", str(max(0.0001, min(0.5, r.val_frac)))],
         # writing instructions for fine-tuning: posts, stories, essays (rights-cleared sources only)
-        "instructions": [PY, "data/build_instructions.py", "--from-studio"] + (["--hf-sets"] if r.hf_sets else []),
+        "instructions": inst,
     }
     if r.step not in cmds:
         err("unknown step")
     return _launch("data", r.step, cmds[r.step], os.path.join(RUNS, "_data", "log.txt"))
+
+
+@app.get("/api/data/my-posts")
+def my_posts_list():
+    return [{"name": os.path.basename(p), "kb": round(os.path.getsize(p) / 1024, 1)} for p in my_posts_files()]
+
+
+@app.post("/api/data/my-posts")
+async def my_posts_add(files: list[UploadFile] = File(default=[])):
+    """Your own posts for the writing instructions: .txt (posts separated by --- lines) or .jsonl."""
+    os.makedirs(MY_POSTS, exist_ok=True)
+    for f in files:
+        name = os.path.basename(f.filename or "")
+        if not name.lower().endswith((".txt", ".jsonl")):
+            err(f"{name or 'file'}: use a .txt file (posts separated by --- lines) or .jsonl")
+        with open(os.path.join(MY_POSTS, re.sub(r"[^\w.-]", "_", name)), "wb") as o:
+            shutil.copyfileobj(f.file, o)
+    return my_posts_list()
+
+
+@app.delete("/api/data/my-posts/{name}")
+def my_posts_delete(name: str):
+    p = os.path.join(MY_POSTS, os.path.basename(name))
+    if not os.path.isfile(p):
+        err("no such file", 404)
+    os.remove(p)
+    return my_posts_list()
 
 
 @app.post("/api/stop")
@@ -314,6 +411,15 @@ class TrainReq(BaseModel):
     lora_r: int = 8
     epochs: float = 0             # > 0: train this many passes instead of a fixed number of steps
     gguf: bool = True             # make a fast quantized CPU copy after training
+    # from scratch, advanced (0 = the script's default / automatic)
+    warmup: int = 0
+    min_lr: float = 0
+    weight_decay: float = 0.1
+    compile: bool = False
+    # LoRA, advanced
+    init_from: str = ""           # continue from this fine-tuned run's adapter (same base model)
+    pairs_per_doc: int = 8
+    min_doc_chars: int = 5000
 
 
 @app.post("/api/train")
@@ -337,7 +443,12 @@ def train(r: TrainReq):
             json.dump({"type": "scratch", "tok": "tokenizer.json", "preset": r.preset}, open(meta_p, "w"))
         cmd = [PY, "train.py", "--out", out, "--preset", r.preset, "--vocab", str(r.vocab),
                "--max-steps", str(r.steps), "--batch", str(r.batch), "--grad-accum", str(r.accum), "--lr", str(r.lr),
-               "--warmup", str(max(10, r.steps // 40)), "--eval-every", str(max(10, r.steps // 80))]
+               "--warmup", str(r.warmup if r.warmup > 0 else max(10, r.steps // 40)),
+               "--eval-every", str(max(10, r.steps // 80)), "--weight-decay", str(max(0.0, r.weight_decay))]
+        if r.min_lr > 0:
+            cmd += ["--min-lr", str(min(r.min_lr, r.lr))]
+        if r.compile:
+            cmd.append("--compile")
         if r.resume:
             cmd.append("--resume")
     else:
@@ -350,7 +461,17 @@ def train(r: TrainReq):
         cmd = [PY, "finetune/finetune_lora.py", "--out", out, "--base", r.base, "--examples", str(r.examples),
                "--seq", str(r.seq), "--batch", str(r.batch), "--grad-accum", str(r.accum), "--lr", str(r.lr),
                "--max-steps", "0" if r.epochs > 0 else str(r.steps), "--eval-every", str(max(5, r.steps // 20)),
-               "--save-every", str(max(5, r.steps // 10)), "--lora-r", str(r.lora_r)]
+               "--save-every", str(max(5, r.steps // 10)), "--lora-r", str(r.lora_r),
+               "--pairs-per-doc", str(max(1, r.pairs_per_doc)), "--min-doc-chars", str(max(0, r.min_doc_chars))]
+        if r.init_from and not r.resume:
+            src = run_dir(r.init_from)
+            ad = os.path.join(src, "adapter")
+            if not os.path.isdir(ad) or src == out:
+                err(f"{r.init_from} has no LoRA adapter to start from.")
+            src_base = json.load(open(os.path.join(src, "meta.json"))).get("base")
+            if src_base and src_base != r.base:
+                err(f"{r.init_from} was trained on {src_base}; pick that base model to continue from it.")
+            cmd += ["--init-adapter", ad]
         if r.epochs > 0:
             cmd += ["--epochs", str(r.epochs)]
         if use_inst:
@@ -479,8 +600,8 @@ def styles_train(pid: str, r: StyleTrainReq):
 
 @app.post("/api/texts")
 async def texts(files: list[UploadFile] = File(default=[]), urls: str = Form(""), paths: str = Form(""),
-                action: str = Form("learn"), model: str = Form(""), passes: int = Form(3),
-                delete_local: bool = Form(False)):
+                action: str = Form("learn"), model: str = Form(""), passes: float = Form(3),
+                delete_local: bool = Form(False), mix: float = Form(1.0), lr: float = Form(0)):
     up_dir = os.path.join(RUNS, "_uploads", str(int(time.time() * 1000)))
     saved = []
     for f in files:
@@ -499,7 +620,8 @@ async def texts(files: list[UploadFile] = File(default=[]), urls: str = Form("")
         if not model:
             err("Choose a trained model to teach.")
         d = run_dir(model)
-        cmd = [PY, "learn.py", "--run", d, "--passes", str(passes)]
+        cmd = [PY, "learn.py", "--run", d, "--passes", str(max(0.5, min(20, passes))),
+               "--mix", str(max(0.0, min(10, mix)))] + (["--lr", str(lr)] if lr > 0 else [])
         log, run = os.path.join(d, "log.txt"), os.path.basename(d)
     else:
         cmd = [PY, "data/ingest.py", "--out", "data/raw/custom"]
@@ -749,7 +871,7 @@ def maybe_auto_train(model):
         return False
     try:
         d = os.path.join(RUNS, model)
-        cmd = [PY, "feedback_train.py", "--run", d] + (["--gate"] if s.get("gate_on_feedback", True) else [])
+        cmd = feedback_cmd(d, s) + (["--gate"] if s.get("gate_on_feedback", True) else [])
         jobs.launch("feedback", model, cmd, os.path.join(d, "log.txt"), run=model)
         return True
     except RuntimeError:
@@ -774,7 +896,12 @@ def feedback_list(model: str = "", only: str = "all"):
 
 class FeedbackTrainReq(BaseModel):
     model: str
-    epochs: float = 3
+    epochs: float | None = None   # None = the saved settings (Feedback → Training options)
+
+
+def feedback_cmd(d, s, epochs=None):
+    return [PY, "feedback_train.py", "--run", d, "--epochs", str(epochs or s.get("feedback_epochs", 3)),
+            "--lr", str(s.get("feedback_lr", 5e-5)), "--beta", str(s.get("feedback_beta", 0.1))]
 
 
 @app.post("/api/feedback/train")
@@ -782,19 +909,34 @@ def feedback_train(r: FeedbackTrainReq):
     d = run_dir(r.model)
     if db.pending_feedback(r.model) == 0:
         err("No new ratings for this model yet.")
-    return _launch("feedback", r.model, [PY, "feedback_train.py", "--run", d, "--epochs", str(r.epochs)],
+    return _launch("feedback", r.model, feedback_cmd(d, db.get_settings(), r.epochs),
                    os.path.join(d, "log.txt"), run=r.model)
 
 
 class SettingsReq(BaseModel):
+    device: str | None = None
     auto_train: bool | None = None
     auto_threshold: int | None = None
     gate_on_feedback: bool | None = None
+    feedback_epochs: float | None = None
+    feedback_lr: float | None = None
+    feedback_beta: float | None = None
 
 
 @app.post("/api/settings")
 def settings(r: SettingsReq):
-    return db.set_settings(**{k: v for k, v in r.model_dump().items() if v is not None})
+    kw = {k: v for k, v in r.model_dump().items() if v is not None}
+    if "device" in kw:
+        kw["device"] = kw["device"].strip().lower() or "auto"
+        if not re.fullmatch(r"auto|cpu|mps|xpu|cuda(:\d)?", kw["device"]):
+            err("device must be auto, cpu, cuda, cuda:N, mps or xpu")
+    for k, lo, hi in (("feedback_epochs", 0.5, 20), ("feedback_lr", 1e-7, 1e-2), ("feedback_beta", 0.01, 2)):
+        if k in kw:
+            kw[k] = max(lo, min(hi, kw[k]))
+    out = db.set_settings(**kw)
+    if "device" in kw:
+        apply_device(kw["device"])
+    return out
 
 
 # ---------------------------------------------------------------- corpus
@@ -951,6 +1093,7 @@ def crawl_scheduler():
 
 @app.on_event("startup")
 def _start_scheduler():
+    apply_device(db.get_settings().get("device", "auto"))
     threading.Thread(target=crawl_scheduler, daemon=True, name="crawl-scheduler").start()
 
 
@@ -1109,13 +1252,17 @@ class EvalReq(BaseModel):
     model: str
     quick: bool = False
     max_tokens: int = 0
+    formats: str = ""      # comma-separated format ids, "" = all
+    limit: int = 0         # at most this many prompts, 0 = all
 
 
 @app.post("/api/eval")
 def eval_start(r: EvalReq):
     d = run_dir(r.model)
     cmd = [PY, "evaluate.py", "--run", d] + (["--quick"] if r.quick else []) + \
-          (["--max-tokens", str(r.max_tokens)] if r.max_tokens else [])
+          (["--max-tokens", str(r.max_tokens)] if r.max_tokens else []) + \
+          (["--formats", re.sub(r"[^a-z0-9_,]", "", r.formats)] if r.formats.strip() else []) + \
+          (["--limit", str(r.limit)] if r.limit > 0 else [])
     return _launch("eval", r.model, cmd, os.path.join(d, "log.txt"), run=r.model)
 
 
@@ -1214,9 +1361,12 @@ def promote(r: PromoteReq):
 
 
 @app.post("/api/runs/{name}/gguf")
-def make_gguf(name: str):
+def make_gguf(name: str, quant: str = "Q4_K_M"):
     d = run_dir(name)
-    return _launch("export", name, [PY, "export_gguf.py", "--run", d], os.path.join(d, "log.txt"), run=name)
+    if quant not in ("Q4_K_M", "Q5_K_M", "Q6_K", "Q8_0"):
+        err("quant must be Q4_K_M, Q5_K_M, Q6_K or Q8_0")
+    return _launch("export", name, [PY, "export_gguf.py", "--run", d, "--quant", quant],
+                   os.path.join(d, "log.txt"), run=name)
 
 
 # ---------------------------------------------------------------- web

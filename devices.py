@@ -123,6 +123,25 @@ def info():
     return out
 
 
+def available():
+    """Devices this PC can use, for the Studio's device picker: [{"id": "cuda:0", "name": ...}, ...]."""
+    out = [{"id": "auto", "name": "Automatic (fastest available)"}, {"id": "cpu", "name": "CPU"}]
+    try:
+        import torch
+    except ImportError:
+        return out
+    try:
+        for i in range(torch.cuda.device_count() if torch.cuda.is_available() else 0):
+            out.append({"id": f"cuda:{i}" if i else "cuda", "name": describe(f"cuda:{i}")})
+    except Exception:
+        pass
+    if _xpu_ok(torch):
+        out.append({"id": "xpu", "name": describe("xpu")})
+    if _mps_ok(torch):
+        out.append({"id": "mps", "name": describe("mps")})
+    return out
+
+
 def _nvidia_present():
     import shutil, subprocess
 

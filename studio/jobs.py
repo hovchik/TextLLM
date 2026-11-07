@@ -29,7 +29,7 @@ def external_job():
     return info if _alive(info.get("pid")) else None
 
 
-def launch(kind, name, cmd, log_path, run=None, cleanup=()):
+def launch(kind, name, cmd, log_path, run=None, cleanup=(), env=None):
     with _lock:
         if running():
             raise RuntimeError(f"A job is already running ({JOB['kind']}: {JOB['name']}). Stop it first.")
@@ -44,7 +44,7 @@ def launch(kind, name, cmd, log_path, run=None, cleanup=()):
         logf.flush()
         # own process group, so Stop reaches the trainers a job starts, not just the job (graceful.py)
         proc = subprocess.Popen(cmd, cwd=ROOT, stdout=logf, stderr=subprocess.STDOUT,
-                                env={**os.environ, "PYTHONUNBUFFERED": "1"}, **graceful.popen_kwargs())
+                                env={**os.environ, "PYTHONUNBUFFERED": "1", **(env or {})}, **graceful.popen_kwargs())
         with open(LOCK_PATH, "w") as lk:
             lk.write(json.dumps({"pid": proc.pid, "kind": kind, "name": name, "started": time.time()}))
         JOB.update(proc=proc, name=name, kind=kind, log=log_path, run=run, started=time.time(),

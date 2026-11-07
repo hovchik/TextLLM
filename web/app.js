@@ -108,7 +108,7 @@ async function poll() {
     S.onStatus && S.onStatus(S.status);
   } catch {}
 }
-const labelKind = (k) => ({ crawl: "Reading news & web", training: "Training", data: "Preparing data", texts: "Learning texts", feedback: "Learning from ratings", eval: "Evaluating", export: "Making fast CPU copy" }[k] || k);
+const labelKind = (k) => ({ crawl: "Reading news & web", training: "Training", data: "Preparing data", texts: "Learning texts", feedback: "Learning from ratings", eval: "Evaluating", export: "Making fast CPU copy", cluster: "Cluster training", worker: "Helping a cluster" }[k] || k);
 $("#jobpill").onclick = () => (location.hash = "#/training/live");
 
 // ---------------------------------------------------------------- router
@@ -139,7 +139,7 @@ function liveCard(run) {
       ${Charts.ring(r ? r.progress : 0)}
       <div style="flex:1;min-width:0">
         <div class="row" style="gap:8px"><span class="pill good">● Running</span><b>${labelKind(j.kind)}</b><span class="muted">${esc(j.name)}</span></div>
-        <div class="muted" style="margin-top:4px">${r ? `Step ${num(r.step)} of ${num(r.max_steps)} · ETA ${dur(r.eta_sec)} · loss ${num(r.train_loss, 3)}` : `Started ${ago(j.started)}`}</div>
+        <div class="muted" style="margin-top:4px">${r ? `${j.kind === "cluster" ? "Round" : "Step"} ${num(r.step)} of ${num(r.max_steps)} · ETA ${dur(r.eta_sec)} · loss ${num(r.train_loss, 3)}` : `Started ${ago(j.started)}`}</div>
       </div>
       <button class="btn danger sm" id="live-stop">${I.stop} Stop</button>
     </div></div>`;
@@ -225,15 +225,15 @@ pages.training = async (sub = "new") => {
   if (sub === "live") sub = "runs";
   main.innerHTML = `<div class="page">
     <div class="page-head"><div><h1>Training</h1><p>Prepare data, train new models, and teach existing models from your own files and links.</p></div>
-      <div class="tabs" id="ttabs">${[["new", "New model"], ["data", "Data"], ["texts", "Your texts"], ["news", "News & web"], ["style", "Your style"], ["corpus", "Corpus"], ["runs", "Runs"]].map(([k, l]) => `<button data-k="${k}" class="${k === sub ? "on" : ""}">${l}</button>`).join("")}</div></div>
+      <div class="tabs" id="ttabs">${[["new", "New model"], ["data", "Data"], ["texts", "Your texts"], ["news", "News & web"], ["style", "Your style"], ["corpus", "Corpus"], ["cluster", "Cluster"], ["runs", "Runs"]].map(([k, l]) => `<button data-k="${k}" class="${k === sub ? "on" : ""}">${l}</button>`).join("")}</div></div>
     <div id="tlive"></div><div id="tbody"></div></div>`;
   $$("#ttabs button").forEach((b) => (b.onclick = () => (location.hash = `#/training/${b.dataset.k}`)));
   await poll();
   const runsList = await api("/api/runs").catch(() => []);
   const renderLive = (rs) => { $("#tlive").innerHTML = liveCard(rs.find((r) => r.running)); bindLive(); };
   renderLive(runsList);
-  S.onStatus = async () => { const rs = await api("/api/runs").catch(() => []); renderLive(rs); if (sub === "runs") drawRuns(rs); };
-  ({ new: trainNew, data: trainData, texts: trainTexts, news: trainNews, style: trainStyle, corpus: trainCorpus, runs: () => drawRuns(runsList) }[sub] || trainNew)();
+  S.onStatus = async () => { const rs = await api("/api/runs").catch(() => []); renderLive(rs); if (sub === "runs") drawRuns(rs); if (sub === "cluster") drawClusterLive(); };
+  ({ new: trainNew, data: trainData, texts: trainTexts, news: trainNews, style: trainStyle, corpus: trainCorpus, cluster: trainCluster, runs: () => drawRuns(runsList) }[sub] || trainNew)();
 };
 
 function trainNew() {
@@ -317,6 +317,137 @@ function trainNew() {
       setTimeout(() => openRun(v("name")), 400);
     } catch (e) { fail(e); }
   };
+}
+
+// ---------------------------------------------------------------- cluster: several PCs train one model
+function trainCluster() {
+  const d = S.status.data;
+  const presetOpts = PRESETS.map((p) => `<option value="${p.id}" ${p.id === "cpu" ? "selected" : ""}>${esc(p.n)} · ${p.p} params</option>`).join("");
+  $("#tbody").innerHTML = `<div id="cl-live"></div>
+  <div class="grid g2" style="margin-top:16px">
+    <div class="card" style="display:flex;flex-direction:column;gap:14px"><div class="card-head"><h2>Start a cluster on this PC</h2><span class="hint">this PC keeps the model and the data</span></div>
+      <p class="muted" style="margin:0">Other PCs connect here and train the same from-scratch model with their CPU or GPU. ${d.train_tokens ? `<b>${num(d.train_tokens)}</b> training tokens are ready.` : 'Prepare the data first under <a href="#/training/data"><u>Data</u></a> (steps 1–3).'}</p>
+      <div class="grid g3">
+        <label class="field">Model name<input class="input" id="c-name" value="cluster-writer"></label>
+        <label class="field">Model size<select class="input" id="c-preset">${presetOpts}</select></label>
+        <label class="field">Rounds<input class="input" id="c-rounds" type="number" min="1" value="200"><span class="hint">one round = local training + averaging</span></label>
+        <label class="field">Minutes per round<input class="input" id="c-minutes" type="number" min="0.2" step="0.5" value="5"><span class="hint">longer = less internet traffic</span></label>
+        <label class="field">Learning rate<input class="input" id="c-lr" type="number" step="any" value="0.001"></label>
+        <label class="field">Port<input class="input" id="c-port" type="number" value="7861"></label>
+      </div>
+      <label class="row"><span class="switch"><input type="checkbox" id="c-local" checked><span></span></span> This PC trains too</label>
+      <details><summary>Advanced</summary><div class="grid g3" style="margin-top:12px">
+        <label class="field">Secret<input class="input mono" id="c-secret" placeholder="made up for you"><span class="hint">workers must type it</span></label>
+        <label class="field">Workers needed to start<input class="input" id="c-minw" type="number" min="1" value="1"></label>
+        <label class="field">Vocab size<input class="input" id="c-vocab" type="number" value="${d.vocab || 8192}"><span class="hint">must match tokenizer</span></label>
+        <label class="field">Final learning rate<input class="input" id="c-minlr" type="number" step="any" min="0" value="0"><span class="hint">0 = learning rate ÷ 10</span></label>
+        <label class="field">Warmup steps (per worker)<input class="input" id="c-warmup" type="number" min="0" value="200"></label>
+        <label class="field">Weight decay<input class="input" id="c-wd" type="number" step="0.01" min="0" value="0.1"></label>
+        <label class="field">Outer learning rate<input class="input" id="c-olr" type="number" step="0.05" value="0.7"><span class="hint">step size of the averaged update</span></label>
+        <label class="field">Outer momentum<input class="input" id="c-omom" type="number" step="0.05" min="0" max="0.99" value="0.9"></label>
+        <label class="field">Check quality every N rounds<input class="input" id="c-evalevery" type="number" min="1" value="1"></label>
+        <label class="field">This PC: batch size<input class="input" id="c-batch" type="number" min="1" value="16"></label>
+        <label class="field">This PC: grad accumulation<input class="input" id="c-accum" type="number" min="1" value="4"></label>
+        <label class="row" style="align-self:center"><span class="switch"><input type="checkbox" id="c-nesterov" checked><span></span></span> Nesterov momentum</label>
+      </div><label class="row" style="margin-top:12px"><span class="switch"><input type="checkbox" id="c-resume"><span></span></span> Resume this model from its last round</label></details>
+      <div class="row end"><button class="btn primary" id="c-start">${I.play} Start the cluster</button></div>
+    </div>
+    <div class="card" style="display:flex;flex-direction:column;gap:14px"><div class="card-head"><h2>Join a cluster</h2><span class="hint">lend this PC to another PC's training</span></div>
+      <p class="muted" style="margin:0">Copy the address and secret from the PC that started the cluster. This PC downloads its share of the text once, then trains in rounds on <b>${esc(S.status.device?.name || "its CPU or GPU")}</b>. Pick another device in Settings.</p>
+      <div class="grid g2">
+        <label class="field">Coordinator address<input class="input mono" id="j-addr" placeholder="http://192.168.1.20:7861"></label>
+        <label class="field">Secret<input class="input mono" id="j-secret"></label>
+        <label class="field">This PC's name<input class="input" id="j-name" placeholder="shown on the coordinator"></label>
+        <label class="field">Text to download (MB)<input class="input" id="j-mb" type="number" min="1" value="200"><span class="hint">100 MB ≈ 50M tokens</span></label>
+      </div>
+      <details><summary>Advanced</summary><div class="grid g3" style="margin-top:12px">
+        <label class="field">Batch size<input class="input" id="j-batch" type="number" min="0" value="0"><span class="hint">0 = 16 on a GPU, 8 on a CPU</span></label>
+        <label class="field">Grad accumulation<input class="input" id="j-accum" type="number" min="1" value="4"></label>
+        <label class="field">Stop early (seconds)<input class="input" id="j-reserve" type="number" min="0" value="0"><span class="hint">leave time for a slow upload</span></label>
+        <label class="row" style="grid-column:1/-1"><span class="switch"><input type="checkbox" id="j-local"><span></span></span> Use this PC's own prepared data instead of downloading (same tokenizer only)</label>
+      </div></details>
+      <div class="row end"><button class="btn primary" id="j-start">${I.play} Join</button></div>
+    </div>
+  </div>
+  <div class="card" style="margin-top:16px"><h2>How it works</h2><div class="muted">
+    <p>Each round, every PC starts from the same model and trains on its own share of the text for the round's minutes. A GPU simply does more steps than a CPU. Then each PC sends how far its copy moved, the coordinator averages the moves (weighted by how much text each PC read) and everyone continues from the result. PCs can join or leave at any time.</p>
+    <p>The internet only carries about one copy of the model each way per PC per round (the CPU size is ~${num(14 * 2)} MB), not gradients on every step, so home connections are fine. Expect roughly <b>0.6–0.9× the extra PCs' own speed</b> on top of yours: four similar PCs ≈ 3× faster than one. A slow PC never holds the others up.</p>
+    <p><b>Over the internet:</b> the simplest safe way is a free private network such as <b>Tailscale</b> or ZeroTier on every PC, then use the coordinator's Tailscale address. Otherwise forward the port (TCP ${7861}) on the coordinator's router. The secret protects the cluster, but the connection itself is not encrypted.</p>
+    <p>On a PC without the Studio: <span class="mono">run.bat --join http://ADDRESS:7861 --secret SECRET</span> (or <span class="mono">./run.sh</span> on Linux/macOS).</p></div></div>`;
+  const v = (k) => $("#" + k).value;
+  try { const last = JSON.parse(localStorage.getItem("cluster-join") || "null"); if (last) { $("#j-addr").value = last.address || ""; $("#j-name").value = last.name || ""; } } catch {}
+  $("#c-start").onclick = async () => {
+    try {
+      await api("/api/cluster/start", { json: { name: v("c-name"), preset: v("c-preset"), rounds: +v("c-rounds"), round_minutes: +v("c-minutes"), lr: +v("c-lr"), port: +v("c-port"), local_worker: $("#c-local").checked, secret: v("c-secret"), min_workers: +v("c-minw"), vocab: +v("c-vocab"), min_lr: +v("c-minlr"), warmup: +v("c-warmup"), weight_decay: +v("c-wd"), outer_lr: +v("c-olr"), outer_momentum: +v("c-omom"), eval_every: +v("c-evalevery"), batch: +v("c-batch"), accum: +v("c-accum"), nesterov: $("#c-nesterov").checked, resume: $("#c-resume").checked } });
+      toast("Cluster started. Share the address and secret with the other PCs.", "ok");
+      await poll(); drawClusterLive();
+    } catch (e) { fail(e); }
+  };
+  $("#j-start").onclick = async () => {
+    try {
+      try { localStorage.setItem("cluster-join", JSON.stringify({ address: v("j-addr"), name: v("j-name") })); } catch {}
+      await api("/api/cluster/join", { json: { address: v("j-addr"), secret: v("j-secret"), name: v("j-name"), data_mb: +v("j-mb"), batch: +v("j-batch"), accum: +v("j-accum"), reserve: +v("j-reserve"), local_data: $("#j-local").checked } });
+      toast("Joining the cluster…", "ok");
+      await poll(); drawClusterLive();
+    } catch (e) { fail(e); }
+  };
+  drawClusterLive();
+}
+
+const WSTATE = { training: "good", sent: "good", waiting: "", joined: "", "downloading data": "accent", "downloading weights": "accent", uploading: "accent", left: "warn", done: "good" };
+async function drawClusterLive() {
+  const box = $("#cl-live");
+  if (!box) return;
+  const st = await api("/api/cluster").catch(() => null);
+  if (!st || !$("#cl-live")) return;
+  const c = st.coordinator, w = st.worker;
+  let html = "";
+  if (c && (c.running || c.round)) {
+    const now = Date.now() / 1000;
+    const left = c.train_until ? Math.max(0, c.train_until - now) : null;
+    const phase = { waiting: c.workers?.some((x) => x.state !== "left") ? "Waiting for the next round" : "Waiting for workers to join", training: `Round ${num((c.round || 0) + 1)} training · ${dur(left)} left`, averaging: "Averaging", finished: "Finished", stopped: "Stopped" }[c.phase] || "Starting…";
+    const addrs = (c.addresses || []).map((ip) => `http://${ip}:${c.port}`);
+    const live = (c.workers || []).filter((x) => x.state !== "left");
+    html += `<div class="card"><div class="card-head"><h2>Cluster: ${esc(c.run)}</h2><div class="row" style="gap:8px">${c.running ? '<span class="pill good">● running</span>' : '<span class="pill">not running</span>'}<span class="hint">${esc(phase)}</span>${c.running ? `<button class="btn danger sm" id="cl-stop">${I.stop} Stop</button>` : ""}</div></div>
+      <div class="stats" style="margin-top:6px">
+        <div class="stat"><div class="l">Round</div><div class="v">${num(c.round)} / ${num(c.rounds)}</div></div>
+        <div class="stat"><div class="l">PCs training</div><div class="v">${num(live.length)}</div></div>
+        <div class="stat"><div class="l">Text read</div><div class="v">${num((c.tokens_total || 0) / 1e6, 1)}M tokens</div></div>
+        <div class="stat"><div class="l">Best val loss</div><div class="v">${num(c.best_val, 3)}</div></div>
+        <div class="stat"><div class="l">Per transfer</div><div class="v">${num(c.transfer_mb ?? c.model_mb / 2)} MB</div></div>
+      </div>
+      ${c.running ? `<div style="margin-top:12px"><b>Other PCs join with</b> <span class="hint">(pick the address they can reach; over the internet use your Tailscale address or forwarded public IP)</span>
+        <div class="grid g2" style="margin-top:8px"><label class="field">Address<select class="input mono" id="cl-addr">${addrs.map((a) => `<option>${esc(a)}</option>`).join("")}</select></label><label class="field">Secret<input class="input mono" readonly value="${esc(c.secret)}" id="cl-secret"></label></div>
+        <div class="row" style="margin-top:8px"><code class="mono" id="cl-cmd" style="flex:1;overflow:auto;white-space:nowrap">run.bat --join ${esc(addrs[0] || "")} --secret ${esc(c.secret)}</code><button class="btn sm" id="cl-copy">${I.copy} Copy</button></div></div>` : ""}
+      <div class="table-scroll" style="margin-top:14px"><table><thead><tr><th>PC</th><th>Device</th><th>State</th><th>Rounds</th><th>Speed</th><th>Loss</th><th>Last seen</th></tr></thead><tbody>
+        ${(c.workers || []).map((x) => `<tr><td><b>${esc(x.name)}</b><div class="hint mono">${esc(x.address || "")}${x.note ? " · " + esc(x.note) : ""}</div></td><td>${esc(x.device_name || x.device)}</td>
+          <td><span class="pill ${WSTATE[x.state] ?? ""}">${esc(x.state)}</span></td><td>${num(x.rounds)}</td><td>${x.tokens_per_sec ? num(x.tokens_per_sec) + " tok/s" : "—"}</td><td>${num(x.loss, 3)}</td><td class="muted">${ago(x.last_seen)}</td></tr>`).join("") || '<tr><td colspan="7" class="muted">No PCs connected yet.</td></tr>'}
+      </tbody></table></div>
+      <details style="margin-top:12px"><summary>Log</summary><pre class="console" style="margin-top:8px">${esc(c.log || "")}</pre></details></div>`;
+  }
+  if (w && (w.running || w.state)) {
+    html += `<div class="card" style="margin-top:${html ? 16 : 0}px"><div class="card-head"><h2>This PC is helping ${esc(w.coordinator || w.last?.address || "a cluster")}</h2><div class="row" style="gap:8px">${w.running ? `<span class="pill ${WSTATE[w.state] ?? ""}">● ${esc(w.state || "starting")}</span><button class="btn danger sm" id="wk-stop">${I.stop} Leave</button>` : `<span class="pill">${esc(w.state || "stopped")}</span>`}</div></div>
+      <div class="muted">${esc(w.note || "")}${w.state === "downloading data" && w.data_progress != null ? ` <div class="bar" style="margin-top:6px"><i style="width:${(w.data_progress * 100).toFixed(1)}%"></i></div>` : ""}</div>
+      <div class="stats" style="margin-top:6px">
+        <div class="stat"><div class="l">Device</div><div class="v" style="font-size:14px">${esc(w.device_name || "—")}</div></div>
+        <div class="stat"><div class="l">Rounds sent</div><div class="v">${num(w.rounds)}</div></div>
+        <div class="stat"><div class="l">Speed</div><div class="v">${w.tokens_per_sec ? num(w.tokens_per_sec) + " tok/s" : "—"}</div></div>
+        <div class="stat"><div class="l">Loss</div><div class="v">${num(w.loss, 3)}</div></div>
+      </div>
+      <details style="margin-top:12px"><summary>Log</summary><pre class="console" style="margin-top:8px">${esc(w.log || "")}</pre></details></div>`;
+  }
+  const open = $$("#cl-live details").map((x) => x.open);
+  const sel = $("#cl-addr")?.value;
+  box.innerHTML = html;
+  $$("#cl-live details").forEach((x, i) => (x.open = !!open[i]));
+  if (sel && $("#cl-addr")) $("#cl-addr").value = sel;
+  const cmd = () => `run.bat --join ${$("#cl-addr").value} --secret ${$("#cl-secret").value}`;
+  if ($("#cl-addr")) { $("#cl-cmd").textContent = cmd(); $("#cl-addr").onchange = () => ($("#cl-cmd").textContent = cmd()); }
+  if ($("#cl-copy")) $("#cl-copy").onclick = () => navigator.clipboard.writeText(cmd()).then(() => toast("Copied", "ok"), () => toast("Copy failed; select the text instead", "err"));
+  for (const id of ["#cl-stop", "#wk-stop"]) {
+    const b = $(id);
+    if (b) b.onclick = async () => { b.disabled = true; await api("/api/stop", { method: "POST" }).catch(fail); toast(id === "#cl-stop" ? "Stopping. The last finished round is saved." : "Left the cluster."); poll(); drawClusterLive(); };
+  }
 }
 
 function trainData() {

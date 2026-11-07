@@ -500,6 +500,141 @@ def train(r: TrainReq):
     return _launch("training", name, cmd, os.path.join(out, "log.txt"), run=name)
 
 
+# ---------------------------------------------------------------- cluster (several PCs train one model)
+CLUSTER_DIR = os.path.join(RUNS, "_cluster")
+CLUSTER_LAST = os.path.join(CLUSTER_DIR, "last.json")       # the coordinator this PC started last
+WORKER_STATUS = os.path.join(CLUSTER_DIR, "worker.json")    # written by cluster.py worker
+
+
+class ClusterReq(BaseModel):
+    name: str = "cluster-writer"
+    resume: bool = False
+    preset: str = "cpu"
+    vocab: int = 8192
+    rounds: int = 200
+    round_minutes: float = 5
+    lr: float = 1e-3
+    min_lr: float = 0
+    warmup: int = 200
+    weight_decay: float = 0.1
+    outer_lr: float = 0.7
+    outer_momentum: float = 0.9
+    nesterov: bool = True
+    min_workers: int = 1
+    eval_every: int = 1
+    port: int = 7861
+    secret: str = ""
+    local_worker: bool = True     # this PC trains too
+    batch: int = 16               # this PC's worker
+    accum: int = 4
+
+
+class JoinReq(BaseModel):
+    address: str
+    secret: str
+    name: str = ""
+    batch: int = 0                # 0 = 16 on a GPU, 8 on a CPU
+    accum: int = 4
+    data_mb: float = 200
+    local_data: bool = False      # use this PC's data/bin instead of downloading a share
+    reserve: float = 0
+
+
+def _read_json(p):
+    try:
+        return json.load(open(p))
+    except (OSError, ValueError):
+        return None
+
+
+@app.post("/api/cluster/start")
+def cluster_start(r: ClusterReq):
+    import secrets as _secrets
+
+    name = "".join(c if c.isalnum() or c in "-_." else "-" for c in r.name.strip()) or "cluster-writer"
+    out = os.path.join(RUNS, name)
+    resuming = r.resume and os.path.exists(os.path.join(out, "ckpt.pt"))
+    if not os.path.exists(os.path.join(ROOT, "data/bin/train.bin")):
+        err("Prepare the training data first (Training → Data, steps 1–3). Workers get their share from this PC.")
+    os.makedirs(out, exist_ok=True)
+    tok_copy = os.path.join(out, "tokenizer.json")
+    if not (resuming and os.path.exists(tok_copy)):
+        src = os.path.join(ROOT, "tokenizer/bpe.json")
+        if not os.path.exists(src):
+            err("Train the tokenizer first (Training → Data, step 2).")
+        shutil.copyfile(src, tok_copy)
+    meta_p = os.path.join(out, "meta.json")
+    if not (resuming and os.path.exists(meta_p)):
+        json.dump({"type": "scratch", "tok": "tokenizer.json", "preset": r.preset, "cluster": True}, open(meta_p, "w"))
+    secret = r.secret.strip() or "-".join(_secrets.token_hex(3) for _ in range(3))
+    cmd = [PY, "cluster.py", "coordinator", "--out", out, "--preset", r.preset, "--vocab", str(r.vocab),
+           "--rounds", str(max(1, r.rounds)), "--round-minutes", str(max(0.2, r.round_minutes)), "--lr", str(r.lr),
+           "--min-lr", str(min(r.min_lr, r.lr) if r.min_lr > 0 else r.lr / 10), "--warmup", str(max(0, r.warmup)),
+           "--weight-decay", str(max(0.0, r.weight_decay)), "--outer-lr", str(r.outer_lr),
+           "--outer-momentum", str(r.outer_momentum), "--min-workers", str(max(1, r.min_workers)),
+           "--eval-every", str(max(1, r.eval_every)), "--port", str(r.port),
+           "--batch", str(max(1, r.batch)), "--grad-accum", str(max(1, r.accum)),
+           "--local-device", db.get_settings().get("device", "auto") or "auto"]
+    if not r.nesterov:
+        cmd.append("--no-nesterov")
+    if r.local_worker:
+        cmd.append("--local-worker")
+    if resuming:
+        cmd.append("--resume")
+    mp = os.path.join(out, "metrics.jsonl")
+    if not resuming and os.path.exists(mp):
+        os.rename(mp, os.path.join(out, f"metrics.{int(time.time())}.jsonl"))
+    for f in ("cluster.json",):
+        try:
+            os.remove(os.path.join(out, f))
+        except OSError:
+            pass
+    os.makedirs(CLUSTER_DIR, exist_ok=True)
+    json.dump({"run": name, "secret": secret, "port": r.port, "started": time.time()}, open(CLUSTER_LAST, "w"))
+    # the secret goes through the environment, so it isn't written into log.txt with the command
+    return _launch("cluster", name, cmd, os.path.join(out, "log.txt"), run=name, env={"TEXTLLM_CLUSTER_SECRET": secret})
+
+
+@app.post("/api/cluster/join")
+def cluster_join(r: JoinReq):
+    addr = r.address.strip()
+    if not addr or not r.secret.strip():
+        err("Enter the coordinator's address and its secret.")
+    os.makedirs(CLUSTER_DIR, exist_ok=True)
+    try:
+        os.remove(WORKER_STATUS)
+    except OSError:
+        pass
+    cmd = [PY, "cluster.py", "worker", "--join", addr,
+           "--device", db.get_settings().get("device", "auto") or "auto", "--batch", str(max(0, r.batch)),
+           "--grad-accum", str(max(1, r.accum)), "--data-mb", str(max(1.0, r.data_mb)),
+           "--reserve", str(max(0.0, r.reserve)), "--status-file", WORKER_STATUS]
+    if r.name.strip():
+        cmd += ["--name", r.name.strip()[:40]]
+    if r.local_data:
+        if not os.path.exists(os.path.join(ROOT, "data/bin/train.bin")):
+            err("This PC has no prepared data (data/bin/train.bin). Untick 'use this PC's data' to download a share.")
+        cmd += ["--data", os.path.join(ROOT, "data/bin")]
+    json.dump({"address": addr, "name": r.name}, open(os.path.join(CLUSTER_DIR, "joined.json"), "w"))
+    return _launch("worker", addr, cmd, os.path.join(CLUSTER_DIR, "worker-log.txt"),
+                   env={"TEXTLLM_CLUSTER_SECRET": r.secret.strip()})
+
+
+@app.get("/api/cluster")
+def cluster_state():
+    last = _read_json(CLUSTER_LAST)
+    coord = None
+    if last:
+        d = os.path.join(RUNS, os.path.basename(last["run"]))
+        coord = {**(_read_json(os.path.join(d, "cluster.json")) or {}), "run": last["run"], "secret": last["secret"],
+                 "port": last["port"], "running": jobs.running() and jobs.JOB["kind"] == "cluster",
+                 "log": jobs.tail(os.path.join(d, "log.txt"), 80)}
+    worker = {**(_read_json(WORKER_STATUS) or {}), "running": jobs.running() and jobs.JOB["kind"] == "worker",
+              "last": _read_json(os.path.join(CLUSTER_DIR, "joined.json")),
+              "log": jobs.tail(os.path.join(CLUSTER_DIR, "worker-log.txt"), 80)}
+    return {"coordinator": coord, "worker": worker, "data": jobs.data_status()}
+
+
 # ---------------------------------------------------------------- style profiles (write like an account)
 @app.get("/api/styles")
 def styles_list():

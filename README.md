@@ -12,7 +12,7 @@ python run.py        # any OS
 ```
 The first run creates a virtual environment in `.venv`, installs the packages, and creates the data folders. Then it starts the Studio and opens http://127.0.0.1:7860 in your browser. Later runs skip the install unless `requirements.txt` or the PyTorch build changed. Stop it with Ctrl+C.
 
-Options: `--port 8000`, `--host 0.0.0.0` (other devices on your network), `--no-browser`, `--reinstall`, `--gpu` / `--cpu` / `--torch-index cu128` (pick the PyTorch build, see below), `--no-venv` (use your current Python). If the port is busy it uses the next free one.
+Options: `--lite` (skip the optional AI toolkit), `--port 8000`, `--host 0.0.0.0` (other devices on your network), `--no-browser`, `--reinstall`, `--gpu` / `--cpu` / `--torch-index cu128` (pick the PyTorch build, see below), `--no-venv` (use your current Python). If the port is busy it uses the next free one.
 
 ## Using your GPU (laptop or desktop)
 Training and chat use the GPU automatically when there is one; nothing to set in the Studio. The Dashboard shows which device is in use.
@@ -37,8 +37,49 @@ Runs move freely between GPU and CPU PCs: checkpoints load on the CPU first and 
 ## Manual setup
 ```bash
 pip install -r requirements.txt
+pip install -r requirements-ai.txt     # optional AI toolkit (any PC)
+pip install -r requirements-gpu.txt    # optional, NVIDIA GPU only
 python app.py        # open http://127.0.0.1:7860
 ```
+
+## AI toolkit
+`run.bat` / `run.sh` install three sets of packages. Only the first is required; the other two are best effort, so a package that can't be installed on your PC is reported and skipped and the app still runs. Use `--lite` to skip the extras, and run `python stack_check.py` any time to see what's installed and working (each package gets a tiny offline test).
+
+| File | Installed when | Packages |
+|---|---|---|
+| `requirements.txt` | always | PyTorch, transformers, peft, accelerate, datasets, tokenizers, safetensors, the Studio and the text extractors |
+| `requirements-ai.txt` | always (skip with `--lite`) | trl, lm-eval, sentence-transformers, faiss-cpu, datasketch, rapidfuzz, gguf, tensorboard |
+| `requirements-gpu.txt` | an NVIDIA GPU is found (or `--gpu`) | bitsandbytes, liger-kernel (Linux only) |
+
+Version ranges have upper bounds, so a future major release can't break a working install.
+
+**What each one is for and what it unlocks**
+
+| Package | What it does | What it unlocks here |
+|---|---|---|
+| **PyTorch** | Tensors and autograd on CPU, NVIDIA (CUDA), Apple (MPS) | Everything: the from-scratch GPT and all fine-tuning |
+| **transformers** | Loads open models (Qwen, Llama, Mistral, Gemma, Phi) | Fine-tuning and chat with any Hugging Face model |
+| **peft** | LoRA / QLoRA adapters | Fine-tune a 0.6–8B model by training ~1% of its weights |
+| **accelerate** | Device placement, mixed precision, multi-GPU | The same script runs on CPU, a laptop GPU or 8 GPUs |
+| **datasets** | Memory-mapped, streamed datasets | Corpora bigger than your RAM |
+| **trl** | Ready-made SFT, DPO, ORPO, KTO and GRPO trainers | Instruction tuning and learning from your ★ ratings with the recipes used for current chat models |
+| **lm-eval** | The standard benchmark harness (HellaSwag, ARC, MMLU, ...) | Compare your model with published ones: `lm_eval --model hf --model_args pretrained=Qwen/Qwen3-0.6B,peft=runs/<name>/adapter --tasks hellaswag,arc_easy --device cpu --limit 200` |
+| **sentence-transformers** + **faiss-cpu** | Text embeddings and a fast vector index | Semantic search over your corpus, retrieval-augmented writing (RAG), dedup by meaning |
+| **datasketch** + **rapidfuzz** | MinHash LSH and fuzzy matching | `data/clean_corpus.py`: removes near-duplicate and junk documents before training |
+| **gguf** | Reads and writes llama.cpp model files | Inspect and edit the GGUF copies made by `export_gguf.py` |
+| **tensorboard** | Charts in a browser tab | `tensorboard --logdir runs` |
+| **llama-cpp-python** | llama.cpp from Python (installed separately by `run.py`) | 4-bit GGUF chat, several times faster on CPU |
+| **bitsandbytes** | 4-bit and 8-bit weights, 8-bit optimizers (GPU) | QLoRA: fine-tune a 2–3× bigger model in the same VRAM, e.g. Qwen3-4B on an 8 GB laptop GPU |
+| **liger-kernel** | Fused Triton kernels for Llama/Qwen layers (GPU, Linux) | ~20% faster training and up to 60% less memory |
+
+**Clean the corpus before training.** Duplicates (the same book from two sources, reposted news) make a model memorise, and junk (tables, menus, OCR noise) wastes steps. This writes a cleaned copy and leaves `data/raw` untouched, so downloads keep resuming:
+```bash
+python data/clean_corpus.py                 # data/raw -> data/clean, report in data/clean/report.json
+python tokenizer/train_tokenizer.py --raw data/clean --vocab 32000 --out tokenizer/bpe.json
+python tokenizer/train_tokenizer.py --encode --raw data/clean --tok tokenizer/bpe.json --bin data/bin
+```
+
+**Left out on purpose:** `flash-attn` (PyTorch's built-in `scaled_dot_product_attention`, which the GPT and transformers already use, gives most of the speed-up without a long CUDA compile that usually fails on Windows), `vllm` (a server for big GPUs, not laptops), `deepspeed` (multi-GPU clusters), and `unsloth` (pins its own torch and transformers versions, which conflicts with this stack).
 
 ## Text LLM Studio (web app)
 A step-by-step user manual with screenshots of every page: [docs/Studio-Manual.pdf](docs/Studio-Manual.pdf) (source: [docs/manual.md](docs/manual.md); rebuild with `docs/manual-build/build.sh`, needs pandoc and Playwright).

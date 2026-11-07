@@ -10,6 +10,7 @@ data/instructions/
 data/cache/
 tools/
 *.gguf
+data/clean/
 data/my_posts/
 docs/manual-build/manual.html
 data/cluster/

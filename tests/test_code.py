@@ -1,5 +1,5 @@
 """The copilot (code) model: code sources, secret scrubbing, .gitignore, licence checks, FIM data and completion."""
-import io, json, os, random, tarfile, threading
+import io, json, os, random, tarfile, threading, time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 import pytest
@@ -166,6 +166,9 @@ REPOS = {
 }
 
 
+QUERIES = []
+
+
 @pytest.fixture
 def fake_github():
     class H(BaseHTTPRequestHandler):
@@ -185,16 +188,20 @@ def fake_github():
             if path == "/search/repositories":
                 from urllib.parse import parse_qs, urlparse
 
-                page = int(parse_qs(urlparse(self.path).query).get("page", ["1"])[0])
+                qs = parse_qs(urlparse(self.path).query)
+                QUERIES.append(qs.get("q", [""])[0])
+                page = int(qs.get("page", ["1"])[0])
                 items = [{"full_name": k, "license": v["license"], "default_branch": "main", "size": 10,
-                          "stargazers_count": 100, "html_url": f"https://github.com/{k}"} for k, v in REPOS.items()]
+                          "stargazers_count": 100, "html_url": f"https://github.com/{k}",
+                          "pushed_at": v.get("pushed_at", "2026-01-01T00:00:00Z")} for k, v in REPOS.items()]
                 return self.send(200, {"items": items if page == 1 else []})
             if path.startswith("/repos/"):
                 full = path[len("/repos/"):]
                 if full not in REPOS:
                     return self.send(404, {"message": "Not Found"})
                 v = REPOS[full]
-                return self.send(200, {"full_name": full, "license": v["license"], "default_branch": "main", "size": 10})
+                return self.send(200, {"full_name": full, "license": v["license"], "default_branch": "main", "size": 10,
+                                       "pushed_at": v.get("pushed_at", "2026-01-01T00:00:00Z")})
             if "/tar.gz/" in path:
                 full = path.strip("/").split("/tar.gz/")[0]
                 return self.send(200, tarball(full.split("/")[1], REPOS[full]["files"]), "application/gzip")
@@ -459,3 +466,134 @@ def test_lora_copilot_trains_and_completes(code_corpus, tmp_path):
     e = Engine(out, backend="hf")
     outs = list(e.code_complete("def add(a, b):\n    return ", "\n", max_tokens=6))
     assert all(isinstance(o, str) for o in outs)
+
+
+# ---------------------------------------------------------------- automatic updates (data/code_update.py)
+@pytest.fixture
+def auto_env(fake_github, tmp_path, monkeypatch):
+    from data import build_code, code_update
+
+    monkeypatch.setattr(build_code, "API", fake_github)
+    monkeypatch.setattr(build_code, "CODELOAD", fake_github)
+    code = tmp_path / "code"
+    for k, v in {"CODE": code, "CODE_CFG": code / "sources.json", "STATE": tmp_path / "auto",
+                 "SETTINGS": tmp_path / "auto" / "settings.json", "STATE_P": tmp_path / "auto" / "state.json",
+                 "PENDING": tmp_path / "auto" / "pending", "LOG": tmp_path / "auto" / "log.txt",
+                 "ROOT": tmp_path}.items():
+        monkeypatch.setattr(code_update, k, str(v))
+    code.mkdir()
+    (code / "sources.json").write_text(json.dumps({"langs": "python,javascript", "licenses": ["mit", "apache-2.0"],
+                                                   "min_stars": 10, "retries": 1}))
+    monkeypatch.setitem(REPOS, "erin/second", {"license": {"spdx_id": "MIT"},
+                                               "files": {"LICENSE": "MIT License", "s.py": PY_FILE + "# erin\n"}})
+    monkeypatch.setitem(REPOS, "alice/good", json.loads(json.dumps(REPOS["alice/good"])))  # restored afterwards
+    QUERIES.clear()
+    return code_update
+
+
+def pending_docs(cu):
+    return read_docs(cu.PENDING) if os.path.isdir(cu.PENDING) else []
+
+
+def test_scheduled_updates_add_new_repos_then_only_new_commits(auto_env):
+    cu = auto_env
+    s = {**cu.DEFAULTS, "github_new": 1, "refresh": True, "topics": "CLI, #web, bad topic!"}
+    cu.run_once(s, token="")
+    st = json.load(open(os.path.join(cu.CODE, "github", "progress.json")))
+    assert st["done"] == ["alice/good"] and len(pending_docs(cu)) == 2
+    assert QUERIES and all(" topic:" in q for q in QUERIES) and any("topic:cli" in q for q in QUERIES)
+    cu.run_once(s, token="")  # one more repository per run; alice/good has no new commits
+    st = json.load(open(os.path.join(cu.CODE, "github", "progress.json")))
+    assert st["done"] == ["alice/good", "erin/second"] and len(pending_docs(cu)) == 3
+    # a new commit in alice/good: only the new file is added
+    REPOS["alice/good"]["files"]["lib/mul.py"] = PY_FILE.replace("add", "mul")
+    REPOS["alice/good"]["pushed_at"] = "2026-02-01T00:00:00Z"
+    s["github_new"] = 0
+    assert cu.run_once(s, token="").startswith("1 new file;")
+    assert any("alice/good/lib/mul.py" in d for d in pending_docs(cu)) and len(pending_docs(cu)) == 4
+    attr = [json.loads(l) for l in open(os.path.join(cu.CODE, "github", "attribution.jsonl"))]
+    assert attr[-1]["repo"] == "alice/good" and attr[-1]["files"] == 3 and attr[-1]["added"] == 1
+    # the licence changed to GPL: new commits are not taken any more
+    REPOS["alice/good"]["license"] = {"spdx_id": "GPL-3.0"}
+    REPOS["alice/good"]["files"]["lib/div.py"] = PY_FILE.replace("add", "div")
+    REPOS["alice/good"]["pushed_at"] = "2026-03-01T00:00:00Z"
+    assert cu.run_once(s, token="").startswith("0 new files")
+    assert not any("div.py" in d for d in read_docs(cu.CODE))
+
+
+def test_scheduled_updates_train_the_copilot_once_enough_is_new(auto_env, monkeypatch, tmp_path):
+    cu = auto_env
+    run = tmp_path / "runs" / "my-copilot"
+    run.mkdir(parents=True)
+    (run / "meta.json").write_text(json.dumps({"type": "lora", "task": "code", "base": "x"}))
+    trained = []
+    monkeypatch.setattr(cu, "train", lambda path, steps, mix: trained.append((path, steps, len(pending_docs(cu)))))
+    s = {**cu.DEFAULTS, "github_new": 1, "train_model": "my-copilot", "train_steps": 7, "min_files": 3}
+    assert "waiting" in cu.run_once(s, token="") and not trained  # 2 new files, training starts at 3
+    assert "trained on 3 files" in cu.run_once(s, token="")
+    assert trained == [(str(run), 7, 3)] and pending_docs(cu) == [] and cu.load_state()["trained_files"] == 3
+
+
+def test_lora_update_command_trains_only_the_new_code(auto_env, tmp_path):
+    cu = auto_env
+    run = tmp_path / "runs" / "cp"
+    run.mkdir(parents=True)
+    (run / "metrics.jsonl").write_text(json.dumps({"step": 40}) + "\n")
+    cmd = cu.lora_cmd(str(run), {"base": "Qwen/Qwen2.5-Coder-0.5B-Instruct"}, 10, str(tmp_path / "empty"))
+    assert cmd[cmd.index("--code") + 1] == cu.PENDING and cmd[cmd.index("--examples") + 1] == "0"
+    assert cmd[cmd.index("--init-adapter") + 1] == str(run / "adapter") and cmd[cmd.index("--step-offset") + 1] == "40"
+    assert cmd[cmd.index("--max-steps") + 1] == "10"
+    with pytest.raises(SystemExit, match="not a copilot"):
+        (run / "meta.json").write_text(json.dumps({"type": "lora", "base": "x"}))
+        cu.train(str(run), 5, 1.0)
+
+
+def test_os_schedule_keeps_other_jobs(monkeypatch, tmp_path):
+    from core import schedule
+
+    crontab = {"text": "0 */6 * * * cd /x && python data/crawl.py >> log 2>&1  # TextLLM news crawler\n"}
+
+    class R:
+        def __init__(self, out=""):
+            self.returncode, self.stdout, self.stderr = 0, out, ""
+
+    def run(args, input=None, **kw):
+        if args == ["crontab", "-l"]:
+            return R(crontab["text"])
+        crontab["text"] = input
+        return R()
+
+    monkeypatch.setattr(schedule.os, "name", "posix")
+    monkeypatch.setattr(schedule.subprocess, "run", run)
+    schedule.install("TextLLM code updates", ["python", "data/code_update.py"], str(tmp_path / "log.txt"), 24, "/x")
+    lines = crontab["text"].splitlines()
+    assert len(lines) == 2 and lines[1].startswith("0 3 * * * cd /x && python data/code_update.py")
+    assert schedule.status("TextLLM code updates")["installed"] and schedule.status("TextLLM news crawler")["installed"]
+    schedule.remove("TextLLM code updates")
+    assert crontab["text"].splitlines() == lines[:1]
+
+
+def test_studio_automatic_updates(client, monkeypatch, tmp_path):
+    from data import code_update as cu
+    from studio import copilot, jobs
+
+    for k in ("STATE", "SETTINGS", "STATE_P", "LOG"):
+        monkeypatch.setattr(cu, k, str(tmp_path / "auto" / os.path.basename(getattr(cu, k))))
+    monkeypatch.setattr(jobs, "runs", lambda: [{"name": "cp", "task": "code"}, {"name": "writer", "task": None}])
+    monkeypatch.setattr(cu, "schedule_status", lambda: {"installed": False, "kind": "cron", "detail": ""})
+    a = client.get("/api/code").json()["auto"]
+    assert a["settings"]["enabled"] is False and a["models"] == ["cp"] and a["next"] is None
+    r = client.post("/api/code/auto", json={"enabled": True, "every_hours": 0, "github_new": 5, "topics": "CLI, #Web, bad!",
+                                            "train_model": "cp"})
+    a = r.json()
+    assert a["settings"]["every_hours"] == 1 and a["settings"]["topics"] == "cli,web"
+    assert a["settings"]["train_model"] == "cp" and a["next"] is not None
+    assert client.post("/api/code/auto", json={"train_model": "writer"}).status_code == 400
+    client.post("/api/code/config", json={"github_token": "ghp_secret"})
+    r = client.post("/api/code/auto/run")
+    assert r.status_code == 200, r.text
+    kind, name, cmd, env = client.launched[-1]
+    assert cmd[1:] == ["data/code_update.py"] and "ghp_secret" not in " ".join(cmd) and env is None
+    assert copilot.auto_next(cu.load_settings()) > time.time()  # waits a full interval again
+    monkeypatch.setattr(cu, "install_schedule", lambda h: f"cron every {h}")
+    assert client.post("/api/code/auto/schedule?install=true").json()["message"] == "cron every 1.0"

@@ -101,7 +101,7 @@ async function poll() {
     const j = S.status.job;
     const pill = $("#jobpill");
     pill.classList.toggle("on", j.running);
-    $(".jobtext", pill).textContent = j.running ? `${labelKind(j.kind)}: ${j.name}` : j.external ? `Scheduled crawler: ${j.external.name || "training"}` : "Idle · no job running";
+    $(".jobtext", pill).textContent = j.running ? `${labelKind(j.kind)}: ${j.name}` : j.external ? `Scheduled job: ${j.external.name || "training"}` : "Idle · no job running";
     const b = $("#nav-pending");
     b.hidden = !S.status.pending_feedback;
     b.textContent = S.status.pending_feedback;
@@ -446,6 +446,7 @@ async function trainCopilot() {
       <li><b>From an editor or script</b>: <span class="mono">POST /api/code/complete</span> with <span class="mono">{"model", "prefix", "suffix"}</span>; see the manual.</li>
       <li>Rate answers with ★ to teach it, like any model.</li></ul>
     <p class="hint" style="margin:0">Public code is used under its licence; the list of repositories and their licence texts are kept in <span class="mono">data/code/ATTRIBUTION.md</span>${st.attribution ? " (ready)" : ""}.</p></div></div>
+  ${autoCard(st.auto)}
   <div class="card" style="margin-top:16px"><div class="card-head"><h2>Log</h2></div><pre class="console" id="cp-log">${esc(S.status.job.kind === "data" ? S.status.job.log : "No data job yet.")}</pre></div>`;
 
   const drawDirs = () => {
@@ -506,6 +507,15 @@ async function trainCopilot() {
     } catch (e) { fail(e); }
   };
   drawDirs(); drawSources(st.sources);
+  const autoBody = () => ({ enabled: $("#ca-on").checked, every_hours: +$("#ca-every").value || 24, github_new: +$("#ca-new").value || 0, refresh: $("#ca-refresh").checked,
+    refresh_limit: +$("#ca-rlimit").value || 0, topics: $("#ca-topics").value, local: $("#ca-local").checked, train_model: $("#ca-model").value,
+    train_steps: +$("#ca-steps").value || 100, min_files: +$("#ca-min").value || 1, mix: +$("#ca-mix").value });
+  const saveAuto = async () => { await saveCfg(); return api("/api/code/auto", { json: autoBody() }); };
+  $("#ca-save").onclick = async () => { try { await saveAuto(); toast("Saved", "ok"); trainCopilot(); } catch (e) { fail(e); } };
+  $("#ca-run").onclick = async () => { try { await saveAuto(); await api("/api/code/auto/run", { method: "POST" }); toast("Looking for new code…", "ok"); poll(); } catch (e) { fail(e); } };
+  const osAuto = (install) => async () => { try { await saveAuto(); const r = await api(`/api/code/auto/schedule?install=${install}`, { method: "POST" }); toast(esc(r.message), "ok"); trainCopilot(); } catch (e) { fail(e); } };
+  if ($("#ca-os-on")) $("#ca-os-on").onclick = osAuto(true);
+  if ($("#ca-os-off")) $("#ca-os-off").onclick = osAuto(false);
   const prev = S.onStatus;
   let wasRunning = S.status.job.running;
   S.onStatus = async (s) => {
@@ -514,6 +524,34 @@ async function trainCopilot() {
     if (wasRunning && !s.job.running && $("#cp-sources")) { try { drawSources((await api("/api/code")).sources); } catch {} }
     wasRunning = s.job.running;
   };
+}
+
+// Training → Copilot → Automatic updates (data/code_update.py)
+function autoCard(a) {
+  const s = a.settings, st = a.state, os = a.schedule, now = Date.now() / 1000;
+  const status = os.installed ? `Runs from ${esc(os.kind)} every ${Math.max(1, Math.round(s.every_hours))} h, also when the Studio is closed.`
+    : a.next ? `Next run ${a.next < now ? "as soon as no other job is running" : "in " + dur(a.next - now)}. Runs only while the Studio is open.` : "Automatic updates are off.";
+  return `<div class="card" style="margin-top:16px;display:flex;flex-direction:column;gap:12px" id="cp-auto">
+    <div class="card-head"><h2>🔄 Automatic updates</h2><span class="hint">${st.last_start ? `last run ${ago(st.last_start)}${st.last_result ? ": " + esc(st.last_result) : ""}` : "never run"}</span></div>
+    <p class="muted" style="margin:0">Every few hours: add new permissively licensed GitHub repositories, take the new commits of the ones you have (and of the repositories listed above), and keep training a copilot on just the new code. Uses the languages, licences, minimum stars and token above.</p>
+    <div class="grid g4">
+      <label class="row" style="flex-wrap:nowrap"><span class="switch"><input type="checkbox" id="ca-on" ${s.enabled ? "checked" : ""}><span></span></span> Run automatically</label>
+      <label class="field">Every (hours)<input class="input" id="ca-every" type="number" min="1" value="${s.every_hours}"></label>
+      <label class="field">New repositories per run<input class="input" id="ca-new" type="number" min="0" value="${s.github_new}"><span class="hint">0 = only updates</span></label>
+      <label class="field">Topics<input class="input" id="ca-topics" value="${esc(s.topics)}" placeholder="any · e.g. cli,django,react"><span class="hint">GitHub topics, any of them</span></label>
+      <label class="row" style="flex-wrap:nowrap"><span class="switch"><input type="checkbox" id="ca-refresh" ${s.refresh ? "checked" : ""}><span></span></span> Take new commits</label>
+      <label class="field">Repositories checked per run<input class="input" id="ca-rlimit" type="number" min="0" value="${s.refresh_limit}"><span class="hint">0 = all · oldest-checked first</span></label>
+      <label class="row" style="flex-wrap:nowrap"><span class="switch"><input type="checkbox" id="ca-local" ${s.local ? "checked" : ""}><span></span></span> Re-read my projects</label>
+      <span></span>
+      <label class="field">Then train<select class="input" id="ca-model"><option value="">No, only collect the code</option>${a.models.map((m) => `<option value="${esc(m)}" ${m === s.train_model ? "selected" : ""}>${esc(m)}</option>`).join("")}</select><span class="hint">${a.models.length ? "a copilot model you trained here" : "train a copilot first"}</span></label>
+      <label class="field">Training steps<input class="input" id="ca-steps" type="number" min="1" value="${s.train_steps}"></label>
+      <label class="field">Train when this many files are new<input class="input" id="ca-min" type="number" min="1" value="${s.min_files}"><span class="hint">${num(st.pending_files)} waiting now</span></label>
+      <label class="field">Earlier code mixed in<input class="input" id="ca-mix" type="number" min="0" max="10" step="0.5" value="${s.mix}"><span class="hint">from-scratch models · per new token</span></label>
+    </div>
+    <div class="hint">${status} Same licence rule: a repository whose licence stops being permissive gets no further updates.</div>
+    <div class="row end">${os.installed ? `<button class="btn" id="ca-os-off">Remove from ${esc(os.kind)}</button><button class="btn ghost sm" id="ca-os-on" title="Apply the current interval to the task">Update</button>` : `<button class="btn" id="ca-os-on">${I.clock} Run when closed</button>`}<button class="btn" id="ca-save">Save</button><button class="btn primary" id="ca-run">${I.play} Run now</button></div>
+    ${a.log ? `<details><summary>Update log</summary><pre class="console" style="margin-top:8px;max-height:260px">${esc(a.log)}</pre></details>` : ""}
+  </div>`;
 }
 
 // ---------------------------------------------------------------- cluster: several PCs train one model

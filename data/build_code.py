@@ -32,6 +32,7 @@ Usage:
   python data/build_code.py --github-repos 200 --langs python,javascript,typescript --min-stars 100
   python data/build_code.py --github-repo pallets/flask --github-repo psf/requests
   python data/build_code.py --hf-gb 0.5 --langs python
+  python data/build_code.py --github-new 10 --topics cli,web --refresh   # what scheduled updates run
 Set GITHUB_TOKEN (any personal token, no scopes needed) for GitHub's higher rate limit.
 Downloads resume: run the same command again and finished repositories are skipped.
 """
@@ -319,12 +320,18 @@ def gh_get(sess, url, tries, params=None, stream=False):
     return retry(go, f"fetching {url.split('github.com', 1)[-1][:80]}", tries)
 
 
+def parse_topics(s):
+    """GitHub topics are lowercase letters, digits and hyphens."""
+    return [t for t in dict.fromkeys(x.strip().lower().lstrip("#") for x in re.split(r"[\s,]+", s or ""))
+            if re.fullmatch(r"[a-z0-9][a-z0-9-]{0,49}", t)]
+
+
 def licence_ok(spdx, allowed):
     return bool(spdx) and spdx.lower() in allowed
 
 
-def search_repos(sess, lang, lic, min_stars, page, tries):
-    q = f'language:"{lang}" license:{lic} stars:>={min_stars} fork:false archived:false'
+def search_repos(sess, lang, lic, min_stars, page, tries, topic=""):
+    q = f'language:"{lang}" license:{lic} stars:>={min_stars} fork:false archived:false' + (f" topic:{topic}" if topic else "")
     r = gh_get(sess, f"{API}/search/repositories", tries,
                params={"q": q, "sort": "stars", "order": "desc", "per_page": 50, "page": page})
     if r.status_code == 422:  # past the 1,000 results GitHub search returns
@@ -395,7 +402,10 @@ def repo_files(sess, full, ref, tries, langs, max_kb, max_repo_mb, stats):
     return retry(go, f"downloading {full}", tries)
 
 
-def github(out, max_repos, explicit, langs, licences, min_stars, max_kb, max_repo_mb, tries, token):
+def github(out, max_repos, explicit, langs, licences, min_stars, max_kb, max_repo_mb, tries, token,
+           new=0, topics=(), refresh=False, refresh_limit=100):
+    """max_repos: repositories to have in total; new: this many more than now (scheduled updates);
+    refresh: download repositories again whose code changed since (only new or changed files are added)."""
     d = os.path.join(out, "github")
     os.makedirs(os.path.join(d, "licenses"), exist_ok=True)
     st_p = os.path.join(d, "progress.json")
@@ -407,6 +417,15 @@ def github(out, max_repos, explicit, langs, licences, min_stars, max_kb, max_rep
     st.setdefault("shard_bytes", 0)
     st.setdefault("files", 0)
     st.setdefault("chars", 0)
+    st.setdefault("pushed", {})    # repository -> pushed_at when last downloaded
+    st.setdefault("checked", {})   # repository -> when a refresh last looked at it
+    if "repo_files" not in st:     # files per repository, for ATTRIBUTION.md (older folders: from attribution.jsonl)
+        st["repo_files"] = {}
+        p = os.path.join(d, "attribution.jsonl")
+        for line in (open(p, encoding="utf-8") if os.path.exists(p) else []):
+            if line.strip():
+                r = json.loads(line)
+                st["repo_files"][r["repo"]] = r.get("files", 0)
     done = set(st["done"])
     allowed = set(licences)
     sess = gh_session(token)
@@ -436,13 +455,27 @@ def github(out, max_repos, explicit, langs, licences, min_stars, max_kb, max_rep
             st["rejected"][full] = f"too big ({repo['size'] / 1024:.0f} MB)"
             say(f"github: {full}: skipped, too big ({repo['size'] / 1024:.0f} MB)")
             return False
-        ref = repo.get("default_branch") or "HEAD"
         rs = Counter()
-        files, lic_text = repo_files(sess, full, ref, tries, langs, max_kb, max_repo_mb, rs)
-        if not lic_text:
+        kept = fetch(repo, spdx, rs)
+        if kept is None:
             st["rejected"][full] = "no LICENSE file at the top of the repository"
             say(f"github: {full}: skipped, no LICENSE file")
             return False
+        done.add(full)
+        stats.update(rs)
+        say(f"github: {full} ({spdx}, ★{repo.get('stargazers_count', '?')}): {kept} files"
+            + (f", {rs['redacted']} secrets redacted" if rs["redacted"] else ""))
+        save()
+        return True
+
+    def fetch(repo, spdx, rs):
+        """Download a repository and add its files that aren't in the collection yet (all of them the first
+        time, only new or changed ones on a refresh). None when it has no LICENSE file."""
+        full = repo["full_name"]
+        ref = repo.get("default_branch") or "HEAD"
+        files, lic_text = repo_files(sess, full, ref, tries, langs, max_kb, max_repo_mb, rs)
+        if not lic_text:
+            return None
         kept = 0
         for rel, lang, com, text in files:
             if not dedup.new(text):
@@ -455,16 +488,47 @@ def github(out, max_repos, explicit, langs, licences, min_stars, max_kb, max_rep
         lic_file = os.path.join(d, "licenses", full.replace("/", "__") + ".license")
         with open(lic_file, "w", encoding="utf-8") as f:
             f.write(lic_text)
+        st["repo_files"][full] = st["repo_files"].get(full, 0) + kept
+        st["pushed"][full] = repo.get("pushed_at")
         attrib.write(json.dumps({"repo": full, "url": repo.get("html_url") or f"https://github.com/{full}",
                                  "license": spdx, "ref": ref, "stars": repo.get("stargazers_count"),
-                                 "files": kept, "license_file": os.path.relpath(lic_file, out).replace(os.sep, "/"),
+                                 "files": st["repo_files"][full], "added": kept, "pushed_at": repo.get("pushed_at"),
+                                 "license_file": os.path.relpath(lic_file, out).replace(os.sep, "/"),
                                  "fetched": time.time()}) + "\n")
-        done.add(full)
+        return kept
+
+    def update(full):
+        """Refresh one repository downloaded earlier: only when it has new commits, and only while its
+        licence is still permissive (code downloaded under the old licence stays)."""
+        info = repo_info(sess, full, tries)
+        st["checked"][full] = time.time()
+        if not info:
+            say(f"github: {full}: no longer public, nothing new taken")
+            return 0
+        pushed, old = info.get("pushed_at"), st["pushed"].get(full)
+        if old is None:  # downloaded before updates were tracked: remember where it is now
+            st["pushed"][full] = pushed
+            return 0
+        if pushed == old:
+            return 0
+        spdx = (info.get("license") or {}).get("spdx_id")
+        if not licence_ok(spdx, allowed):
+            st["pushed"][full] = pushed
+            say(f"github: {full}: new commits, but the licence is now {spdx or 'none'}; not taken")
+            return 0
+        if info.get("size", 0) > max_repo_mb * 1024 * 4:
+            st["pushed"][full] = pushed
+            say(f"github: {full}: new commits, but it is too big now ({info['size'] / 1024:.0f} MB); not taken")
+            return 0
+        rs = Counter()
+        kept = fetch(info, spdx, rs)
+        if kept is None:
+            st["pushed"][full] = pushed
+            say(f"github: {full}: new commits, but the LICENSE file is gone; not taken")
+            return 0
         stats.update(rs)
-        say(f"github: {full} ({spdx}, ★{repo.get('stargazers_count', '?')}): {kept} files"
-            + (f", {rs['redacted']} secrets redacted" if rs["redacted"] else ""))
-        save()
-        return True
+        say(f"github: {full}: updated, {kept} new or changed files")
+        return kept
 
     try:
         for full in explicit:
@@ -480,21 +544,36 @@ def github(out, max_repos, explicit, langs, licences, min_stars, max_kb, max_rep
                 say(f"github: {full}: not found (or private)")
                 continue
             take(info)
-        target = max_repos  # in total, counting repositories downloaded earlier and the named ones
-        if max_repos > len(done):
+        if refresh and done:
+            named = [f for f in (x.strip().strip("/").removeprefix("https://github.com/").removesuffix(".git")
+                                 for x in explicit) if f in done]
+            rest = sorted((f for f in done if f not in named), key=lambda f: st["checked"].get(f, 0))
+            order = (named + rest)[:refresh_limit] if refresh_limit > 0 else named + rest
+            say(f"github: checking {len(order)} of {len(done)} repositories for new commits")
+            changed = added = 0
+            for full in order:
+                n = update(full)
+                changed += n > 0
+                added += n
+                save()
+            say(f"github: {changed} repositories had new code, {added} files added")
+        # in total, counting repositories downloaded earlier and the named ones
+        target = max(max_repos, len(done) + new) if new > 0 else max_repos
+        if target > len(done):
             want_langs = sorted(langs) if langs else ["python", "javascript", "typescript"]
             lics = [x for x in SEARCHABLE if x in allowed]
-            queries = [(lg, lc) for lg in want_langs for lc in lics]
+            queries = [(lg, lc, tp) for lg in want_langs for tp in (list(topics) or [""]) for lc in lics]
+            restarted = False
             while len(done) < target:
                 progressed = False
-                for lg, lc in queries:  # round robin, so every language gets its share
+                for lg, lc, tp in queries:  # round robin, so every language (and topic) gets its share
                     if len(done) >= target:
                         break
-                    key = f"{lg}|{lc}|{min_stars}"
+                    key = f"{lg}|{lc}|{min_stars}" + (f"|{tp}" if tp else "")
                     page = st["pages"].get(key, 1)
                     if page < 0:
                         continue
-                    items = search_repos(sess, lg, lc, min_stars, page, tries)
+                    items = search_repos(sess, lg, lc, min_stars, page, tries, tp)
                     finished = True
                     for repo in items or []:
                         if len(done) >= target:
@@ -508,6 +587,13 @@ def github(out, max_repos, explicit, langs, licences, min_stars, max_kb, max_rep
                     save()
                     progressed |= bool(items)
                 if not progressed:
+                    if new > 0 and not restarted:
+                        # scheduled updates: every search was read to the end, so start them again from
+                        # the top; repositories created or starred since then show up there
+                        restarted = True
+                        for lg, lc, tp in queries:
+                            st["pages"].pop(f"{lg}|{lc}|{min_stars}" + (f"|{tp}" if tp else ""), None)
+                        continue
                     say("github: no more repositories match; lower the minimum stars or add languages")
                     break
     finally:
@@ -516,8 +602,9 @@ def github(out, max_repos, explicit, langs, licences, min_stars, max_kb, max_rep
         dedup.close()
         attrib.close()
         write_attribution(out)
+    skipped = ", ".join(f"{k[5:]} {v}" for k, v in stats.items() if k.startswith("skip:") and v)
     say(f"github: {len(done)} repositories, {st['files']} files ({st['chars'] / 1e6:.1f}M chars) in total"
-        + (f" · skipped " + ", ".join(f"{k[5:]} {v}" for k, v in stats.items() if k.startswith('skip:')) if stats else ""))
+        + (f" · skipped {skipped}" if skipped else ""))
 
 
 def write_attribution(out):
@@ -578,6 +665,12 @@ def main():
     ap.add_argument("--github-repos", type=int, default=0,
                     help="public GitHub repositories to have in total, found by search (0 = none)")
     ap.add_argument("--github-repo", action="append", default=[], help="download exactly this owner/name (repeat)")
+    ap.add_argument("--github-new", type=int, default=0,
+                    help="this many more public repositories than now, found by search (scheduled updates)")
+    ap.add_argument("--topics", default="", help="GitHub search: only repositories with one of these topics, e.g. cli,django")
+    ap.add_argument("--refresh", action="store_true",
+                    help="download repositories again that have new commits (only new or changed files are added)")
+    ap.add_argument("--refresh-limit", type=int, default=100, help="check at most this many repositories per run (0 = all)")
     ap.add_argument("--min-stars", type=int, default=50, help="GitHub search: only repositories with this many stars")
     ap.add_argument("--max-repo-mb", type=float, default=40, help="skip repositories with more source than this")
     ap.add_argument("--hf-gb", type=float, default=0, help=f"GB of code from {HF_CODE_REPO} (0 = none)")
@@ -595,15 +688,18 @@ def main():
     bad = [x for x in lics if x not in PERMISSIVE]
     if bad:
         raise SystemExit(f"not a permissive licence: {', '.join(bad)}. Allowed: {', '.join(PERMISSIVE)}")
-    if not (a.local or a.github_repos or a.github_repo or a.hf_gb):
-        raise SystemExit("nothing to do: give --local FOLDER, --github-repos N, --github-repo owner/name or --hf-gb G")
+    if not (a.local or a.github_repos or a.github_repo or a.github_new or a.refresh or a.hf_gb):
+        raise SystemExit("nothing to do: give --local FOLDER, --github-repos N, --github-new N, --refresh, "
+                         "--github-repo owner/name or --hf-gb G")
+    topics = parse_topics(a.topics)
     os.makedirs(a.out, exist_ok=True)
     try:
         if a.local:
             local(a.local, a.out, langs, a.max_file_kb)
-        if a.github_repos > 0 or a.github_repo:
+        if a.github_repos > 0 or a.github_repo or a.github_new > 0 or a.refresh:
             github(a.out, a.github_repos, a.github_repo, langs, lics,
-                   a.min_stars, a.max_file_kb, a.max_repo_mb, a.retries, os.environ.get("GITHUB_TOKEN", ""))
+                   a.min_stars, a.max_file_kb, a.max_repo_mb, a.retries, os.environ.get("GITHUB_TOKEN", ""),
+                   a.github_new, topics, a.refresh, a.refresh_limit)
         if a.hf_gb > 0:
             hf_code(a.out, a.hf_gb, langs, lics, a.max_file_kb, a.hf_mode, a.retries, a.cache, a.keep_parquet)
     except KeyboardInterrupt:

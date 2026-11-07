@@ -1358,6 +1358,7 @@ def _start_scheduler():
     apply_private_urls(db.get_settings().get("allow_private_urls", False))
     apply_device(db.get_settings().get("device", "auto"))
     threading.Thread(target=crawl_scheduler, daemon=True, name="crawl-scheduler").start()
+    threading.Thread(target=copilot.auto_scheduler, daemon=True, name="code-updates-scheduler").start()
     # The server answers at once; PyTorch (seconds to import) loads meanwhile for the device info.
     threading.Thread(target=device_info, daemon=True, name="warm-up").start()
 

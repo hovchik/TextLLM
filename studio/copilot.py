@@ -7,14 +7,19 @@ Routes (admin only, like every route not listed in app.USER_ROUTES):
   POST   /api/code/prepare         from-scratch copilots: code tokenizer or encoding (with FIM)
   DELETE /api/code/sources/{id}    delete one collected source (local/<name>, github, hf)
   GET    /api/fs/dirs?path=        list the folders on this PC, for picking project folders
+  POST   /api/code/auto            automatic updates: save the settings
+  POST   /api/code/auto/run        automatic updates: one run now
+  POST   /api/code/auto/schedule   automatic updates: register with / remove from the OS scheduler
 """
-import glob, json, os, re, shutil, string, sys
+import glob, json, os, re, shutil, string, sys, time
 
 from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel
 
 from chat_engine import ROOT, RUNS
 from core import paths as core_paths
+from data import code_update as auto
+from data.build_code import parse_topics
 from studio import jobs
 
 router = APIRouter()
@@ -112,13 +117,15 @@ def sources():
             st = json.load(open(os.path.join(gh, "progress.json")))
         except (OSError, ValueError):
             pass
-        lic = {}
+        rows, lic = {}, {}
         p = os.path.join(gh, "attribution.jsonl")
         if os.path.exists(p):
             for line in open(p, encoding="utf-8"):
                 if line.strip():
                     r = json.loads(line)
-                    lic[r["license"]] = lic.get(r["license"], 0) + 1
+                    rows[r["repo"]] = r["license"]  # a refreshed repository has several rows; the last one counts
+        for v in rows.values():
+            lic[v] = lic.get(v, 0) + 1
         _, size = _size(gh)
         out.append({"id": "github", "kind": "github", "label": "Public GitHub (permissive licences)",
                     "repos": len(st.get("done", [])), "rejected": len(st.get("rejected", {})),
@@ -149,7 +156,8 @@ def has_code():
 @router.get("/api/code")
 def code_state():
     return {"config": public_cfg(load_cfg()), "sources": sources(), "prepared": prepared(),
-            "licenses": PERMISSIVE, "attribution": os.path.exists(os.path.join(CODE, "ATTRIBUTION.md"))}
+            "licenses": PERMISSIVE, "attribution": os.path.exists(os.path.join(CODE, "ATTRIBUTION.md")),
+            "auto": auto_state()}
 
 
 @router.post("/api/code/config")
@@ -261,3 +269,92 @@ def fs_dirs(path: str = ""):
             "home": os.path.expanduser("~"),
             "project": any(os.path.exists(os.path.join(path, m)) for m in marks),
             "dirs": [{"name": n, "path": os.path.join(path, n)} for n in names[:500]]}
+
+
+# ---------------------------------------------------------------- automatic updates (data/code_update.py)
+class AutoCfg(BaseModel):
+    enabled: bool | None = None
+    every_hours: float | None = None
+    github_new: int | None = None
+    refresh: bool | None = None
+    refresh_limit: int | None = None
+    topics: str | None = None
+    local: bool | None = None
+    train_model: str | None = None   # "" = only collect
+    train_steps: int | None = None
+    min_files: int | None = None
+    mix: float | None = None
+
+
+def auto_next(s):
+    """When the Studio's own scheduler runs the updates next; None when off or when the OS scheduler does it."""
+    if not s["enabled"] or auto.schedule_status()["installed"]:
+        return None
+    return auto.load_state()["last_start"] + float(s["every_hours"]) * 3600
+
+
+def copilot_models():
+    return [r["name"] for r in jobs.runs() if r.get("task") == "code"]
+
+
+def auto_state():
+    s = auto.load_settings()
+    return {"settings": s, "state": auto.load_state(), "next": auto_next(s), "schedule": auto.schedule_status(),
+            "models": copilot_models(), "log": jobs.tail(auto.LOG, 150)}
+
+
+@router.post("/api/code/auto")
+def auto_config(r: AutoCfg):
+    s = {**auto.load_settings(), **r.model_dump(exclude_none=True)}
+    s["every_hours"] = max(1.0, min(24 * 7, float(s["every_hours"])))
+    s["github_new"] = max(0, min(1000, int(s["github_new"])))
+    s["refresh_limit"] = max(0, min(100000, int(s["refresh_limit"])))
+    s["topics"] = ",".join(parse_topics(s["topics"]))[:500]
+    s["train_steps"] = max(1, min(100000, int(s["train_steps"])))
+    s["min_files"] = max(1, int(s["min_files"]))
+    s["mix"] = max(0.0, min(10.0, float(s["mix"])))
+    if s["train_model"]:
+        if s["train_model"] not in copilot_models():
+            err(f"{s['train_model']} is not a copilot model (train one in Training → Copilot first).")
+    auto.save_settings(s)
+    return auto_state()
+
+
+def start_auto():
+    s = auto.load_settings()
+    run = s["train_model"] if s["train_model"] in copilot_models() else None
+    try:
+        st = jobs.launch("data", "code updates", [jobs.PY, "data/code_update.py"], auto.LOG, run=run)
+    except RuntimeError as e:
+        err(str(e), 409)
+    auto.update_state(last_start=time.time())  # the in-app scheduler waits a full interval again
+    return st
+
+
+@router.post("/api/code/auto/run")
+def auto_run():
+    return start_auto()
+
+
+@router.post("/api/code/auto/schedule")
+def auto_schedule(install: bool = True):
+    s = auto.load_settings()
+    try:
+        msg = auto.install_schedule(s["every_hours"]) if install else auto.uninstall_schedule()
+    except FileNotFoundError:
+        err("No scheduler found on this computer (schtasks on Windows, crontab on Linux/macOS).")
+    except RuntimeError as e:
+        err(f"Could not change the schedule: {e}")
+    return {"message": msg, **auto_state()}
+
+
+def auto_scheduler():
+    """Started by app.py: runs the code updates when they are due (waits while another job runs)."""
+    while True:
+        try:
+            nxt = auto_next(auto.load_settings())
+            if nxt is not None and time.time() >= nxt and not jobs.running() and not jobs.external_job():
+                start_auto()
+        except Exception as e:  # keep the scheduler alive whatever happens
+            print("code updates scheduler:", e, flush=True)
+        time.sleep(60)

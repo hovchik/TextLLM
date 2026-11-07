@@ -1,0 +1,8 @@
+# GPU extras: only installed when run.py finds an NVIDIA GPU (or with --gpu).
+# If one fails, everything still works without it.
+
+# 4-bit / 8-bit model loading (QLoRA) and 8-bit optimizers: fine-tune 2-3x bigger models in the same VRAM
+bitsandbytes>=0.45,<1
+# Fused Triton kernels for Llama/Qwen layers: ~20% faster training and up to 60% less memory.
+# Triton has no official Windows build, so this is Linux only.
+liger-kernel>=0.5,<1; sys_platform == "linux"

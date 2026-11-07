@@ -10,6 +10,8 @@ so the tokenizer, train.py and finetune_lora.py all pick it up from data/raw/.
 """
 import argparse, hashlib, os, re, shutil, subprocess, sys, tempfile, time
 
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))  # the repo root, for core/
+
 EOT = "<|endoftext|>"
 TEXT_EXT = {".txt", ".md", ".markdown", ".text"}
 UA = {"User-Agent": "text-llm-ingest/1.0"}

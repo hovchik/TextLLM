@@ -215,3 +215,16 @@ def test_check_url_without_dns_is_offline_safe(monkeypatch):
     for bad in ("http://10.0.0.1/", "http://[::1]/", "http://localhost/", "ftp://x.org/"):
         with pytest.raises(ValueError):
             net.check_url(bad, dns=False)
+
+
+def test_ingest_script_refuses_local_links(tmp_path):
+    """data/ingest.py runs as a plain script (the Studio starts it that way), finds core/ on its own
+    and reports a refused local link instead of crashing."""
+    import subprocess
+
+    from conftest import ROOT
+
+    env = {k: v for k, v in os.environ.items() if k not in ("PYTHONPATH", "TEXTLLM_ALLOW_PRIVATE_URLS")}
+    r = subprocess.run([__import__("sys").executable, "data/ingest.py", "--urls", "http://127.0.0.1:9/x",
+                        "--out", str(tmp_path)], cwd=ROOT, capture_output=True, text=True, timeout=120, env=env)
+    assert r.returncode == 1 and "local-network" in r.stdout and "ModuleNotFoundError" not in r.stderr, r.stdout + r.stderr

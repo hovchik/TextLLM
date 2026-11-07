@@ -31,6 +31,8 @@ def list_models():
             else os.path.isdir(os.path.join(d, "adapter")) or bool(gguf_path(d))
         if ready:
             label = "from scratch" if meta["type"] == "scratch" else f"fine-tuned {meta['base'].split('/')[-1]}"
+            if meta.get("task") == "code":
+                label = "copilot, " + label
             if meta.get("style"):
                 label = f"writes like {meta['style']['name']}"
             out[f"{os.path.basename(d)} ({label})"] = d
@@ -213,6 +215,102 @@ class Engine:
         if failed:
             raise failed[0]
 
+    # ------------------------------------------------------------ code completion
+    def code_complete(self, prefix, suffix="", max_tokens=128, temperature=0.2, top_p=0.95):
+        """Yield the growing code that goes between prefix and suffix (fill-in-the-middle when the
+        model knows the FIM tokens; otherwise it just continues the prefix)."""
+        if self.backend == "scratch":
+            yield from self._code_scratch(prefix, suffix, max_tokens, temperature, top_p)
+        elif self.backend == "gguf":
+            yield from self._code_gguf(prefix, suffix, max_tokens, temperature, top_p)
+        else:
+            yield from self._code_hf(prefix, suffix, max_tokens, temperature, top_p)
+
+    def _code_scratch(self, prefix, suffix, n, temperature, top_p):
+        import torch
+
+        from coding import fim
+
+        ids, room = fim.token_ids(self.tok), self.model.config.block_size - min(n, self.model.config.block_size // 2)
+        pre = self.tok.encode(prefix).ids
+        if ids and suffix.strip():
+            suf = self.tok.encode(suffix).ids[:room // 3]  # the code right after the cursor matters most
+            pre = pre[-max(1, room - len(suf) - 3):]
+            seq = [ids["prefix"], *pre, ids["suffix"], *suf, ids["middle"]]
+        else:
+            seq = pre[-room:] if pre else [self.tok.token_to_id("<|endoftext|>")]
+        stop, new = self.tok.token_to_id("<|endoftext|>"), []
+        x = torch.tensor([seq], device=self.device)
+        for nxt in self.model.stream(x, n, temperature, 50, top_p):
+            t = nxt.item()
+            if t == stop or (ids and t in ids.values()):
+                break
+            new.append(t)
+            yield self.tok.decode(new)
+
+    def _fim_prompt(self, tok_has_fim, prefix, suffix):
+        from coding import fim
+
+        return fim.psm(prefix, suffix) if tok_has_fim else prefix
+
+    def _code_gguf(self, prefix, suffix, n, temperature, top_p):
+        from coding import fim
+
+        try:  # llama.cpp knows the model's FIM tokens if its vocabulary has them
+            has = all(len(self.model.tokenize(t.encode(), add_bos=False, special=True)) == 1
+                      for t in (fim.FIM_PREFIX, fim.FIM_SUFFIX, fim.FIM_MIDDLE))
+        except Exception:  # noqa: BLE001 - older llama-cpp-python
+            has = False
+        out = ""
+        for ch in self.model.create_completion(
+                prompt=self._fim_prompt(has, prefix, suffix), stream=True, max_tokens=n,
+                temperature=max(temperature, 0.0), top_p=top_p,
+                stop=[fim.EOT, fim.FILE_SEP, fim.FIM_PREFIX, fim.FIM_SUFFIX, fim.FIM_MIDDLE, fim.FIM_PAD, "<|im_end|>"]):
+            piece = ch["choices"][0].get("text")
+            if piece:
+                out += piece
+                yield out
+
+    def _code_hf(self, prefix, suffix, n, temperature, top_p):
+        from transformers import StoppingCriteriaList, TextIteratorStreamer
+
+        from coding import fim
+
+        ids = fim.token_ids(self.tok)
+        text = self._fim_prompt(bool(ids), prefix, suffix)
+        inputs = self.tok(text, return_tensors="pt", add_special_tokens=False).to(self.device)
+        streamer = TextIteratorStreamer(self.tok, skip_prompt=True, skip_special_tokens=True)
+        stops = {self.tok.eos_token_id}
+        for t in (fim.EOT, fim.FILE_SEP, fim.FIM_PAD, "<|im_end|>", *(() if not ids else (fim.FIM_PREFIX, fim.FIM_SUFFIX, fim.FIM_MIDDLE))):
+            i = self.tok.convert_tokens_to_ids(t)
+            if isinstance(i, int) and i != self.tok.unk_token_id:
+                stops.add(i)
+        cancel, failed = threading.Event(), []
+        kw = dict(**inputs, streamer=streamer, max_new_tokens=n, do_sample=temperature > 0,
+                  temperature=max(temperature, 1e-5), top_p=top_p, eos_token_id=sorted(x for x in stops if x is not None),
+                  pad_token_id=self.tok.pad_token_id or self.tok.eos_token_id,
+                  stopping_criteria=StoppingCriteriaList([_Cancel(cancel)]))
+
+        def run():
+            try:
+                self.model.generate(**kw)
+            except Exception as e:  # noqa: BLE001 - reported to the reader below
+                failed.append(e)
+                streamer.end()
+
+        th = threading.Thread(target=run, daemon=True)
+        th.start()
+        out = ""
+        try:
+            for piece in streamer:
+                out += piece
+                yield out
+        finally:
+            cancel.set()
+            th.join()
+        if failed:
+            raise failed[0]
+
     # ------------------------------------------------------------ formats
     def write(self, fmt, message, fields=None, history=None, sampling=None):
         """Write in a format. Yields events:
@@ -223,6 +321,16 @@ class Engine:
         """
         f = F.get(fmt)
         s = {**f["sampling"], **{k: v for k, v in (sampling or {}).items() if v is not None}}
+        if f.get("steps") == "fim":  # Complete code: the message is code with an optional <cursor>
+            from coding import fim
+
+            pre, suf = fim.split_cursor(message)
+            text = ""
+            with self.lock:
+                for text in self.code_complete(pre, suf, s["max_tokens"], s["temperature"], s.get("top_p", 0.95)):
+                    yield {"type": "text", "text": text}
+            yield {"type": "final", "text": text, "check": F.check(fmt, text, fields)}
+            return
         if self.backend == "scratch":  # continues text; templates don't apply
             text = ""
             for text in self.stream_messages([{"role": "user", "content": message}], s):

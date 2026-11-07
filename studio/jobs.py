@@ -254,7 +254,7 @@ def run_summary(run_dir):
     times = [r["time"] for r in rows]
     return {
         "name": name, "type": "scratch" if scratch else "lora",
-        "preset": meta.get("preset"), "base": meta.get("base"),
+        "preset": meta.get("preset"), "base": meta.get("base"), "task": meta.get("task", "writing"),
         "ready": ready, "running": is_running,
         "step": step, "max_steps": total, "progress": (step / total) if total else 0, "eta_sec": eta,
         "train_loss": tr[-1]["loss"] if tr else None,

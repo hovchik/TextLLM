@@ -108,6 +108,24 @@
       "fields": [],
       "steps": "single",
       "sampling": {"temperature": 0.9, "top_p": 0.95, "top_k": 40, "presence_penalty": 0.6, "max_tokens": 350}
+    },
+    "code": {
+      "label": "Code assistant",
+      "group": "Code",
+      "system": "You are a programming assistant. Write correct, complete, idiomatic code in fenced code blocks with the language name. Keep explanations short and only add them when they help.",
+      "fields": ["language"],
+      "steps": "single",
+      "check": "code",
+      "sampling": {"temperature": 0.2, "top_p": 0.95, "top_k": 40, "presence_penalty": 0.0, "max_tokens": 700}
+    },
+    "code_complete": {
+      "label": "Complete code at <cursor>",
+      "group": "Code",
+      "system": "Fill-in-the-middle code completion.",
+      "fields": [],
+      "steps": "fim",
+      "check": "code",
+      "sampling": {"temperature": 0.2, "top_p": 0.95, "top_k": 40, "presence_penalty": 0.0, "max_tokens": 160}
     }
   },
   "field_labels": {
@@ -123,6 +141,7 @@
     "length": "Length (words)",
     "ending": "Ending",
     "stance": "Stance",
-    "days": "Look back (days)"
+    "days": "Look back (days)",
+    "language": "Language"
   }
 }

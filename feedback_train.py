@@ -42,6 +42,7 @@ def train_lora(a, meta, examples):
     from writing import hf
 
     import devices
+    from coding import fim
 
     dev = devices.pick()
     say(f"device {dev}: {devices.describe(dev)}")
@@ -55,9 +56,11 @@ def train_lora(a, meta, examples):
     def prompt_text(msgs):
         return hf.chat_text(tok, msgs)
 
-    def encode(msgs, answer):
-        p = tok(prompt_text(msgs), add_special_tokens=False)["input_ids"][-(a.seq // 2):]
-        r = tok(answer + (tok.eos_token or ""), add_special_tokens=False)["input_ids"][: a.seq - len(p)]
+    def encode(msgs, answer, raw=None):
+        # raw: a Complete-code answer, trained on the same fill-in-the-middle prompt Chat used
+        end = fim.end_token(tok) if raw else (tok.eos_token or "")
+        p = tok(raw if raw else prompt_text(msgs), add_special_tokens=False)["input_ids"][-(a.seq // 2):]
+        r = tok(answer + end, add_special_tokens=False)["input_ids"][: a.seq - len(p)]
         ids = torch.tensor([p + r], device=dev)
         labels = torch.tensor([[-100] * len(p) + r], device=dev)
         return ids, labels
@@ -87,20 +90,20 @@ def train_lora(a, meta, examples):
         e = order.pop()
         loss, parts = 0.0, {}
         if e.get("chosen"):
-            ids, lab = encode(e["messages"], e["chosen"])
+            ids, lab = encode(e["messages"], e["chosen"], e.get("raw"))
             lp_c, n = seq_logp(model, ids, lab)
             sft = -lp_c / max(1, n)
             loss = loss + sft
             parts["sft"] = sft.item()
             if e.get("rejected"):
-                ids_r, lab_r = encode(e["messages"], e["rejected"])
+                ids_r, lab_r = encode(e["messages"], e["rejected"], e.get("raw"))
                 lp_r, _ = seq_logp(model, ids_r, lab_r)
                 margin = a.beta * ((lp_c - ref_logp(ids, lab)) - (lp_r - ref_logp(ids_r, lab_r)))
                 dpo = -F.logsigmoid(margin)
                 loss = loss + dpo
                 parts["dpo"] = dpo.item()
         elif e.get("rejected"):
-            ids_r, lab_r = encode(e["messages"], e["rejected"])
+            ids_r, lab_r = encode(e["messages"], e["rejected"], e.get("raw"))
             lp_r, _ = seq_logp(model, ids_r, lab_r)
             neg = -F.logsigmoid(-a.beta * (lp_r - ref_logp(ids_r, lab_r)))
             loss = loss + neg
@@ -123,7 +126,15 @@ def train_lora(a, meta, examples):
 def train_scratch(a, examples):
     tmp = tempfile.mkdtemp(prefix="feedback_")
     path = os.path.join(tmp, "feedback.txt")
-    texts = [e["messages"][-1]["content"].strip() + " " + e["chosen"].strip() for e in examples if e.get("chosen")]
+    def liked(e):
+        if e.get("raw"):  # Complete code: the code with the liked completion filled in at the cursor
+            from coding import fim
+
+            pre, _, suf = e["raw"].removeprefix(fim.FIM_PREFIX).partition(fim.FIM_SUFFIX)
+            return pre + e["chosen"] + suf.removesuffix(fim.FIM_MIDDLE)
+        return e["messages"][-1]["content"].strip() + " " + e["chosen"].strip()
+
+    texts = [liked(e) for e in examples if e.get("chosen")]
     if not texts:
         say("no liked answers to learn from (from-scratch models can't use dislikes alone)")
         return True

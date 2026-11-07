@@ -14,3 +14,6 @@ data/clean/
 data/my_posts/
 docs/manual-build/manual.html
 data/cluster/
+data/code/
+data/bin-code/
+tokenizer/bpe-code.json

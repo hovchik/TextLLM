@@ -263,7 +263,9 @@ def main():
         tmp = os.path.join(a.out, "_studio.jsonl")
         os.makedirs(a.out, exist_ok=True)
         n = feedback.export_liked(tmp)
-        exs += [json.loads(l) for l in open(tmp, encoding="utf-8") if l.strip()]
+        # code answers (Chat → Code formats) belong to copilot models, not to the writing instructions
+        exs += [r for r in (json.loads(l) for l in open(tmp, encoding="utf-8") if l.strip())
+                if F.get(r.get("format")).get("group") != "Code"]
         os.remove(tmp)
         say(f"Studio ratings: {n} liked or corrected answers")
     if a.synth_model:

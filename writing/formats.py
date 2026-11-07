@@ -121,6 +121,8 @@ def _distinct2(words):
 def check(fmt, text, fields=None):
     """Return {"score": 0-100, "checks": {name: bool}, "stats": {...}} for one answer."""
     f = get(fmt)
+    if f.get("check") == "code":
+        return check_code(text)
     t = text.strip()
     words = re.findall(r"\w+", t.lower())
     lines = [l for l in t.splitlines() if l.strip()]
@@ -148,3 +150,19 @@ def check(fmt, text, fields=None):
     score = round(100 * sum(c.values()) / len(c), 1)
     return {"score": score, "checks": c,
             "stats": {"chars": len(t), "words": len(words), "hashtags": len(tags), "distinct2": round(d2, 3)}}
+
+
+def check_code(text):
+    """Checks for code answers: something was written, brackets balance, no line repeated in a loop."""
+    t = text.strip()
+    body = re.sub(r"(?m)^```.*$", "", t)
+    lines = [l.strip() for l in body.splitlines() if l.strip()]
+    pairs = {"(": ")", "[": "]", "{": "}"}
+    depth = {k: body.count(k) - body.count(v) for k, v in pairs.items()}
+    run, worst = 1, 1
+    for a, b in zip(lines, lines[1:]):
+        run = run + 1 if a == b else 1
+        worst = max(worst, run)
+    c = {"not_empty": bool(body.strip()), "balanced": all(v == 0 for v in depth.values()), "no_loop": worst < 4}
+    return {"score": round(100 * sum(c.values()) / len(c), 1), "checks": c,
+            "stats": {"chars": len(t), "lines": len(lines)}}

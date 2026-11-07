@@ -225,7 +225,7 @@ pages.training = async (sub = "new") => {
   if (sub === "live") sub = "runs";
   main.innerHTML = `<div class="page">
     <div class="page-head"><div><h1>Training</h1><p>Prepare data, train new models, and teach existing models from your own files and links.</p></div>
-      <div class="tabs" id="ttabs">${[["new", "New model"], ["data", "Data"], ["texts", "Your texts"], ["news", "News & web"], ["style", "Your style"], ["corpus", "Corpus"], ["cluster", "Cluster"], ["runs", "Runs"]].map(([k, l]) => `<button data-k="${k}" class="${k === sub ? "on" : ""}">${l}</button>`).join("")}</div></div>
+      <div class="tabs" id="ttabs">${[["new", "New model"], ["data", "Data"], ["texts", "Your texts"], ["news", "News & web"], ["style", "Your style"], ["copilot", "Copilot"], ["corpus", "Corpus"], ["cluster", "Cluster"], ["runs", "Runs"]].map(([k, l]) => `<button data-k="${k}" class="${k === sub ? "on" : ""}">${l}</button>`).join("")}</div></div>
     <div id="tlive"></div><div id="tbody"></div></div>`;
   $$("#ttabs button").forEach((b) => (b.onclick = () => (location.hash = `#/training/${b.dataset.k}`)));
   await poll();
@@ -233,7 +233,7 @@ pages.training = async (sub = "new") => {
   const renderLive = (rs) => { $("#tlive").innerHTML = liveCard(rs.find((r) => r.running)); bindLive(); };
   renderLive(runsList);
   S.onStatus = async () => { const rs = await api("/api/runs").catch(() => []); renderLive(rs); if (sub === "runs") drawRuns(rs); if (sub === "cluster") drawClusterLive(); };
-  ({ new: trainNew, data: trainData, texts: trainTexts, news: trainNews, style: trainStyle, corpus: trainCorpus, cluster: trainCluster, runs: () => drawRuns(runsList) }[sub] || trainNew)();
+  ({ new: trainNew, data: trainData, texts: trainTexts, news: trainNews, style: trainStyle, copilot: trainCopilot, corpus: trainCorpus, cluster: trainCluster, runs: () => drawRuns(runsList) }[sub] || trainNew)();
 };
 
 function trainNew() {
@@ -319,6 +319,203 @@ function trainNew() {
   };
 }
 
+// ---------------------------------------------------------------- copilot: a model that writes code
+const CODE_BASES = [
+  { id: "Qwen/Qwen2.5-Coder-0.5B-Instruct", n: "Qwen2.5-Coder 0.5B Instruct · CPU default", h: "Apache 2.0 · completes code and answers in Chat · fast on CPU", r: 8 },
+  { id: "Qwen/Qwen2.5-Coder-1.5B-Instruct", n: "Qwen2.5-Coder 1.5B Instruct · better", h: "Apache 2.0 · LoRA on CPU overnight, minutes on a GPU", r: 16 },
+  { id: "Qwen/Qwen2.5-Coder-0.5B", n: "Qwen2.5-Coder 0.5B base · completion only", h: "Apache 2.0 · best fill-in-the-middle, no chat", r: 8 },
+  { id: "Qwen/Qwen2.5-Coder-1.5B", n: "Qwen2.5-Coder 1.5B base · completion only", h: "Apache 2.0 · as above, bigger", r: 16 },
+  { id: "Qwen/Qwen2.5-Coder-3B-Instruct", n: "Qwen2.5-Coder 3B Instruct · GPU", h: "Qwen Research licence (non-commercial): check before using it commercially", r: 16 },
+];
+const LANG_PRESETS = [["python,javascript,typescript", "Python, JavaScript, TypeScript"], ["", "Every programming language"], ["python", "Python"], ["javascript,typescript", "JavaScript + TypeScript"], ["java,kotlin", "Java + Kotlin"], ["c,c++", "C and C++"], ["c#", "C#"], ["go", "Go"], ["rust", "Rust"], ["php", "PHP"]];
+const LIC_NAMES = { mit: "MIT", "mit-0": "MIT-0", "apache-2.0": "Apache 2.0", "bsd-2-clause": "BSD 2-clause", "bsd-3-clause": "BSD 3-clause", "0bsd": "0BSD", isc: "ISC", unlicense: "Unlicense", "cc0-1.0": "CC0", zlib: "zlib", "bsl-1.0": "Boost" };
+
+function pickFolder(start, onPick) {
+  modal(`<h2>Pick a project folder</h2><div class="row" style="margin:8px 0;gap:6px;flex-wrap:wrap" id="fp-drives"></div>
+    <div class="row" style="gap:6px"><button class="btn sm" id="fp-up" title="Up one folder">↑</button><input class="input mono" id="fp-path" style="flex:1"></div>
+    <div class="hint" id="fp-proj" style="margin-top:6px"></div>
+    <div id="fp-list" style="max-height:340px;overflow:auto;margin-top:8px;display:flex;flex-direction:column;gap:2px"></div>
+    <div class="row end" style="margin-top:12px"><button class="btn" data-close>Cancel</button><button class="btn primary" id="fp-ok">Use this folder</button></div>`, (box, close) => {
+    let cur = null;
+    const go = async (p) => {
+      try {
+        const r = await api(`/api/fs/dirs?path=${encodeURIComponent(p || "")}`);
+        cur = r; $("#fp-path", box).value = r.path;
+        $("#fp-proj", box).innerHTML = r.project ? "✓ Looks like a project (has package.json, pyproject.toml, .git, …)" : "Open your project's top folder, then press <b>Use this folder</b>.";
+        $("#fp-drives", box).innerHTML = [["🏠 Home", r.home], ...r.drives.map((d) => [d, d])].map(([l, p]) => `<button class="btn sm" data-go="${esc(p)}">${esc(l)}</button>`).join("");
+        $("#fp-list", box).innerHTML = r.dirs.length ? r.dirs.map((d) => `<button class="act" style="text-align:left;justify-content:flex-start" data-go="${esc(d.path)}">📁 ${esc(d.name)}</button>`).join("") : '<span class="hint">No folders inside.</span>';
+        $$("[data-go]", box).forEach((b) => (b.onclick = () => go(b.dataset.go)));
+        $("#fp-up", box).disabled = !r.parent;
+      } catch (e) { fail(e); }
+    };
+    $("#fp-up", box).onclick = () => cur && cur.parent && go(cur.parent);
+    $("#fp-path", box).onkeydown = (e) => { if (e.key === "Enter") go(e.target.value); };
+    $("#fp-ok", box).onclick = () => { onPick($("#fp-path", box).value); close(); };
+    $("[data-close]", box).onclick = close;
+    go(start);
+  });
+}
+
+async function trainCopilot() {
+  let st;
+  try { st = await api("/api/code"); } catch (e) { return fail(e); }
+  const cfg = st.config, prep = st.prepared;
+  const dirs = [...cfg.local_dirs];
+  const mode = { v: "lora" };
+  const totalMb = st.sources.reduce((a, s) => a + (s.mb || 0), 0);
+  const langOpts = LANG_PRESETS.map(([v, l]) => `<option value="${esc(v)}" ${v === cfg.langs ? "selected" : ""}>${esc(l)}</option>`).join("") + (LANG_PRESETS.some(([v]) => v === cfg.langs) ? "" : `<option value="${esc(cfg.langs)}" selected>${esc(cfg.langs)}</option>`);
+  $("#tbody").innerHTML = `<div class="grid g3"><div class="card span2" style="display:flex;flex-direction:column;gap:18px">
+    <div><h2>Train a coding copilot</h2><p class="muted" style="margin:4px 0 0">A model that completes code where your cursor is and answers programming questions. It learns from your own projects and from permissively licensed public code.</p></div>
+    <div class="steps">
+      <div class="step ${st.sources.length ? "done" : ""}"><div class="num">${st.sources.length ? "✓" : 1}</div><div><b>Collect code</b><div class="hint">${st.sources.length ? `${st.sources.length} source(s), ${num(totalMb, 1)} MB of code` : "Your projects, public GitHub repositories, or a Hugging Face code set"}</div></div><span></span></div>
+    </div>
+    <div class="grid g2" style="align-items:start">
+      <div style="display:flex;flex-direction:column;gap:10px"><h3>💻 Your projects on this PC</h3>
+        <div class="files" id="cp-dirs" style="margin-top:0"></div>
+        <div class="row" style="gap:6px;flex-wrap:nowrap"><input class="input mono" id="cp-dir" style="flex:1;min-width:0" placeholder="C:\\Users\\me\\projects\\my-app"><button class="btn sm" id="cp-browse">Browse…</button><button class="btn sm" id="cp-add">${I.plus} Add</button></div>
+        <span class="hint">Follows each project's <span class="mono">.gitignore</span>; skips node_modules, virtualenvs, build output, .env files and keys, and replaces tokens and passwords with &lt;REDACTED&gt;. Add only code you own or may use.</span>
+        <div class="row"><button class="btn sm" data-build="local">${I.play} Read my projects</button></div>
+      </div>
+      <div style="display:flex;flex-direction:column;gap:10px"><h3>🌐 Public GitHub</h3>
+        <div class="grid g2">
+          <label class="field">Repositories (total)<input class="input" id="cp-ghn" type="number" min="0" value="${cfg.github_repos}"><span class="hint">most-starred first · 0 = none</span></label>
+          <label class="field">Minimum stars<input class="input" id="cp-stars" type="number" min="0" value="${cfg.min_stars}"></label>
+        </div>
+        <label class="field">…or exactly these repositories<textarea class="input mono" id="cp-ghlist" rows="2" placeholder="pallets/flask&#10;psf/requests">${esc(cfg.github_list)}</textarea><span class="hint">Refused unless GitHub lists a permissive licence and the repo has a LICENSE file.</span></label>
+        <label class="field">GitHub token <span class="hint">optional · 5,000 instead of 60 requests an hour</span><input class="input mono" id="cp-token" type="password" placeholder="${cfg.github_token_set ? "saved · type to replace, clear to forget" : "github_pat_… (no scopes needed)"}"></label>
+        <div class="row"><button class="btn sm" data-build="github">${I.play} Download from GitHub</button></div>
+      </div>
+    </div>
+    <details><summary><b>Filters and more sources</b> <span class="hint">languages, licences, Hugging Face</span></summary><div class="grid g3" style="margin-top:10px">
+      <label class="field">Languages<select class="input" id="cp-langs">${langOpts}</select><span class="hint">or type a list below</span></label>
+      <label class="field">Custom language list<input class="input" id="cp-langs2" placeholder="python,go,rust"></label>
+      <label class="field">Largest file (KB)<input class="input" id="cp-maxkb" type="number" min="8" value="${cfg.max_file_kb}"><span class="hint">bigger files are usually data or generated</span></label>
+      <label class="field">Largest repository (MB)<input class="input" id="cp-repomb" type="number" min="1" value="${cfg.max_repo_mb}"></label>
+      <label class="field">Hugging Face code (GB)<input class="input" id="cp-hfgb" type="number" min="0" step="0.1" value="${cfg.hf_gb}"><span class="hint">codeparrot/github-code-clean, permissive rows only</span></label>
+      <label class="field">Hugging Face download<select class="input" id="cp-hfmode"><option value="stream">Stream</option><option value="download" ${cfg.hf_mode === "download" ? "selected" : ""}>Download whole files (resumable)</option></select></label>
+      <label class="field">Retries per request<input class="input" id="cp-retries" type="number" min="0" value="${cfg.retries}"></label>
+      <div class="field" style="grid-column:1/-1"><span>Licences accepted <span class="hint">permissive only; GPL, LGPL, AGPL, MPL and code without a licence are never used</span></span>
+        <div class="row" style="flex-wrap:wrap;gap:10px;margin-top:4px">${st.licenses.map((l) => `<label class="row hint" style="gap:4px"><input type="checkbox" data-lic="${l}" ${cfg.licenses.includes(l) ? "checked" : ""}> ${esc(LIC_NAMES[l] || l)}</label>`).join("")}</div></div>
+      <div class="row" style="grid-column:1/-1"><button class="btn sm" data-build="hf">${I.play} Download from Hugging Face</button><button class="btn sm primary" data-build="all">${I.play} Collect everything</button></div>
+    </div></details>
+    <div><h3>2 · Train</h3><div class="choice g2" style="margin-top:10px" id="cp-modes">
+      <div class="opt on" data-v="lora"><span class="tag">Best quality</span><b>✨ Fine-tune a code model</b><span>An open code model (Apache 2.0) that already knows programming learns your code and style with LoRA. Completes code and chats.</span></div>
+      <div class="opt" data-v="scratch"><b>🧱 Train from scratch</b><span>Your own small GPT with a code tokenizer and fill-in-the-middle. Learns only what you give it; can use the Cluster.</span></div>
+    </div></div>
+    <div id="cp-lora" class="grid g3">
+      <label class="field" style="grid-column:span 2">Base model<select class="input" id="cp-base">${CODE_BASES.map((b) => `<option value="${b.id}">${esc(b.n)}</option>`).join("")}<option value="">Other (type a Hugging Face id)…</option></select><span class="hint" id="cp-basehint"></span></label>
+      <label class="field">Hugging Face model id<input class="input" id="cp-baseid" value="${CODE_BASES[0].id}"></label>
+      <label class="field">Code examples<input class="input" id="cp-examples" type="number" min="10" value="4000"></label>
+      <label class="field"><span>Fill-in-the-middle <b id="cp-fimv">50</b>%</span><input type="range" id="cp-fim" min="0" max="100" step="5" value="50"><span class="hint">completing code between two parts, like an editor</span></label>
+      <label class="field"><span>Chat examples <b id="cp-chatv">20</b>%</span><input type="range" id="cp-chat" min="0" max="100" step="5" value="20"><span class="hint">"complete this code" requests for Chat</span></label>
+      <label class="row" style="flex-wrap:nowrap"><span class="switch"><input type="checkbox" id="cp-gguf" checked><span></span></span> Make a fast CPU copy (GGUF)</label>
+    </div>
+    <div id="cp-scratch" class="steps" hidden>
+      <div class="step ${prep.tokenizer ? "done" : ""}"><div class="num">${prep.tokenizer ? "✓" : "a"}</div><div><b>Build the code tokenizer</b><div class="hint">${prep.tokenizer ? `${num(prep.vocab)}-token vocabulary with fill-in-the-middle tokens` : "Learns the pieces of code (keywords, indentation, operators)"}</div>
+        <div class="row" style="margin-top:8px;flex-wrap:wrap"><label class="field" style="width:170px">Vocabulary<select class="input" id="cp-vocab"><option value="16384">16,384 (CPU)</option><option value="8192">8,192 (tiny)</option><option value="32000">32,000 (GPU)</option></select></label>
+          <label class="field" style="width:170px">Files used to learn it<input class="input" id="cp-sample" type="number" min="1" value="40"></label>
+          <label class="row hint" style="align-self:center"><span class="switch"><input type="checkbox" id="cp-text"><span></span></span> Also learn English from the book corpus</label></div></div>
+        <button class="btn" data-prep="tokenizer">${I.play} Run</button></div>
+      <div class="step ${prep.train_tokens ? "done" : ""}"><div class="num">${prep.train_tokens ? "✓" : "b"}</div><div><b>Encode the code</b><div class="hint">${prep.train_tokens ? `${num(prep.train_tokens / 1e6, 1)}M tokens ready` : "Turns the code into token files, rearranging some files for fill-in-the-middle"}</div>
+        <div class="row" style="margin-top:8px"><label class="field" style="width:200px"><span>Fill-in-the-middle <b id="cp-efimv">50</b>%</span><input type="range" id="cp-efim" min="0" max="100" step="5" value="50"></label></div></div>
+        <button class="btn" data-prep="encode">${I.play} Run</button></div>
+      <div class="grid g3"><label class="field">Model size<select class="input" id="cp-preset">${PRESETS.map((p) => `<option value="${p.id}" ${p.id === "cpu" ? "selected" : ""}>${esc(p.n)} · ${p.p} params</option>`).join("")}</select></label>
+        <div class="hint" style="grid-column:span 2;align-self:center">Several PCs? Start it on the <a href="#/training/cluster"><u>Cluster</u></a> tab and pick <b>Copilot (code)</b> there.</div></div>
+    </div>
+    <div class="grid g3">
+      <label class="field">Model name<input class="input" id="cp-name" value="my-copilot"></label>
+      <label class="field">Training steps<input class="input" id="cp-steps" type="number" value="400"></label>
+      <label class="field">Learning rate<input class="input" id="cp-lr" type="number" step="any" value="0.0002"></label>
+    </div>
+    <details><summary>Advanced</summary><div class="grid g4" style="margin-top:12px">
+      <label class="field">Batch size<input class="input" id="cp-batch" type="number" value="2"></label>
+      <label class="field">Grad accumulation<input class="input" id="cp-accum" type="number" value="8"></label>
+      <label class="field">Tokens / example<input class="input" id="cp-seq" type="number" value="1024"></label>
+      <label class="field">LoRA rank<input class="input" id="cp-lorar" type="number" value="8"></label>
+      <label class="field">Passes over the data<input class="input" id="cp-epochs" type="number" step="0.5" value="0"><span class="hint">0 = use training steps</span></label>
+      <label class="field">Examples per file<input class="input" id="cp-ppd" type="number" min="1" value="8"></label>
+      <label class="field">Only these languages<input class="input" id="cp-tlangs" placeholder="all collected"></label>
+      <label class="field">Continue from<select class="input" id="cp-init"><option value="">No, start a fresh adapter</option></select></label>
+    </div><label class="row" style="margin-top:12px"><span class="switch"><input type="checkbox" id="cp-resume"><span></span></span> Resume from the last checkpoint</label></details>
+    <div class="row end"><button class="btn primary" id="cp-start">${I.play} Start training</button></div>
+  </div>
+  <div class="card" style="display:flex;flex-direction:column;gap:14px"><h2>Collected code</h2><div id="cp-sources"></div>
+    <h2 style="margin-top:6px">Using the copilot</h2><ul class="muted" style="padding-left:18px;margin:0">
+      <li><b>Chat → Complete code at &lt;cursor&gt;</b>: paste code and type <span class="mono">&lt;cursor&gt;</span> where the missing part goes.</li>
+      <li><b>Chat → Code assistant</b>: ask for functions, fixes and explanations (fine-tuned models).</li>
+      <li><b>From an editor or script</b>: <span class="mono">POST /api/code/complete</span> with <span class="mono">{"model", "prefix", "suffix"}</span>; see the manual.</li>
+      <li>Rate answers with ★ to teach it, like any model.</li></ul>
+    <p class="hint" style="margin:0">Public code is used under its licence; the list of repositories and their licence texts are kept in <span class="mono">data/code/ATTRIBUTION.md</span>${st.attribution ? " (ready)" : ""}.</p></div></div>
+  <div class="card" style="margin-top:16px"><div class="card-head"><h2>Log</h2></div><pre class="console" id="cp-log">${esc(S.status.job.kind === "data" ? S.status.job.log : "No data job yet.")}</pre></div>`;
+
+  const drawDirs = () => {
+    $("#cp-dirs").innerHTML = dirs.length ? dirs.map((d, i) => `<span class="file mono">📁 ${esc(d)}<button data-rm="${i}" title="Remove">✕</button></span>`).join("") : '<span class="hint">No folders yet.</span>';
+    $$("[data-rm]").forEach((b) => (b.onclick = () => { dirs.splice(+b.dataset.rm, 1); drawDirs(); saveCfg(); }));
+  };
+  const drawSources = (list) => {
+    $("#cp-sources").innerHTML = list.length ? list.map((s) => `<div class="card" style="padding:10px 12px;margin-bottom:8px"><div class="row" style="justify-content:space-between;flex-wrap:nowrap"><b>${esc(s.label)}</b><button class="iconbtn" data-del="${esc(s.id)}" title="Delete this code">${I.trash}</button></div>
+      <div class="hint">${s.kind === "github" ? `${num(s.repos)} repositories · ` : ""}${num(s.files)} files · ${num(s.mb, 1)} MB${s.redacted ? ` · ${num(s.redacted)} secrets redacted` : ""}${s.license ? ` · licence ${esc(s.license)}` : ""}${s.rejected ? ` · ${num(s.rejected)} repos refused (licence)` : ""}</div>
+      ${s.langs && Object.keys(s.langs).length ? `<div class="hint">${Object.entries(s.langs).slice(0, 5).map(([k, v]) => `${esc(k)} ${num(v)}`).join(" · ")}</div>` : ""}
+      ${s.licenses && Object.keys(s.licenses).length ? `<div class="hint">${Object.entries(s.licenses).map(([k, v]) => `${esc(k)} ${num(v)}`).join(" · ")}</div>` : ""}</div>`).join("") : '<p class="muted" style="margin:0">Nothing collected yet. Add a project folder or a number of GitHub repositories, then press its button.</p>';
+    $$("[data-del]").forEach((b) => (b.onclick = async () => {
+      if (!confirm("Delete this collected code? (Your project folders are not touched.)")) return;
+      try { const r = await api(`/api/code/sources/${b.dataset.del}`, { method: "DELETE" }); drawSources(r.sources); toast("Deleted", "ok"); } catch (e) { fail(e); }
+    }));
+  };
+  const cfgBody = () => {
+    const tok = $("#cp-token").value;
+    return { local_dirs: dirs, github_repos: +$("#cp-ghn").value || 0, github_list: $("#cp-ghlist").value, min_stars: +$("#cp-stars").value || 0,
+      max_repo_mb: +$("#cp-repomb").value || 40, github_token: tok ? tok : (cfg.github_token_set && $("#cp-token").dataset.cleared ? "" : null),
+      hf_gb: +$("#cp-hfgb").value || 0, hf_mode: $("#cp-hfmode").value, langs: $("#cp-langs2").value.trim() || $("#cp-langs").value,
+      licenses: $$("[data-lic]").filter((x) => x.checked).map((x) => x.dataset.lic), max_file_kb: +$("#cp-maxkb").value || 256, retries: +$("#cp-retries").value || 30 };
+  };
+  const saveCfg = () => api("/api/code/config", { json: cfgBody() }).catch(fail);
+  $("#cp-token").oninput = (e) => { if (!e.target.value) e.target.dataset.cleared = 1; };
+  const addDir = (p) => { p = (p || "").trim(); if (p && !dirs.includes(p)) { dirs.push(p); drawDirs(); saveCfg(); } $("#cp-dir").value = ""; };
+  $("#cp-add").onclick = () => addDir($("#cp-dir").value);
+  $("#cp-dir").onkeydown = (e) => { if (e.key === "Enter") addDir(e.target.value); };
+  $("#cp-browse").onclick = () => pickFolder($("#cp-dir").value || dirs[dirs.length - 1] || "", addDir);
+  $$("[data-build]").forEach((b) => (b.onclick = async () => {
+    try { await api("/api/code/build", { json: { ...cfgBody(), what: b.dataset.build } }); toast("Collecting code…", "ok"); poll(); } catch (e) { fail(e); }
+  }));
+  $$("[data-prep]").forEach((b) => (b.onclick = async () => {
+    try { await api("/api/code/prepare", { json: { step: b.dataset.prep, vocab: +$("#cp-vocab").value, sample_files: +$("#cp-sample").value, with_text: $("#cp-text").checked, fim_rate: +$("#cp-efim").value / 100 } }); toast("Started", "ok"); poll(); } catch (e) { fail(e); }
+  }));
+  const setMode = (m) => {
+    mode.v = m;
+    $$("#cp-modes .opt").forEach((o) => o.classList.toggle("on", o.dataset.v === m));
+    $("#cp-lora").hidden = m !== "lora"; $("#cp-scratch").hidden = m !== "scratch";
+    Object.entries(m === "lora" ? { steps: 400, lr: 0.0002, batch: 2, accum: 8 } : { steps: 20000, lr: 0.001, batch: 16, accum: 4 }).forEach(([k, v]) => ($("#cp-" + k).value = v));
+  };
+  $$("#cp-modes .opt").forEach((o) => (o.onclick = () => setMode(o.dataset.v)));
+  const baseHint = () => { const b = CODE_BASES.find((x) => x.id === $("#cp-base").value); $("#cp-basehint").textContent = b ? b.h : "Any causal LM; Qwen2.5-Coder and Qwen3 tokenizers have fill-in-the-middle tokens"; if (b) { $("#cp-baseid").value = b.id; $("#cp-lorar").value = b.r; } };
+  $("#cp-base").onchange = baseHint; baseHint();
+  $("#cp-fim").oninput = (e) => ($("#cp-fimv").textContent = e.target.value);
+  $("#cp-chat").oninput = (e) => ($("#cp-chatv").textContent = e.target.value);
+  $("#cp-efim").oninput = (e) => ($("#cp-efimv").textContent = e.target.value);
+  api("/api/models").then((ms) => {
+    $("#cp-init").innerHTML += ms.filter((x) => x.type === "lora" && x.task === "code").map((x) => `<option value="${esc(x.name)}">${esc(x.name)} · ${esc(x.base || "")}</option>`).join("");
+  }).catch(() => {});
+  $("#cp-start").onclick = async () => {
+    const v = (k) => $("#cp-" + k).value;
+    try {
+      await api("/api/train", { json: { task: "code", mode: mode.v, name: v("name"), resume: $("#cp-resume").checked, preset: v("preset"), steps: +v("steps"), lr: +v("lr"), batch: +v("batch"), accum: +v("accum"), seq: +v("seq"), lora_r: +v("lorar"), epochs: +v("epochs"), base: v("baseid"), examples: 0, instructions: false, code_examples: +v("examples"), fim_rate: +v("fim") / 100, code_chat_share: +v("chat") / 100, code_langs: v("tlangs"), pairs_per_doc: +v("ppd"), gguf: $("#cp-gguf").checked, init_from: v("init") } });
+      toast(`Training <b>${esc(v("name"))}</b> started`, "ok");
+      location.hash = "#/training/runs";
+      setTimeout(() => openRun(v("name")), 400);
+    } catch (e) { fail(e); }
+  };
+  drawDirs(); drawSources(st.sources);
+  const prev = S.onStatus;
+  let wasRunning = S.status.job.running;
+  S.onStatus = async (s) => {
+    prev && prev(s);
+    const l = $("#cp-log"); if (l && s.job.kind === "data") { l.textContent = s.job.log; l.scrollTop = 1e9; }
+    if (wasRunning && !s.job.running && $("#cp-sources")) { try { drawSources((await api("/api/code")).sources); } catch {} }
+    wasRunning = s.job.running;
+  };
+}
+
 // ---------------------------------------------------------------- cluster: several PCs train one model
 function trainCluster() {
   const d = S.status.data;
@@ -330,6 +527,7 @@ function trainCluster() {
       <div class="grid g3">
         <label class="field">Model name<input class="input" id="c-name" value="cluster-writer"></label>
         <label class="field">Model size<select class="input" id="c-preset">${presetOpts}</select></label>
+        <label class="field">Kind of model<select class="input" id="c-task"><option value="writing">Writer (Data tab)</option><option value="code">Copilot (code, Copilot tab)</option></select></label>
         <label class="field">Rounds<input class="input" id="c-rounds" type="number" min="1" value="200"><span class="hint">one round = local training + averaging</span></label>
         <label class="field">Minutes per round<input class="input" id="c-minutes" type="number" min="0.2" step="0.5" value="5"><span class="hint">longer = less internet traffic</span></label>
         <label class="field">Learning rate<input class="input" id="c-lr" type="number" step="any" value="0.001"></label>
@@ -366,6 +564,7 @@ function trainCluster() {
         <label class="field">Grad accumulation<input class="input" id="j-accum" type="number" min="1" value="4"></label>
         <label class="field">Stop early (seconds)<input class="input" id="j-reserve" type="number" min="0" value="0"><span class="hint">leave time for a slow upload</span></label>
         <label class="row" style="grid-column:1/-1"><span class="switch"><input type="checkbox" id="j-local"><span></span></span> Use this PC's own prepared data instead of downloading (same tokenizer only)</label>
+        <label class="field">Own data is for<select class="input" id="j-task"><option value="writing">A writer (data/bin)</option><option value="code">A copilot (data/bin-code)</option></select></label>
       </div></details>
       <div class="row end"><button class="btn primary" id="j-start">${I.play} Join</button></div>
     </div>
@@ -376,10 +575,11 @@ function trainCluster() {
     <p><b>PCs on other networks:</b> only the PC that starts the cluster must be reachable; the others just connect out to it, so they need no router setup. When you start a cluster, the Studio asks your router to open the port (UPnP, on by default in most home routers) and shows an <b>Internet</b> address to share. If that fails (UPnP off, a second router, or a provider that shares one public address between customers, common on mobile internet), install the free <b>Tailscale</b> on every PC and use the <b>Tailscale</b> address, or forward TCP port 7861 to this PC in the router's settings. The long secret keeps strangers out; the connection itself is not encrypted, so Tailscale is the most private choice.</p>
     <p>On a PC without the Studio: <span class="mono">run.bat --join http://ADDRESS:7861 --secret SECRET</span> (or <span class="mono">./run.sh</span> on Linux/macOS).</p></div></div>`;
   const v = (k) => $("#" + k).value;
+  $("#c-task").onchange = () => { const n = $("#c-name"); if (["cluster-writer", "cluster-copilot"].includes(n.value)) n.value = v("c-task") === "code" ? "cluster-copilot" : "cluster-writer"; };
   try { const last = JSON.parse(localStorage.getItem("cluster-join") || "null"); if (last) { $("#j-addr").value = last.address || ""; $("#j-name").value = last.name || ""; } } catch {}
   $("#c-start").onclick = async () => {
     try {
-      await api("/api/cluster/start", { json: { name: v("c-name"), preset: v("c-preset"), rounds: +v("c-rounds"), round_minutes: +v("c-minutes"), lr: +v("c-lr"), port: +v("c-port"), local_worker: $("#c-local").checked, upnp: $("#c-upnp").checked, secret: v("c-secret"), min_workers: +v("c-minw"), vocab: +v("c-vocab"), min_lr: +v("c-minlr"), warmup: +v("c-warmup"), weight_decay: +v("c-wd"), outer_lr: +v("c-olr"), outer_momentum: +v("c-omom"), eval_every: +v("c-evalevery"), batch: +v("c-batch"), accum: +v("c-accum"), nesterov: $("#c-nesterov").checked, resume: $("#c-resume").checked } });
+      await api("/api/cluster/start", { json: { name: v("c-name"), preset: v("c-preset"), rounds: +v("c-rounds"), round_minutes: +v("c-minutes"), lr: +v("c-lr"), port: +v("c-port"), local_worker: $("#c-local").checked, upnp: $("#c-upnp").checked, secret: v("c-secret"), min_workers: +v("c-minw"), vocab: +v("c-vocab"), min_lr: +v("c-minlr"), warmup: +v("c-warmup"), weight_decay: +v("c-wd"), outer_lr: +v("c-olr"), outer_momentum: +v("c-omom"), eval_every: +v("c-evalevery"), batch: +v("c-batch"), accum: +v("c-accum"), nesterov: $("#c-nesterov").checked, resume: $("#c-resume").checked, task: v("c-task") } });
       toast("Cluster started. Share the address and secret with the other PCs.", "ok");
       await poll(); drawClusterLive();
     } catch (e) { fail(e); }
@@ -387,7 +587,7 @@ function trainCluster() {
   $("#j-start").onclick = async () => {
     try {
       try { localStorage.setItem("cluster-join", JSON.stringify({ address: v("j-addr"), name: v("j-name") })); } catch {}
-      await api("/api/cluster/join", { json: { address: v("j-addr"), secret: v("j-secret"), name: v("j-name"), data_mb: +v("j-mb"), batch: +v("j-batch"), accum: +v("j-accum"), reserve: +v("j-reserve"), local_data: $("#j-local").checked } });
+      await api("/api/cluster/join", { json: { address: v("j-addr"), secret: v("j-secret"), name: v("j-name"), data_mb: +v("j-mb"), batch: +v("j-batch"), accum: +v("j-accum"), reserve: +v("j-reserve"), local_data: $("#j-local").checked, task: $("#j-task").value } });
       toast("Joining the cluster…", "ok");
       await poll(); drawClusterLive();
     } catch (e) { fail(e); }
@@ -994,7 +1194,7 @@ pages.chat = async () => {
     </div></div>`;
   [C.models, C.formats] = await Promise.all([api("/api/models").catch(() => []), api("/api/formats").catch(() => [])]);
   const pref = (() => { try { return localStorage.getItem("chatModel"); } catch { return null; } })() || S.user.prefs.model || (C.models.find((m) => m.default) || {}).name;
-  $("#model").innerHTML = C.models.length ? C.models.map((m) => `<option value="${esc(m.name)}" ${m.name === pref ? "selected" : ""}>${esc(m.name)} · ${m.style ? `writes like ${esc(m.style.name)}` : m.type === "lora" ? "fine-tuned" : "from scratch"}${m.default ? " · default" : ""}</option>`).join("") : `<option value="">No trained models yet</option>`;
+  $("#model").innerHTML = C.models.length ? C.models.map((m) => `<option value="${esc(m.name)}" ${m.name === pref ? "selected" : ""}>${esc(m.name)} · ${m.style ? `writes like ${esc(m.style.name)}` : m.task === "code" ? "copilot" : m.type === "lora" ? "fine-tuned" : "from scratch"}${m.default ? " · default" : ""}</option>`).join("") : `<option value="">No trained models yet</option>`;
   const modelInfo = () => {
     const m = C.models.find((x) => x.name === $("#model").value);
     $("#model-info").innerHTML = m ? `${m.type === "lora" ? "" : levelBar(m.level)} <span class="pill">${starsText(m.avg_rating)} · ${m.ratings} ratings</span>` : "";
@@ -1002,6 +1202,7 @@ pages.chat = async () => {
   const styleFormat = () => {   // a style model writes best with the format it was trained with
     const m = C.models.find((x) => x.name === $("#model").value);
     if (m && m.style && C.formats.some((f) => f.id === "style") && $("#format")) { C.format = "style"; $("#format").value = "style"; drawFields(); drawSampling(); }
+    if (m && m.task === "code" && !isCodeFmt(C.format) && $("#format")) { C.format = m.type === "lora" ? "code" : "code_complete"; $("#format").value = C.format; drawFields(); drawSampling(); }
   };
   $("#model").onchange = () => { try { localStorage.setItem("chatModel", $("#model").value); } catch {} modelInfo(); styleFormat(); };
   modelInfo();
@@ -1035,6 +1236,10 @@ function drawSampling() {
 function drawFields() {
   const f = C.formats.find((x) => x.id === C.format);
   const box = $("#fmt-fields");
+  const inp = $("#input");
+  if (inp) inp.placeholder = C.format === "code_complete" ? "Paste code; type <cursor> where the missing part goes…" : C.format === "code" ? "Ask for a function, a fix, an explanation…" : "Ask for a story, a post, an article…";
+  if (inp) inp.classList.toggle("mono", isCodeFmt(C.format));
+  if (C.format === "code_complete") { box.innerHTML = `<span class="pill accent">Complete code</span><span class="hint">Put <span class="mono">&lt;cursor&gt;</span> where the code should go; without it the model continues the end. Best with a copilot model.</span>`; return; }
   if (!f || !f.fields.length) { box.innerHTML = ""; return; }
   const lim = f.chars ? `${num(f.chars)} characters max` : f.words ? `${f.words[0]}–${f.words[1]} words` : "";
   box.innerHTML = `<span class="pill">${esc(f.label)}${lim ? " · " + lim : ""}</span>` + f.fields.map((x) => `<input class="input sm" data-field="${x.id}" placeholder="${esc(x.label)}" value="${esc(C.fields[x.id] || "")}">`).join("");
@@ -1074,15 +1279,20 @@ function drawThread(messages) {
 const userHtml = (u) => {
   const fl = u.fields ? (() => { try { return JSON.parse(u.fields); } catch { return {}; } })() : {};
   const tag = u.format && u.format !== "free" ? `<div class="fmt-tag">${esc(fmtLabel(u.format))}${Object.values(fl).length ? " · " + esc(Object.values(fl).join(" · ")) : ""}</div>` : "";
-  return `<div class="msg user" data-uid="${u.id}"><div class="bubble">${tag}${esc(u.content)}</div></div>`;
+  return `<div class="msg user" data-uid="${u.id}"><div class="bubble${isCodeFmt(u.format) ? " mono" : ""}">${tag}${esc(u.content)}</div></div>`;
 };
 const checkPill = (score) => score == null ? "" : `<span class="pill ${score >= 100 ? "good" : score >= 70 ? "" : "warn"}" title="Automatic format checks: length, hashtags, hook, repetition">checks ${Math.round(score)}%</span>`;
-const fmtBody = (t) => esc(t).split(/\n{2,}/).map((p) => `<p>${p}</p>`).join("");
+const isCodeFmt = (f) => (C.formats.find((x) => x.id === f) || {}).group === "Code";
+// Fenced ``` blocks become code boxes; a Complete-code answer is all code.
+const fmtBody = (t, fmt) => {
+  if (fmt === "code_complete") return `<pre class="code">${esc(t)}</pre>`;
+  return String(t ?? "").split(/^```[^\n]*\n?/m).map((part, i) => i % 2 ? `<pre class="code">${esc(part.replace(/\n$/, ""))}</pre>` : esc(part).split(/\n{2,}/).filter((p) => p.trim()).map((p) => `<p>${p}</p>`).join("")).join("");
+};
 const sourcesHtml = (list) => !list ? "" : list.length ? `<div class="hint" style="margin-top:6px">Based on: ${list.map((x) => `<a href="${esc(x.url)}" target="_blank" rel="noopener noreferrer" title="${esc(x.source)}"><u>${esc(x.title)}</u></a>`).join(" · ")}</div>` : '<div class="hint" style="margin-top:6px">No recent articles collected yet · <a href="#/training/news"><u>News & web</u></a></div>';
 function answerHtml(a, alt = "") {
   const fl = a.fields ? (() => { try { return JSON.parse(a.fields); } catch { return {}; } })() : {};
   return `<div class="msg" data-mid="${a.id}" data-uid="${a.prompt_id}"><div class="avatar">${I.logo}</div><div class="answer">
-    ${alt ? `<div class="alt">${alt}</div>` : ""}<div class="body">${fmtBody(a.content)}</div>${sourcesHtml(fl.sources)}
+    ${alt ? `<div class="alt">${alt}</div>` : ""}<div class="body">${fmtBody(a.content, a.format)}</div>${sourcesHtml(fl.sources)}
     ${a.correction ? `<div class="correction"><b>Your better answer · the model learns from this</b>${esc(a.correction)}</div>` : ""}
     <div class="actions"><span class="stars" title="Rate this answer">${[1, 2, 3, 4, 5].map((n) => `<button data-r="${n}" class="${a.rating >= n ? "on" : ""}" title="${["Bad", "Weak", "OK", "Good", "Great"][n - 1]}">${I.star}</button>`).join("")}</span>
       <button class="act" data-act="improve">${I.edit} Improve</button><button class="act" data-act="regen">${I.redo} Try again</button><button class="act" data-act="copy">${I.copy} Copy</button>
@@ -1172,7 +1382,7 @@ async function send(regenUid) {
       while ((i = buf.indexOf("\n")) >= 0) {
         const ev = JSON.parse(buf.slice(0, i)); buf = buf.slice(i + 1);
         if (ev.type === "start") { if (!C.conv) { C.conv = ev.conversation_id; drawConvs(); } }
-        if (ev.type === "text") { full = ev.text; body.innerHTML = fmtBody(full); const m = $("#msgs"); if (m.scrollHeight - m.scrollTop - m.clientHeight < 120) m.scrollTop = 1e9; }
+        if (ev.type === "text") { full = ev.text; body.innerHTML = fmtBody(full, C.format); const m = $("#msgs"); if (m.scrollHeight - m.scrollTop - m.clientHeight < 120) m.scrollTop = 1e9; }
         if (ev.type === "status") $("[data-live-status]", holder).textContent = ev.text;
         if (ev.type === "sources") $(".sources", holder).innerHTML = sourcesHtml(ev.sources);
         if (ev.type === "outline") { const o = $(".outline", holder); o.hidden = false; $("pre", o).textContent = ev.text; $("[data-live-status]", holder).textContent = "Writing from the plan…"; }

@@ -20,10 +20,12 @@ from data import crawl
 from studio import auth, db, feedback, gate, jobs
 from writing import formats as F
 from studio import styles
+from studio import copilot
 
 PY = jobs.PY
 WEB = os.path.join(ROOT, "web")
 app = FastAPI(title="Text LLM Studio")
+app.include_router(copilot.router)  # Training → Copilot: code sources, folder picker, code tokenizer
 
 
 def err(msg, code=400):
@@ -53,6 +55,7 @@ USER_ROUTES = [(m, re.compile(p)) for m, p in [
     ("GET", r"/api/me"), ("POST", r"/api/me"), ("GET", r"/api/status"), ("GET", r"/api/models"),
     ("GET", r"/api/conversations"), ("GET", r"/api/conversations/\d+"), ("DELETE", r"/api/conversations/\d+"),
     ("POST", r"/api/chat"), ("POST", r"/api/messages/\d+/rate"), ("GET", r"/api/formats"),
+    ("POST", r"/api/code/complete"),
 ]]
 
 
@@ -420,28 +423,42 @@ class TrainReq(BaseModel):
     init_from: str = ""           # continue from this fine-tuned run's adapter (same base model)
     pairs_per_doc: int = 8
     min_doc_chars: int = 5000
+    # copilot (code) models: Training → Copilot
+    task: str = "writing"         # writing | code
+    code_examples: int = 4000
+    fim_rate: float = 0.5         # share of fill-in-the-middle examples
+    code_chat_share: float = 0.2  # share of chat-form examples (Chat → Code assistant)
+    code_langs: str = ""          # only these languages (empty = all collected)
 
 
 @app.post("/api/train")
 def train(r: TrainReq):
     name = "".join(c if c.isalnum() or c in "-_." else "-" for c in r.name.strip()) or "my-model"
     out = os.path.join(RUNS, name)
-    os.makedirs(out, exist_ok=True)
+    code = r.task == "code"
+    resuming_saved = r.resume and os.path.exists(os.path.join(out, "train_cmd.json"))
     if r.mode == "scratch":
-        if not (r.resume and os.path.exists(os.path.join(out, "train_cmd.json"))) and \
-                not os.path.exists(os.path.join(ROOT, "data/bin/train.bin")):
-            err("Prepare the training data first (Training → Data, steps 1–3).")
+        bin_dir, tok_src = ("data/bin-code", "tokenizer/bpe-code.json") if code else ("data/bin", "tokenizer/bpe.json")
+        where = "Training → Copilot, steps 1–3" if code else "Training → Data, steps 1–3"
+        if not resuming_saved and not os.path.exists(os.path.join(ROOT, bin_dir, "train.bin")):
+            err(f"Prepare the training data first ({where}).")
+        os.makedirs(out, exist_ok=True)
         tok_copy = os.path.join(out, "tokenizer.json")
         if not (r.resume and os.path.exists(tok_copy)):
             # Keep the tokenizer with the weights, so the run folder can be moved to another PC.
-            src = os.path.join(ROOT, "tokenizer/bpe.json")
+            src = os.path.join(ROOT, tok_src)
             if not os.path.exists(src):
-                err("Train the tokenizer first (Training → Data, step 2).")
+                err(f"Train the tokenizer first ({where.replace('steps 1–3', 'step 2')}).")
             shutil.copyfile(src, tok_copy)
+            if code:
+                from tokenizers import Tokenizer
+
+                r.vocab = Tokenizer.from_file(src).get_vocab_size()  # the model must match the code tokenizer
         meta_p = os.path.join(out, "meta.json")
         if not (r.resume and os.path.exists(meta_p)):
-            json.dump({"type": "scratch", "tok": "tokenizer.json", "preset": r.preset}, open(meta_p, "w"))
-        cmd = [PY, "train.py", "--out", out, "--preset", r.preset, "--vocab", str(r.vocab),
+            json.dump({"type": "scratch", "tok": "tokenizer.json", "preset": r.preset, **({"task": "code"} if code else {})},
+                      open(meta_p, "w"))
+        cmd = [PY, "train.py", "--out", out, "--data", bin_dir, "--preset", r.preset, "--vocab", str(r.vocab),
                "--max-steps", str(r.steps), "--batch", str(r.batch), "--grad-accum", str(r.accum), "--lr", str(r.lr),
                "--warmup", str(r.warmup if r.warmup > 0 else max(10, r.steps // 40)),
                "--eval-every", str(max(10, r.steps // 80)), "--weight-decay", str(max(0.0, r.weight_decay))]
@@ -455,9 +472,13 @@ def train(r: TrainReq):
         import glob
         inst = os.path.join(ROOT, "data/instructions/train.jsonl")
         use_inst = r.instructions and os.path.exists(inst)
-        resuming_saved = r.resume and os.path.exists(os.path.join(out, "train_cmd.json"))
-        if not resuming_saved and not use_inst and not glob.glob(os.path.join(ROOT, "data/raw/**/*.txt"), recursive=True):
+        if code:
+            use_inst = False
+            if not resuming_saved and not copilot.has_code():
+                err("Collect some code first (Training → Copilot, step 1).")
+        elif not resuming_saved and not use_inst and not glob.glob(os.path.join(ROOT, "data/raw/**/*.txt"), recursive=True):
             err("Add some text first: build writing instructions or download books (Training → Data).")
+        os.makedirs(out, exist_ok=True)
         cmd = [PY, "finetune/finetune_lora.py", "--out", out, "--base", r.base, "--examples", str(r.examples),
                "--seq", str(r.seq), "--batch", str(r.batch), "--grad-accum", str(r.accum), "--lr", str(r.lr),
                "--max-steps", "0" if r.epochs > 0 else str(r.steps), "--eval-every", str(max(5, r.steps // 20)),
@@ -476,6 +497,13 @@ def train(r: TrainReq):
             cmd += ["--epochs", str(r.epochs)]
         if use_inst:
             cmd += ["--instructions", inst, "--book-share", str(r.book_share)]
+        if code:
+            cmd += ["--code", "data/code", "--code-examples", str(max(1, r.code_examples)),
+                    "--fim-rate", str(max(0.0, min(1.0, r.fim_rate))),
+                    "--code-chat-share", str(max(0.0, min(1.0, r.code_chat_share)))]
+            langs = re.sub(r"[^\w#+, -]", "", r.code_langs).strip()
+            if langs:
+                cmd += ["--code-langs", langs]
         if r.gguf:
             cmd += ["--gguf"]
         if r.resume:
@@ -524,6 +552,7 @@ class ClusterReq(BaseModel):
     eval_every: int = 1
     port: int = 7861
     secret: str = ""
+    task: str = "writing"         # writing | code (the copilot's data/bin-code and code tokenizer)
     local_worker: bool = True     # this PC trains too
     upnp: bool = True             # ask the router to open the port for PCs on other networks
     batch: int = 16               # this PC's worker
@@ -538,6 +567,7 @@ class JoinReq(BaseModel):
     accum: int = 4
     data_mb: float = 200
     local_data: bool = False      # use this PC's data/bin instead of downloading a share
+    task: str = "writing"         # code: local_data means data/bin-code
     reserve: float = 0
 
 
@@ -555,23 +585,31 @@ def cluster_start(r: ClusterReq):
     name = "".join(c if c.isalnum() or c in "-_." else "-" for c in r.name.strip()) or "cluster-writer"
     out = os.path.join(RUNS, name)
     resuming = r.resume and os.path.exists(os.path.join(out, "ckpt.pt"))
-    if not os.path.exists(os.path.join(ROOT, "data/bin/train.bin")):
-        err("Prepare the training data first (Training → Data, steps 1–3). Workers get their share from this PC.")
+    code = r.task == "code"
+    bin_dir, tok_src = ("data/bin-code", "tokenizer/bpe-code.json") if code else ("data/bin", "tokenizer/bpe.json")
+    where = "Training → Copilot" if code else "Training → Data"
+    if not os.path.exists(os.path.join(ROOT, bin_dir, "train.bin")):
+        err(f"Prepare the training data first ({where}, steps 1–3). Workers get their share from this PC.")
     os.makedirs(out, exist_ok=True)
     tok_copy = os.path.join(out, "tokenizer.json")
     if not (resuming and os.path.exists(tok_copy)):
-        src = os.path.join(ROOT, "tokenizer/bpe.json")
+        src = os.path.join(ROOT, tok_src)
         if not os.path.exists(src):
-            err("Train the tokenizer first (Training → Data, step 2).")
+            err(f"Train the tokenizer first ({where}, step 2).")
         shutil.copyfile(src, tok_copy)
+    if code:
+        from tokenizers import Tokenizer
+
+        r.vocab = Tokenizer.from_file(tok_copy).get_vocab_size()
     meta_p = os.path.join(out, "meta.json")
     if not (resuming and os.path.exists(meta_p)):
-        json.dump({"type": "scratch", "tok": "tokenizer.json", "preset": r.preset, "cluster": True}, open(meta_p, "w"))
+        json.dump({"type": "scratch", "tok": "tokenizer.json", "preset": r.preset, "cluster": True,
+                   **({"task": "code"} if code else {})}, open(meta_p, "w"))
     secrets_p = os.path.join(CLUSTER_DIR, "secrets.json")   # run name -> secret, so a resume keeps it
     known = _read_json(secrets_p) or {}
     # Resuming keeps the run's secret (workers still hold it and reconnect by themselves).
     secret = r.secret.strip() or (known.get(name) if resuming else None) or "-".join(_secrets.token_hex(4) for _ in range(4))
-    cmd = [PY, "cluster.py", "coordinator", "--out", out, "--preset", r.preset, "--vocab", str(r.vocab),
+    cmd = [PY, "cluster.py", "coordinator", "--out", out, "--data", bin_dir, "--preset", r.preset, "--vocab", str(r.vocab),
            "--rounds", str(max(1, r.rounds)), "--round-minutes", str(max(0.2, r.round_minutes)), "--lr", str(r.lr),
            "--min-lr", str(min(r.min_lr, r.lr) if r.min_lr > 0 else r.lr / 10), "--warmup", str(max(0, r.warmup)),
            "--weight-decay", str(max(0.0, r.weight_decay)), "--outer-lr", str(r.outer_lr),
@@ -619,9 +657,10 @@ def cluster_join(r: JoinReq):
     if r.name.strip():
         cmd += ["--name", r.name.strip()[:40]]
     if r.local_data:
-        if not os.path.exists(os.path.join(ROOT, "data/bin/train.bin")):
-            err("This PC has no prepared data (data/bin/train.bin). Untick 'use this PC's data' to download a share.")
-        cmd += ["--data", os.path.join(ROOT, "data/bin")]
+        bin_dir = "data/bin-code" if r.task == "code" else "data/bin"
+        if not os.path.exists(os.path.join(ROOT, bin_dir, "train.bin")):
+            err(f"This PC has no prepared data ({bin_dir}/train.bin). Untick 'use this PC's data' to download a share.")
+        cmd += ["--data", os.path.join(ROOT, bin_dir)]
     json.dump({"address": addr, "name": r.name}, open(os.path.join(CLUSTER_DIR, "joined.json"), "w"))
     return _launch("worker", addr, cmd, os.path.join(CLUSTER_DIR, "worker-log.txt"),
                    env={"TEXTLLM_CLUSTER_SECRET": r.secret.strip()})
@@ -878,7 +917,7 @@ def models(request: Request):
                     "fast": bool(gguf_path(d))})
     out.sort(key=lambda m: not m["default"])
     if not is_admin(request):  # chat only needs to pick a model
-        keep = ("name", "type", "label", "level", "ratings", "avg_rating", "default", "style")
+        keep = ("name", "type", "label", "level", "ratings", "avg_rating", "default", "style", "task")
         out = [{k: m.get(k) for k in keep} for m in out]
     return out
 
@@ -919,6 +958,28 @@ class ChatReq(BaseModel):
 @app.get("/api/formats")
 def formats_list():
     return F.public_list()
+
+
+class CompleteReq(BaseModel):
+    model: str
+    prefix: str
+    suffix: str = ""
+    max_tokens: int = 128
+    temperature: float = 0.2
+    top_p: float = 0.95
+
+
+@app.post("/api/code/complete")
+def code_complete(r: CompleteReq):
+    """Editor-style completion: the code that goes between prefix and suffix (fill-in-the-middle).
+    Any signed-in user may call it, e.g. from an editor plugin that sends the Studio's session cookie."""
+    eng = engine(r.model)
+    out = ""
+    with eng.lock:
+        for out in eng.code_complete(r.prefix[-24000:], r.suffix[:8000], max(1, min(1024, r.max_tokens)),
+                                     max(0.0, min(2.0, r.temperature)), max(0.05, min(1.0, r.top_p))):
+            pass
+    return {"completion": out, "model": r.model}
 
 
 @app.post("/api/chat")

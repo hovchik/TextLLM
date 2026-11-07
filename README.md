@@ -209,10 +209,12 @@ All of these are off by default (0 = skip). Pick them in the Studio under Traini
 | `--common-corpus-gb G` | [Common Corpus](https://huggingface.co/datasets/PleIAs/common_corpus), only the "Open Culture" part (public-domain books and newspapers, OCR). `--common-corpus-lang en` or `all`. | public domain |
 | `--archive-books N` | Internet Archive scans published before 1931 (americana, toronto, europeanlibraries collections; never the lending library). OCR text, keep it a small share. | public domain (US) |
 | `--cosmopedia-gb G` | [Cosmopedia](https://huggingface.co/datasets/HuggingFaceTB/cosmopedia) synthetic text by Mixtral. `--cosmopedia-subsets stories,wikihow,...` (the GB are split evenly, one folder per subset) | Apache 2.0 |
+| `--wikipedia-gb G` | [Wikipedia](https://huggingface.co/datasets/wikimedia/wikipedia) (2023-11-01 dump). `--wikipedia-lang en` or any language code (`de`, `fr`, `hy`, ...); one folder per language. | CC BY-SA 4.0 |
+| `--common-pile-gb G` | [Common Pile v0.1](https://huggingface.co/collections/common-pile/common-pile-v01-filtered-data) (EleutherAI, openly licensed only). `--common-pile-subsets` picks parts, default `news,public_domain_review,pressbooks,cccc`; also `doab`, `wikimedia` (Wikibooks/Wikinews/Wikiquote/Wikisource/Wikiversity/Wikivoyage), `youtube`, `foodista`, `stackexchange`, `library_of_congress`, `pre_1929_books`, `oercommons`, `libretexts`, `uk_hansard`. The GB are shared in order, so a small part leaves its unused share to the next. Rows marked NC or ND are dropped. | CC BY / BY-SA / PD |
 
 ```bash
 python data/build_corpus.py --gutenberg-max 3000 --pg19-books 3000 --standard-ebooks 500 \
-    --cosmopedia-gb 0.3 --fineweb-gb 0.3
+    --cosmopedia-gb 0.3 --common-pile-gb 0.5 --fineweb-gb 0.3
 ```
 Left out on purpose: **BookCorpus** and **BookCorpusOpen** (copyrighted Smashwords books copied without permission),
 **The Pile** (contains Books3, taken down after a DMCA notice), **RedPajama's book subset** (PG-19 plus Books3),

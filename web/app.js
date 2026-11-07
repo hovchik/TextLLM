@@ -318,6 +318,10 @@ function trainData() {
             <label class="field" style="width:190px">Internet Archive books<input class="input" id="d-ia" type="number" min="0" value="0"></label>
             <label class="field" style="width:160px">Cosmopedia (GB)<input class="input" id="d-cosmo" type="number" min="0" step="0.1" value="0"></label>
             <label class="field" style="width:220px">Cosmopedia part<select class="input" id="d-cosmosub"><option value="stories">Stories</option><option value="stories,wikihow">Stories + how-to guides</option><option value="openstax,khanacademy,stanford">Textbooks</option><option value="stories,wikihow,openstax,khanacademy,stanford,web_samples_v1,web_samples_v2">Everything except math</option></select></label>
+            <label class="field" style="width:160px">Wikipedia (GB)<input class="input" id="d-wiki" type="number" min="0" step="0.1" value="0"></label>
+            <label class="field" style="width:130px">Wikipedia language<input class="input" id="d-wikilang" value="en" maxlength="12"></label>
+            <label class="field" style="width:170px">Common Pile (GB)<input class="input" id="d-cp" type="number" min="0" step="0.1" value="0"></label>
+            <label class="field" style="width:240px">Common Pile part<select class="input" id="d-cpsub"><option value="news,public_domain_review,pressbooks,cccc">Posts, essays, blogs, open books</option><option value="news">CC news articles</option><option value="cccc">CC-licensed web pages and blogs</option><option value="public_domain_review,pressbooks,doab">Essays and open books</option><option value="wikimedia">Wikibooks, Wikivoyage, Wikiquote...</option><option value="youtube,uk_hansard">Spoken style (talks, debates)</option><option value="library_of_congress,pre_1929_books">Public-domain books (OCR)</option></select></label>
           </div>
           <ul class="hint" style="padding-left:18px;margin:6px 0 0">
             <li><b>PG-19</b>: 28,752 Gutenberg books from before 1919 (Apache 2.0). Books Gutenberg already saved are skipped.</li>
@@ -325,6 +329,8 @@ function trainData() {
             <li><b>Common Corpus</b>: only its "Open Culture" part, public-domain books and newspapers (OCR).</li>
             <li><b>Internet Archive</b>: scanned books published before 1931 (OCR, noisier). Keep it small.</li>
             <li><b>Cosmopedia</b>: synthetic stories and textbooks written by Mixtral (Apache 2.0).</li>
+            <li><b>Wikipedia</b>: encyclopedia articles in any language code (en, de, fr, hy...), CC BY-SA 4.0.</li>
+            <li><b>Common Pile</b>: EleutherAI's openly licensed collection: CC news sites, Public Domain Review essays, open books, CC-licensed blogs. NC/ND rows are dropped.</li>
             <li>Not offered: BookCorpus, BookCorpusOpen, The Pile and RedPajama books (copyrighted books), Open Library (no book text).</li>
           </ul></details></div>
         <button class="btn" data-step="download">${I.play} Run</button></div>
@@ -345,7 +351,7 @@ function trainData() {
     <div class="card" style="margin-top:16px"><div class="card-head"><h2>Log</h2></div><pre class="console" id="dlog">${esc(S.status.job.kind === "data" ? S.status.job.log : "No data job yet.")}</pre></div>`;
   $$("[data-step]").forEach((b) => (b.onclick = async () => {
     try {
-      await api("/api/data", { json: { step: b.dataset.step, books: +$("#d-books").value, web_gb: +$("#d-web").value, gutenberg_method: $("#d-gmethod").value, pg19_books: +$("#d-pg19").value, standard_ebooks: +$("#d-se").value, common_corpus_gb: +$("#d-cc").value, archive_books: +$("#d-ia").value, cosmopedia_gb: +$("#d-cosmo").value, cosmopedia_subsets: $("#d-cosmosub").value, vocab: +$("#d-vocab").value, hf_sets: $("#d-hfsets").checked } });
+      await api("/api/data", { json: { step: b.dataset.step, books: +$("#d-books").value, web_gb: +$("#d-web").value, gutenberg_method: $("#d-gmethod").value, pg19_books: +$("#d-pg19").value, standard_ebooks: +$("#d-se").value, common_corpus_gb: +$("#d-cc").value, archive_books: +$("#d-ia").value, cosmopedia_gb: +$("#d-cosmo").value, cosmopedia_subsets: $("#d-cosmosub").value, wikipedia_gb: +$("#d-wiki").value, wikipedia_lang: $("#d-wikilang").value, common_pile_gb: +$("#d-cp").value, common_pile_subsets: $("#d-cpsub").value, vocab: +$("#d-vocab").value, hf_sets: $("#d-hfsets").checked } });
       toast("Started", "ok"); poll();
     } catch (e) { fail(e); }
   }));

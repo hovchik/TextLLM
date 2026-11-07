@@ -11,6 +11,9 @@ is skipped when its size is 0 (Gutenberg and FineWeb-Edu have defaults, the rest
   common_corpus      --common-corpus-gb G    Pleias Common Corpus, "Open Culture" part only   public domain
   archive            --archive-books N       Internet Archive scans published before 1931     public domain (US)
   cosmopedia         --cosmopedia-gb G       Synthetic stories and textbooks (Mixtral)        Apache 2.0
+  wikipedia/<lang>   --wikipedia-gb G        Wikipedia articles, any language (--wikipedia-lang) CC BY-SA 4.0
+  common_pile/<set>  --common-pile-gb G      EleutherAI Common Pile v0.1, openly licensed      CC BY / BY-SA / PD
+                                             writing (news, essays, open books, CC web pages)
   fineweb            --fineweb-gb G          FineWeb-Edu educational web text                 ODC-By
 
 Left out on purpose: BookCorpus and BookCorpusOpen (copyrighted Smashwords books copied without
@@ -27,7 +30,7 @@ connection. Each source keeps data/raw/<source>/progress.json, saved after every
 network errors are retried with backoff (--retries). Books that Gutenberg already saved are
 listed in gutenberg/ids.list (not .txt, so the tokenizer never reads it) and PG-19 skips them.
 """
-import argparse, csv, html, io, json, os, posixpath, random, re, sys, time, zipfile
+import argparse, csv, gzip, html, io, json, os, posixpath, random, re, sys, time, zipfile
 import xml.etree.ElementTree as ET
 from concurrent.futures import ThreadPoolExecutor
 from html.parser import HTMLParser
@@ -662,35 +665,59 @@ COSMO_REPO = "HuggingFaceTB/cosmopedia"
 COSMO_SUBSETS = ["stories", "wikihow", "openstax", "khanacademy", "stanford",
                  "web_samples_v1", "web_samples_v2", "auto_math_text"]
 CC_REPO = "PleIAs/common_corpus"
+WIKI_REPO = "wikimedia/wikipedia"
+WIKI_DUMP = "20231101"
+CP_ORG = "common-pile"
+# Common Pile v0.1 parts that teach writing (each is common-pile/<name>_filtered, Dolma .json.gz).
+# Left out: project_gutenberg (the gutenberg source again), code, patents, law, science papers.
+CP_SUBSETS = {
+    "news": "CC BY / BY-SA news sites (Global Voices, 360info, SciDev.Net, ...), 0.3 GB",
+    "public_domain_review": "Public Domain Review essays, CC BY-SA, 7 MB",
+    "pressbooks": "open textbooks and books from Pressbooks, CC BY / BY-SA",
+    "cccc": "Common Crawl pages whose whole site is CC licensed (blogs, magazines), 58 GB",
+    "doab": "Directory of Open Access Books, CC BY / BY-SA, 12 GB",
+    "wikimedia": "Wikibooks, Wikinews, Wikiquote, Wikisource, Wikiversity, Wikivoyage (English), CC BY-SA, 57 GB with Wikipedia",
+    "youtube": "transcripts of CC BY YouTube videos (spoken style)",
+    "foodista": "Foodista recipes and food articles, CC BY",
+    "stackexchange": "Stack Exchange questions and answers, CC BY-SA",
+    "library_of_congress": "Library of Congress public-domain books (OCR)",
+    "pre_1929_books": "public-domain books published before 1929 (OCR)",
+    "oercommons": "OER Commons open educational texts",
+    "libretexts": "LibreTexts open textbooks",
+    "uk_hansard": "UK parliament debates (Open Parliament Licence)",
+}
+CP_DEFAULT = "news,public_domain_review,pressbooks,cccc"
+# Wikimedia rows to keep from common_pile/wikimedia: Wikipedia has its own source, Wiktionary is word lists
+CP_WIKIS = ("wikibooks", "wikinews", "wikiquote", "wikisource", "wikiversity", "wikivoyage")
 
 
 def hf_session():
     return session("HF_TOKEN")
 
 
-def _tree(sess, repo, sha, d):
+def _tree(sess, repo, sha, d, ext=".parquet"):
     url = f"{HF}/api/datasets/{repo}/tree/{sha}" + (f"/{d}" if d else "")
     params, out = {"recursive": "true"}, []
     while url:
         r = sess.get(url, params=params, timeout=60)
         r.raise_for_status()
         out += [(f["path"], f["size"]) for f in r.json()
-                if f.get("type") == "file" and f["path"].endswith(".parquet")]
+                if f.get("type") == "file" and f["path"].endswith(ext)]
         url, params = r.links.get("next", {}).get("url"), None     # large repos are paged
     return sorted(out)
 
 
-def hf_files(sess, repo, dirs, tries, sha=None):
-    """Pin the dataset to one commit and list its parquet files (in dirs order) with their sizes."""
+def hf_files(sess, repo, dirs, tries, sha=None, ext=".parquet"):
+    """Pin the dataset to one commit and list its data files (in dirs order) with their sizes."""
     def go():
         nonlocal sha
         if not sha:
             info = sess.get(f"{HF}/api/datasets/{repo}", timeout=60)
             info.raise_for_status()
             sha = info.json()["sha"]
-        files = [f for d in dirs for f in _tree(sess, repo, sha, d)]
+        files = [f for d in dirs for f in _tree(sess, repo, sha, d, ext)]
         if not files:
-            raise NetError("no parquet files listed")
+            raise NetError(f"no {ext} files listed")
         return sha, files
     return retry(go, f"listing {repo} files", tries)
 
@@ -928,6 +955,109 @@ def common_corpus(outdir, max_gb, lang="en", mode="stream", tries=30, cache="dat
                filters={"open_type": _open_culture, "language": _lang_ok(lang)})
 
 
+def wikipedia(outdir, max_gb, lang="en", mode="stream", tries=30, cache="data/cache", keep_parquet=False):
+    if not re.fullmatch(r"[a-z][a-z0-9-]{1,15}", lang):
+        raise SystemExit(f"--wikipedia-lang {lang!r}: use a Wikipedia language code such as en, de, hy")
+    hf_parquet(os.path.join(outdir, lang), f"Wikipedia {lang}", WIKI_REPO, [f"{WIKI_DUMP}.{lang}"],
+               max_gb, mode, tries, cache, keep_parquet, cache_name=f"wikipedia-{lang}")
+
+
+def open_license(lic):
+    """False for NonCommercial / NoDerivatives licenses, which the project never trains on."""
+    words = re.split(r"[^a-z0-9]+", str(lic or "").lower())
+    flat = "".join(words)
+    return not ({"nc", "nd"} & set(words) or "noncommercial" in flat or "noderiv" in flat)
+
+
+def hf_jsonl(outdir, label, repo, max_gb, mode="stream", tries=30, cache="data/cache",
+             keep_parquet=False, keep=None, cache_name=None):
+    """Stream the text of a Hugging Face dataset stored as gzipped JSON lines (Dolma format).
+
+    Rows whose metadata.license is NC/ND are dropped, and so are rows keep(row) refuses. A gzip file
+    can't be entered in the middle, so a resume reads the current file again from its start and
+    skips the lines already handled (download mode reads that file from the local cache)."""
+    p = Progress(outdir, label, int(max_gb * 1024**3), sha=None, file=None, line=0)
+    if p.finished():
+        return p.count()
+    st = p.st
+    sess = hf_session()
+    sha, files = hf_files(sess, repo, [""], tries, ext=".json.gz")
+    if st["sha"] and st["sha"] != sha:
+        print(f"{label}: dataset updated since last run, keeping the old version {st['sha'][:8]}")
+        sha, files = hf_files(sess, repo, [""], tries, st["sha"], ext=".json.gz")
+    st["sha"] = sha
+    names = [f for f, _ in files]
+    start = names.index(st["file"]) if st["file"] in names else 0
+
+    with p:
+        for path, size in files[start:]:
+            url = f"{HF}/datasets/{repo}/resolve/{sha}/{path}"
+            local = None
+            if mode == "download":
+                local = download_file(url, os.path.join(cache, cache_name or repo.split("/")[-1], sha[:8], path),
+                                      size, sess, tries)
+                raw = open(local, "rb")
+            else:
+                raw = io.BufferedReader(HttpFile(url, size, sess, tries), 8 << 20)
+            skip = st["line"] if st["file"] == path else 0
+            st["file"], n = path, 0
+            try:
+                with gzip.open(raw, "rt", encoding="utf-8") as f:
+                    for n, line in enumerate(f, 1):
+                        if n <= skip or not line.strip():
+                            continue
+                        try:
+                            row = json.loads(line)
+                        except ValueError:
+                            continue
+                        meta = row.get("metadata") or {}
+                        text = row.get("text")
+                        if text and open_license(meta.get("license")) and (keep is None or keep(row)):
+                            p.write(text)
+                        if p.full():
+                            p.save(line=n)
+                            return p.count()
+                        if n % 5000 == 0:
+                            p.save(line=n)
+            finally:
+                raw.close()
+            if path != names[-1]:
+                p.save(file=names[names.index(path) + 1], line=0)
+            else:
+                p.st["end"] = True
+                p.save(line=n)
+            if local and not keep_parquet:
+                os.remove(local)
+        print(f"{label}: reached the end of the dataset")
+    return p.count()
+
+
+def _wiki_keep(wikis):
+    def keep(row):
+        meta = row.get("metadata") or {}
+        where = f"{row.get('source', '')} {meta.get('wiki', '')}".lower()
+        return any(w in where for w in wikis)
+    return keep
+
+
+def common_pile(outdir, max_gb, subsets, mode="stream", tries=30, cache="data/cache", keep_parquet=False):
+    """One folder and progress file per Common Pile part. The GB are shared in order: a part that is
+    smaller than its share (Public Domain Review is 7 MB) leaves the rest to the parts after it."""
+    bad = [s for s in subsets if s not in CP_SUBSETS]
+    if bad:
+        raise SystemExit(f"unknown Common Pile part(s) {bad}; choose from {', '.join(CP_SUBSETS)}")
+    left = max_gb * 1024**3
+    for i, sub in enumerate(subsets):
+        share = left / (len(subsets) - i)
+        if share < 1e6:
+            break
+        keep = _wiki_keep(CP_WIKIS) if sub == "wikimedia" else None
+        used = hf_jsonl(os.path.join(outdir, sub), f"Common Pile {sub}", f"{CP_ORG}/{sub}_filtered",
+                        share / 1024**3, mode, tries, cache, keep_parquet, keep=keep,
+                        cache_name=f"common-pile-{sub}")
+        left -= min(used, share)
+
+
 if __name__ == "__main__":
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--out", default="data/raw")
@@ -948,6 +1078,12 @@ if __name__ == "__main__":
                      help="Cosmopedia synthetic text, split evenly over the chosen subsets")
     src.add_argument("--cosmopedia-subsets", default="stories",
                      help=f"comma-separated, from: {','.join(COSMO_SUBSETS)}")
+    src.add_argument("--wikipedia-gb", type=float, default=0, help="Wikipedia articles (CC BY-SA 4.0)")
+    src.add_argument("--wikipedia-lang", default="en", help="Wikipedia language code: en, de, fr, hy, ...")
+    src.add_argument("--common-pile-gb", type=float, default=0,
+                     help="Common Pile v0.1 openly licensed text, shared over the chosen parts")
+    src.add_argument("--common-pile-subsets", default=CP_DEFAULT,
+                     help="comma-separated, from: " + ", ".join(CP_SUBSETS))
     src.add_argument("--fineweb-gb", type=float, default=20, help="FineWeb-Edu web text")
     net = ap.add_argument_group("downloading")
     net.add_argument("--fineweb-mode", "--hf-mode", dest="hf_mode", choices=["stream", "download"],
@@ -976,6 +1112,11 @@ if __name__ == "__main__":
         if a.cosmopedia_gb > 0:
             subsets = [s.strip() for s in a.cosmopedia_subsets.split(",") if s.strip()]
             cosmopedia(out("cosmopedia"), a.cosmopedia_gb, subsets, **hf)
+        if a.wikipedia_gb > 0:
+            wikipedia(out("wikipedia"), a.wikipedia_gb, a.wikipedia_lang.strip().lower(), **hf)
+        if a.common_pile_gb > 0:
+            subsets = [s.strip() for s in a.common_pile_subsets.split(",") if s.strip()]
+            common_pile(out("common_pile"), a.common_pile_gb, subsets, **hf)
         if a.fineweb_gb > 0:
             fineweb(out("fineweb"), a.fineweb_gb, **hf)
     except KeyboardInterrupt:

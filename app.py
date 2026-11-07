@@ -257,6 +257,10 @@ class DataReq(BaseModel):
     archive_books: int = 0
     cosmopedia_gb: float = 0
     cosmopedia_subsets: str = "stories"
+    wikipedia_gb: float = 0
+    wikipedia_lang: str = "en"
+    common_pile_gb: float = 0
+    common_pile_subsets: str = "news,public_domain_review,pressbooks,cccc"
     vocab: int = 8192
     hf_sets: bool = True
 
@@ -270,7 +274,12 @@ def data(r: DataReq):
                      "--common-corpus-gb", str(max(0.0, r.common_corpus_gb)),
                      "--archive-books", str(max(0, r.archive_books)),
                      "--cosmopedia-gb", str(max(0.0, r.cosmopedia_gb)),
-                     "--cosmopedia-subsets", re.sub(r"[^a-z0-9_,]", "", r.cosmopedia_subsets) or "stories"],
+                     "--cosmopedia-subsets", re.sub(r"[^a-z0-9_,]", "", r.cosmopedia_subsets) or "stories",
+                     "--wikipedia-gb", str(max(0.0, r.wikipedia_gb)),
+                     "--wikipedia-lang", re.sub(r"[^a-z0-9-]", "", r.wikipedia_lang.lower()) or "en",
+                     "--common-pile-gb", str(max(0.0, r.common_pile_gb)),
+                     "--common-pile-subsets", re.sub(r"[^a-z0-9_,]", "", r.common_pile_subsets)
+                     or "news,public_domain_review,pressbooks,cccc"],
         "tokenizer": [PY, "tokenizer/train_tokenizer.py", "--vocab", str(r.vocab)],
         "encode": [PY, "tokenizer/train_tokenizer.py", "--encode"],
         # writing instructions for fine-tuning: posts, stories, essays (rights-cleared sources only)
@@ -796,6 +805,7 @@ SOURCE_NOTES = {
     "custom": "Your own files and links", "news": "News & web crawler", "pg19": "PG-19 books (Apache 2.0)",
     "standard_ebooks": "Standard Ebooks (CC0)", "common_corpus": "Common Corpus, Open Culture (public domain)",
     "archive": "Internet Archive books (public domain)", "cosmopedia": "Cosmopedia (Apache 2.0)",
+    "wikipedia": "Wikipedia (CC BY-SA 4.0)", "common_pile": "Common Pile, openly licensed writing (CC BY / BY-SA / PD)",
 }
 
 

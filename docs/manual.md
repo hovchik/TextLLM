@@ -161,7 +161,7 @@ If the download stops, press **Run** again: every source continues where it stop
 
 **Step 3 · Encode the corpus.** Turns all text into token files for fast training. *Held out for validation* is the share kept aside to measure validation loss (default 0.5%).
 
-Steps 2 and 3 are only needed for from-scratch training. Run them again after you add or delete text.
+Steps 2 and 3 are only needed for from-scratch training. After you add or delete text, run **step 3 (Encode) only** if you want to keep training an existing model: a model must always read text encoded with the tokenizer it was trained with, and a new tokenizer gives the same token numbers different meanings without any error. Build a new tokenizer (step 2, then step 3) only before training a **new** model from scratch.
 
 **Step 4 · Build writing instructions** (for fine-tuning). Makes examples of posts, stories and essays from public-domain Gutenberg stories and essays and your liked and corrected chat answers, plus optionally OpenAssistant (Apache 2.0) and Dolly (CC BY-SA 3.0).
 
@@ -177,7 +177,7 @@ Teach a model your own books, articles and notes, or add them to the corpus.
 1. **Add texts:** drop files onto the box (or click to browse): PDF, Word (.docx and .doc), TXT, Markdown and HTML. You can also paste **links**, one per line (articles, online PDFs, plain-text books), and **files or folders on this computer** (folders are searched recursively). Tick *Delete these local files after reading* if you want them removed.
 2. **What should happen?**
    - **Teach a model now:** download → train the chosen model → delete the extracted text. The model keeps what it learned. Choose the **model to teach** and how many times to **read each text** (1–10, default 3). Under **Advanced**: how much old text is mixed in per new token (from-scratch models only, so they don't forget; default 1) and the learning rate (0 = automatic).
-   - **Add to training data:** keeps them in `data/raw/custom/` for the next full training. Run Data steps 2–3 afterwards.
+   - **Add to training data:** keeps them in `data/raw/custom/` for the next full training. Then run Data step 3 (Encode); also step 2 only if you will train a new model from scratch (see section 5).
 3. Press **Start**.
 
 Good to know: scanned PDFs have no text layer, so run OCR first (e.g. `ocrmypdf`); old `.doc` files need LibreOffice; only use texts you have the right to use.
@@ -240,7 +240,7 @@ Shows what the models learn from: one row per folder under `data/raw/`.
 
 Each row shows files, size, documents, estimated tokens and when it was updated. **Sample** shows three random documents so you can check the quality. The trash button deletes the folder (it asks first and can't be undone).
 
-After deleting a source, run Data steps 2 and 3 again so from-scratch training sees the change. Fine-tuning reads the folders directly. Models already trained keep what they learned.
+After deleting a source, run Data step 3 (Encode) again so from-scratch training sees the change. Rebuild the tokenizer (step 2) only before training a new model, never for a model you will resume (see section 5). Fine-tuning reads the folders directly. Models already trained keep what they learned.
 
 # 10. Training: Runs
 
@@ -394,6 +394,7 @@ See README.md for every option.
 | Forgot the admin password | Stop the Studio and run `python -m studio.auth passwd <name>`. |
 | Download keeps disconnecting (`WinError 10054`) | Press **Run** again; every source resumes. Under *Downloading* choose "Download whole files first" and more retries. |
 | "Prepare the training data first" | Run Data steps 1–3 before training from scratch. |
+| Resumed model writes nonsense after a corpus change | The tokenizer was rebuilt. Restore the old one (each run keeps a copy as `runs/<name>/tokenizer.json`; copy it to `tokenizer/bpe.json`) and run Data step 3 again. |
 | The GPU isn't used | Update the NVIDIA driver, then `run.bat --reinstall` (or `--gpu`). Check Settings → Hardware. On laptops, plug in the charger and set Windows Graphics to "High performance" for Python. |
 | "CUDA out of memory" | Halve the batch size and double the gradient accumulation. |
 | A PDF gives no text | It's a scan: run OCR (`ocrmypdf`) first. |

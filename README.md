@@ -41,6 +41,8 @@ python app.py        # open http://127.0.0.1:7860
 ```
 
 ## Text LLM Studio (web app)
+A step-by-step user manual with screenshots of every page: [docs/Studio-Manual.pdf](docs/Studio-Manual.pdf) (source: [docs/manual.md](docs/manual.md); rebuild with `docs/manual-build/build.sh`, needs pandoc and Playwright).
+
 | Page | What it does |
 |---|---|
 | **Dashboard** | KPIs, learning curves, setup checklist and your models at a glance |

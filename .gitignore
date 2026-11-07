@@ -11,3 +11,4 @@ data/cache/
 tools/
 *.gguf
 data/my_posts/
+docs/manual-build/manual.html

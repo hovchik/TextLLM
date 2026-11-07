@@ -36,6 +36,7 @@ ROOT = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, ROOT)
 
 import graceful  # noqa: E402
+import netreach  # noqa: E402
 
 DEFAULT_PORT = 7861
 GONE_AFTER = 90        # seconds without a heartbeat: the worker left
@@ -55,25 +56,6 @@ def unpack(data):
     import torch
 
     return torch.load(io.BytesIO(data), map_location="cpu", weights_only=True)
-
-
-def lan_addresses():
-    """This PC's addresses that other machines may reach (no traffic is sent)."""
-    out = []
-    try:
-        s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-        s.connect(("10.255.255.255", 1))
-        out.append(s.getsockname()[0])
-        s.close()
-    except OSError:
-        pass
-    try:
-        for ip in socket.gethostbyname_ex(socket.gethostname())[2]:
-            if ip not in out and not ip.startswith("127."):
-                out.append(ip)
-    except OSError:
-        pass
-    return out or ["127.0.0.1"]
 
 
 def inner_lr_at(r, a):
@@ -137,6 +119,9 @@ class Coordinator:
         self.history = []           # last rounds, for the Studio
         self.log_f = open(os.path.join(a.out, "metrics.jsonl"), "a")
         self.client_worker = None
+        self.upnp_state = None if not self.upnp_wanted() else {"pending": True}
+        self.keeper = None
+        self._addrs = (0, None)
         self.save_lock = threading.Lock()
 
     # ---------------------------------------------------------------- helpers
@@ -156,7 +141,29 @@ class Coordinator:
                                                         "tensors": {k: p.detach().clone() for k, p in self.params.items()}}))
             return self.full_cache[1]
 
+    def upnp_wanted(self):
+        return self.a.upnp and self.a.host not in ("127.0.0.1", "localhost")
+
+    def reach_addrs(self):
+        """Labelled join addresses (internet / tailscale / local), refreshed every minute."""
+        t, v = self._addrs
+        if v is None or time.time() - t > 60:
+            v = netreach.addresses(self.a.port, self.upnp_state)
+            self._addrs = (time.time(), v)
+        return v
+
+    def upnp_changed(self, st):
+        self.upnp_state = st
+        self._addrs = (0, None)
+        if st.get("ok") and st.get("external_ip") and not st.get("error"):
+            print(f"[cluster] router port {self.a.port} opened (UPnP). From other networks join with:  "
+                  f"run.bat --join http://{st['external_ip']}:{self.a.port} --secret {self.a.secret}", flush=True)
+        else:
+            print(f"[cluster] could not open the router port automatically: {st.get('error')}. "
+                  "PCs on other networks: use Tailscale, or forward the port on the router.", flush=True)
+
     def write_status(self):
+        addrs = self.reach_addrs()  # may run `tailscale ip`: outside the lock
         with self.lock:
             now = time.time()
             ws = []
@@ -171,7 +178,8 @@ class Coordinator:
                            "loss": i.get("loss"), "step": i.get("local_step"), "note": i.get("note")})
             cur = self.cur
             s = {"role": "coordinator", "protocol": PROTOCOL, "pid": os.getpid(), "port": self.a.port,
-                 "addresses": lan_addresses(), "phase": "finished" if self.done else self.phase,
+                 "addresses": [x["ip"] for x in addrs], "reach": {"upnp": self.upnp_state,
+                 "addresses": addrs}, "phase": "finished" if self.done else self.phase,
                  "round": self.round, "rounds": self.a.rounds, "round_seconds": self.a.round_seconds,
                  "round_started": cur["started"] if cur else None, "train_until": cur["train_until"] if cur else None,
                  "model_mb": round(self.model_bytes / 1e6, 1), "transfer_mb": round(self.model_bytes / 2e6, 1), "params_m": round(self.model_bytes / 4e6, 1),
@@ -525,8 +533,10 @@ class Coordinator:
         print(f"[cluster] coordinator {self.cfg.n_layer}x{self.cfg.n_embd} model "
               f"({self.model_bytes / 4e6:.1f}M params, {self.model_bytes / 2e6:.0f} MB per transfer), "
               f"{self.train_tokens:,} training tokens", flush=True)
-        for ip in lan_addresses():
-            print(f"[cluster] workers join with:  run.bat --join http://{ip}:{a.port} --secret {a.secret}", flush=True)
+        for x in netreach.addresses(a.port):
+            print(f"[cluster] workers join ({x['note']}) with:  run.bat --join {x['url']} --secret {a.secret}", flush=True)
+        if self.upnp_wanted():
+            self.keeper = netreach.PortKeeper(a.port, on_change=self.upnp_changed)
         if a.local_worker:
             cmd = [sys.executable, os.path.abspath(__file__), "worker", "--join", f"http://127.0.0.1:{a.port}",
                    "--name", f"{socket.gethostname()[:30]} (this PC)", "--data", a.data,
@@ -565,6 +575,8 @@ class Coordinator:
                     self.client_worker.wait(30)
                 except (subprocess.TimeoutExpired, KeyboardInterrupt):
                     self.client_worker.kill()
+            if self.keeper:
+                self.keeper.stop()  # close the router port again
             self.httpd.shutdown()
 
 
@@ -865,6 +877,8 @@ def main():
     c.add_argument("--port", type=int, default=DEFAULT_PORT)
     c.add_argument("--secret", default=os.environ.get("TEXTLLM_CLUSTER_SECRET", ""),
                    help="shared password the workers must send (made up if empty; or TEXTLLM_CLUSTER_SECRET)")
+    c.add_argument("--no-upnp", dest="upnp", action="store_false",
+                   help="don't ask the router to open the port for PCs on other networks")
     c.add_argument("--local-worker", action="store_true", help="also train on this PC")
     c.add_argument("--local-device", default="auto")
     c.add_argument("--batch", type=int, default=16, help="micro-batch of the local worker")
@@ -887,7 +901,7 @@ def main():
 
     if a.role == "coordinator":
         if not a.secret:
-            a.secret = "-".join(secrets.token_hex(3) for _ in range(3))
+            a.secret = "-".join(secrets.token_hex(4) for _ in range(4))  # 128 bits: safe on the open internet
         a.round_seconds = max(10.0, a.round_minutes * 60)
         a.out, a.data = os.path.abspath(a.out), os.path.abspath(a.data)
         Coordinator(a).run()

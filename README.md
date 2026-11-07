@@ -251,8 +251,15 @@ latency would make synchronous training crawl:
   resumes with `--resume` and the workers reconnect by themselves. Workers without data download
   their share of `train.bin` once (resumable).
 * Expect about 0.6–0.9× each extra PC's own speed (four similar PCs ≈ 3× one PC).
-* Over the internet use Tailscale/ZeroTier (simplest and encrypted) or forward TCP 7861. Every request
-  needs the shared secret; weights are loaded with `torch.load(weights_only=True)`, never as pickled code.
+* PCs on other networks: only the coordinator must be reachable (workers connect out, so they need no
+  router setup). On start the coordinator asks its router to forward the port with UPnP (`netreach.py`,
+  standard library, closed again on stop; `--no-upnp` / the Studio toggle turns it off) and shows the
+  router's public address. If that fails (UPnP off, double NAT, carrier NAT on mobile internet) use
+  Tailscale on every PC, or forward TCP 7861 by hand. The Cluster tab lists Internet, Tailscale and
+  same-network addresses. Every request needs the shared 128-bit secret; weights are loaded with
+  `torch.load(weights_only=True)`, never as pickled code. The connection itself is plain HTTP, so
+  Tailscale is the most private choice. `TEXTLLM_UPNP_LOCATION` names the router's UPnP description URL
+  if it doesn't answer the multicast search.
 
 Every PC uses its own clone of this repository (`git clone`, then `run.bat --join ...`); nothing has to be published or shared except the address and secret. Keep the clones on the same version (`git pull` on all of them): a worker from a different version is refused with a clear message.
 

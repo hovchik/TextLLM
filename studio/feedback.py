@@ -31,6 +31,12 @@ def build(model):
             ctx = F.messages(prompt["format"], prompt["content"], fields, hist)
         else:
             ctx = hist + [{"role": "user", "content": prompt["content"]}]
+        raw = None
+        if F.get(prompt.get("format")).get("steps") == "fim":
+            # Complete code: the model saw a raw fill-in-the-middle prompt, not a chat (feedback_train.py)
+            from coding import fim
+
+            raw = fim.psm(*fim.split_cursor(prompt["content"]))
         chosen, rejected = [], []
         for a in answers:
             if a["correction"]:
@@ -43,10 +49,11 @@ def build(model):
                 rejected.append(a["content"])
         for i, c in enumerate(chosen):
             examples.append({"messages": ctx, "chosen": c, "rejected": rejected[i % len(rejected)] if rejected else None,
-                             "format": prompt.get("format") or "free"})
+                             "format": prompt.get("format") or "free", **({"raw": raw} if raw else {})})
         if not chosen:
             for r in rejected:  # only negatives: still useful for preference training
-                examples.append({"messages": ctx, "chosen": None, "rejected": r, "format": prompt.get("format") or "free"})
+                examples.append({"messages": ctx, "chosen": None, "rejected": r, "format": prompt.get("format") or "free",
+                                 **({"raw": raw} if raw else {})})
     return examples, ids
 
 

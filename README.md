@@ -223,6 +223,28 @@ Reposts, replies and photo-only posts are dropped; links, @mentions, e-mails and
 removed. Other people's Facebook, Instagram, Threads or X accounts can't be imported: Meta has no API
 for them and forbids scraping, and X's developer terms forbid training models on X content.
 
+## Coding copilot (a model that writes code)
+
+Studio → Training → **Copilot**, or from the command line. The copilot learns from:
+
+- **your own projects** on this PC (`--local FOLDER`): follows `.gitignore`, skips `node_modules`, build output and vendored code, never reads `.env`/key/credential files, and replaces tokens and passwords with `<REDACTED>`;
+- **public GitHub** (`--github-repos N` most-starred, or `--github-repo owner/name`): only repositories whose licence GitHub reports as permissive (MIT, Apache-2.0, BSD, ISC, Unlicense, CC0, zlib, BSL-1.0, 0BSD, MIT-0) *and* that have a LICENSE file. GPL/LGPL/AGPL/MPL, "other" and unlicensed repositories are refused. Licence texts and `data/code/ATTRIBUTION.md` are kept. Set `GITHUB_TOKEN` for the higher rate limit;
+- **Hugging Face** (`--hf-gb G`): `codeparrot/github-code-clean`, rows with a permissive licence only.
+
+```
+python data/build_code.py --local ~/projects/app --github-repos 200 --langs python,javascript,typescript
+# best: LoRA on Qwen2.5-Coder (Apache 2.0): fill-in-the-middle + continuation + chat examples
+python finetune/finetune_lora.py --base Qwen/Qwen2.5-Coder-0.5B-Instruct --code data/code --examples 0 \
+    --code-examples 4000 --fim-rate 0.5 --code-chat-share 0.2 --seq 1024 --out runs/my-copilot --gguf
+# or from scratch: code tokenizer with FIM tokens, FIM-rearranged encoding, then train.py (or cluster.py)
+python tokenizer/train_tokenizer.py --code --raw data/code --vocab 16384 --out tokenizer/bpe-code.json
+python tokenizer/train_tokenizer.py --encode --raw data/code --tok tokenizer/bpe-code.json --bin data/bin-code --fim-rate 0.5
+python train.py --data data/bin-code --vocab 16384 --preset cpu --out runs/my-copilot-scratch
+```
+
+Use it in Chat (**Complete code at &lt;cursor&gt;**, **Code assistant**) or from an editor/script with
+`POST /api/code/complete {"model", "prefix", "suffix", "max_tokens"}` (signed-in session cookie).
+
 ## CPU-only quick path (recommended for a laptop or desktop)
 CPU training is about 100× slower than a GPU, so this path uses a 14M-parameter model, an 8k vocabulary, and roughly 3,000 books.
 The `--gutenberg-max 3000` flag takes the first 3,000 English books in the catalog (about 1 GB, roughly 300M tokens).

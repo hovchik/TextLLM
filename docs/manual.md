@@ -6,11 +6,11 @@ date: November 2026
 
 # About this manual
 
-Text LLM Studio is the web app of this project. It runs on your own computer and lets you collect rights-cleared text, train writing models (from scratch or by fine-tuning an open model), chat with them, rate their answers and teach them from those ratings.
+Text LLM Studio is the web app of this project. It runs on your own computer and lets you collect rights-cleared text and code, train writing models and coding copilots (from scratch or by fine-tuning an open model), chat with them, rate their answers and teach them from those ratings.
 
 This manual walks through every page of the Studio in the order you would normally use them.
 
-> **About the screenshots.** They were taken from a real Studio, but with demo data: a few MB of generated stand-in text, a 4M-parameter "tiny" model trained for a few minutes, and a tiny stand-in base model for the fine-tuned examples (shown as `models/tiny-base` instead of a Qwen model). Numbers such as loss, vocabulary size and scores therefore look different from a real run, and the example answers in Chat and Analytics were written by hand for illustration. Every button, field and page is exactly as the app shows them.
+> **About the screenshots.** They were taken from a real Studio, but with demo data: a few MB of generated stand-in text, a 4M-parameter "tiny" model trained for a few minutes, and a tiny stand-in base model for the fine-tuned examples (shown as `models/tiny-base` instead of a Qwen model). Numbers such as loss, vocabulary size and scores therefore look different from a real run, and the example answers in Chat and Analytics were written by hand for illustration. The Copilot pages used two small demo projects and a local stand-in for GitHub serving three demo repositories (plus a GPL one and one without a licence, which were refused). Every button, field and page is exactly as the app shows them.
 
 **Contents**
 
@@ -22,16 +22,17 @@ This manual walks through every page of the Studio in the order you would normal
 6. Training: Your texts
 7. Training: News & web
 8. Training: Your style
-9. Training: Corpus
-10. Training: Cluster (several PCs train one model)
-11. Training: Runs, run details, Resume, Export and Import
-12. Chat
-13. Analytics
-14. Feedback
-15. Users
-16. Settings and hardware
-17. Command-line equivalents
-18. Troubleshooting
+9. Training: Copilot (a model that writes code)
+10. Training: Corpus
+11. Training: Cluster (several PCs train one model)
+12. Training: Runs, run details, Resume, Export and Import
+13. Chat
+14. Analytics
+15. Feedback
+16. Users
+17. Settings and hardware
+18. Command-line equivalents
+19. Troubleshooting
 
 # 1. Installing and starting the Studio
 
@@ -57,7 +58,7 @@ Useful options for `run.bat` / `run.sh` / `run.py`:
 | `--reinstall` | reinstall all packages |
 | `--no-venv` | use your current Python instead of `.venv` |
 
-**GPU.** With an NVIDIA graphics card, `run.bat` finds it with `nvidia-smi` and installs the CUDA build of PyTorch automatically. Apple Silicon Macs use the Apple GPU. Everything else trains on the CPU. Which device is used is shown on the Dashboard and can be changed under Settings → Hardware (section 16).
+**GPU.** With an NVIDIA graphics card, `run.bat` finds it with `nvidia-smi` and installs the CUDA build of PyTorch automatically. Apple Silicon Macs use the Apple GPU. Everything else trains on the CPU. Which device is used is shown on the Dashboard and can be changed under Settings → Hardware (section 17).
 
 These installer flags are the only options that are not in the Studio itself, because they run before the Studio starts. Every other script option has a control in the web app.
 
@@ -233,7 +234,68 @@ Teach a model to write like one account (yours, or someone who gave permission o
 
 **Examples** shows a few imported posts; the trash button deletes the profile (and, if you agree, its model). Other people's Facebook, Instagram, Threads or X accounts can't be imported: there is no API for them and their terms forbid scraping.
 
-# 9. Training: Corpus
+# 9. Training: Copilot (a model that writes code)
+
+A **copilot** is a model that completes code where your cursor is and answers programming questions. The **Copilot** tab collects code from your own projects and from permissively licensed public code, and trains either a fine-tuned code model or a from-scratch one.
+
+![Training → Copilot: code sources, collected code and training options](manual/12f-copilot.png)
+
+## 9.1 Collect code
+
+**Your projects on this PC.** Type a folder, or press **Browse…** to pick one, then **Add**. Add each project's top folder (the one with `package.json`, `pyproject.toml` or `.git`). Press **Read my projects** to read them all. Reading a folder again replaces its earlier copy, so press it again after you have changed your code.
+
+![Browse… picks a project folder on this PC](manual/12g-copilot-folder.png)
+
+While it reads, the Studio:
+
+- follows each project's `.gitignore` files (and `.git/info/exclude`);
+- skips `node_modules`, virtualenvs, `vendor`, build output (`dist`, `build`, `target`, `bin`, `obj`), caches and IDE folders;
+- never reads files that hold secrets (`.env`, `*.pem`, `*.key`, `id_rsa`, keystores, cloud credential files, `*.tfstate`…);
+- replaces tokens (GitHub, AWS, Google, Stripe, OpenAI, Anthropic, Hugging Face, Slack, JWT…) and `password = "..."`-style values with `<REDACTED>`, and drops any file that contains a private key;
+- skips binary, minified, generated ("do not edit"), very small and very large files, and duplicates.
+
+This is careful but not perfect: a model can remember what it trains on, so add only code you own or may use, and that you are happy to have inside the model.
+
+**Public GitHub.** Set how many repositories you want (most-starred first, per language) and the minimum stars, or list exact repositories as `owner/name`. A repository is used only when GitHub reports a **permissive licence** (MIT, Apache 2.0, BSD, ISC, Unlicense, CC0, zlib, Boost, 0BSD, MIT-0) **and** it has a LICENSE file. Copyleft licences (GPL, LGPL, AGPL, MPL, EPL), "other" licences and repositories with no licence are refused and listed in the log, because public code without a licence is still all rights reserved. Each repository's licence text, address and branch are saved in `data/code/github/`, and `data/code/ATTRIBUTION.md` lists them all; keep that file with any model you share. A **GitHub token** (any personal token, no permissions needed) raises GitHub's limit from 60 to 5,000 requests an hour; it is saved on this PC and never written to the log. Downloads resume: press the button again and finished repositories are skipped.
+
+**Filters and more sources:** the languages to keep (Python, JavaScript and TypeScript by default; "Every programming language" or your own list such as `python,go,rust`), the largest file and repository, the licences you accept (you can only narrow the permissive list), and **Hugging Face code**: GB of the `codeparrot/github-code-clean` dataset, keeping only rows whose licence column is permissive. **Collect everything** runs all sources at once.
+
+The **Collected code** card lists each source with files, size, languages, the licences found and how many secrets were redacted. The trash button deletes that collected copy (your project folders are never touched).
+
+## 9.2 Train
+
+**Fine-tune a code model** (best quality). Pick a base model: **Qwen2.5-Coder 0.5B Instruct** (default, Apache 2.0, fine on a CPU), 1.5B Instruct (better, overnight on a CPU), or a *base* Qwen2.5-Coder for completion only. The 3B model has a non-commercial licence, as its hint says. The examples are cut from your collected code:
+
+- **Fill-in-the-middle** (50% by default): the code before and after a gap, and the missing part, exactly like an editor asking for a completion;
+- **continuation**: the code so far, and the next lines;
+- **Chat examples** (20%): "Complete this Python code from app/models.py…" with the *Code assistant* instructions, so the model also helps in Chat.
+
+Set **Code examples**, the name, steps and learning rate, and press **Start training**. Advanced: batch size, gradient accumulation, tokens per example (1024; code needs more room than posts), LoRA rank, passes over the data, examples per file, only some languages, and **Continue from** an earlier copilot.
+
+**Train from scratch.** Your own small GPT that learns only from the collected code. It needs two preparation steps here, separate from the writing model's Data steps, so the two never overwrite each other:
+
+![From-scratch copilot: code tokenizer and encoding](manual/12h-copilot-scratch.png)
+
+a. **Build the code tokenizer** (`tokenizer/bpe-code.json`), with the fill-in-the-middle tokens. *Also learn English from the book corpus* mixes in `data/raw` so comments and docstrings read better.
+b. **Encode the code** (`data/bin-code/`). The fill-in-the-middle share of files is rearranged as before / after / missing part.
+
+Then pick a model size and press **Start training**. To train it on several PCs, use the **Cluster** tab and choose **Kind of model: Copilot (code)** (section 11).
+
+Copilots appear under Runs and in Chat as "copilot". They can be rated, improved, exported and resumed like any other model. (Evaluate on Analytics scores writing formats, so it says little about a copilot.)
+
+## 9.3 Using the copilot
+
+- **Chat → Complete code at &lt;cursor&gt;:** paste code and type `<cursor>` where the missing part goes; without it the model continues the end. The answer is the code for that spot (section 13).
+- **Chat → Code assistant:** ask for a function, a fix or an explanation (fine-tuned copilots).
+- **From an editor or a script:** send the code around the cursor to the Studio. Any signed-in user may call it with their session cookie:
+
+```
+POST http://127.0.0.1:7860/api/code/complete
+{"model": "my-copilot", "prefix": "def add(a, b):\n    return ", "suffix": "\n", "max_tokens": 64}
+→ {"completion": "a + b", "model": "my-copilot"}      (an example answer)
+```
+
+# 10. Training: Corpus
 
 Shows what the models learn from: one row per folder under `data/raw/`.
 
@@ -243,7 +305,7 @@ Each row shows files, size, documents, estimated tokens and when it was updated.
 
 After deleting a source, run Data step 3 (Encode) again so from-scratch training sees the change. Rebuild the tokenizer (step 2) only before training a new model, never for a model you will resume (see section 5). Fine-tuning reads the folders directly. Models already trained keep what they learned.
 
-# 10. Training: Cluster (several PCs train one model)
+# 11. Training: Cluster (several PCs train one model)
 
 Several computers, at home or anywhere on the internet, can train **one** from-scratch model together. Every PC uses what it has: an NVIDIA GPU, an Apple GPU or just the CPU. One PC is the **coordinator**: it holds the prepared data and the model. The others are **workers**.
 
@@ -272,9 +334,11 @@ The long secret keeps strangers out, but the traffic itself is not encrypted, so
 
 **Advanced:** secret (made up for you), workers needed before the first round, final learning rate, warmup, weight decay, outer learning rate (0.7) and momentum (0.9), how often to check quality, this PC's batch size, and **Resume** (continue a stopped cluster model from its last round; workers reconnect by themselves). Workers' advanced options: batch size, gradient accumulation, "stop early" seconds for a slow upload, and using the PC's own prepared data instead of downloading (only with the same tokenizer).
 
+**Kind of model:** *Writer* uses the Data tab's prepared text; *Copilot (code)* uses the code prepared on the Copilot tab (section 9). A worker that uses its own prepared data picks the same kind under *Own data is for*.
+
 The result is an ordinary from-scratch run under Runs: chat with it, export it, or keep training it alone with Resume. Cluster mode is for from-scratch models; fine-tuning (LoRA) still runs on one PC.
 
-# 11. Training: Runs
+# 12. Training: Runs
 
 Every model you train is a **run** in `runs/<name>/`.
 
@@ -317,7 +381,7 @@ Buttons (which ones appear depends on the run's state):
 
 This works between Windows and Linux, and between GPU and CPU computers. A fine-tuned model's base model (for example Qwen3 0.6B) is not inside the zip; the new PC downloads it once.
 
-# 12. Chat
+# 13. Chat
 
 Chat is where you (and regular users) write with the models.
 
@@ -346,7 +410,11 @@ Under every answer:
 
 With **About today's news**, the answer lists the articles it is based on, with links.
 
-# 13. Analytics
+**Code formats** (for copilots, section 9): **Code assistant** answers programming requests with code blocks; **Complete code at &lt;cursor&gt;** fills in the spot marked `<cursor>` in the code you paste. Choosing a copilot model switches to a code format by itself. Code answers are shown in a code box and checked for balanced brackets and repeated lines.
+
+![Complete code with a (tiny demo) copilot](manual/14d-chat-code.png)
+
+# 14. Analytics
 
 Admins see how the models learn and how people rate them.
 
@@ -361,7 +429,7 @@ Admins see how the models learn and how people rate them.
 
 Further down: **ratings by format**, **validation loss** for all models, **ratings per day**, **rating distribution**, **Did feedback training help?** (average rating per training round), the **model leaderboard** (click a model to open its details) and **recent jobs** with their result.
 
-# 14. Feedback
+# 15. Feedback
 
 Every rating and correction becomes training data. Liked answers and corrections teach the model what to write; disliked answers teach it what to avoid.
 
@@ -374,7 +442,7 @@ Every rating and correction becomes training data. Liked answers and corrections
 
 How the learning works: fine-tuned models train on liked and corrected answers directly and use a DPO preference loss when a liked or corrected answer can be paired with a disliked one. From-scratch models re-read the prompts with their liked answers. Feedback that was used is marked *learned* and is not trained on again.
 
-# 15. Users
+# 16. Users
 
 Admins add people and set their role.
 
@@ -386,7 +454,7 @@ Each row shows the person, their role (change it in the drop-down; you can't cha
 
 **Add user** asks for a username, an optional display name, a password (at least 6 characters; they can change it later) and the role: **User** (Chat and Settings only) or **Admin** (everything).
 
-# 16. Settings and hardware
+# 17. Settings and hardware
 
 ![Settings (admin view with Hardware)](manual/17-settings.png)
 
@@ -395,7 +463,7 @@ Each row shows the person, their role (change it in the drop-down; you can't cha
 - **Password:** current password and a new one twice. Other devices get signed out.
 - **Hardware** (admins only): **Train and chat on** automatic, CPU, or a specific GPU. It applies to the next training job and reloads chat models. If you have an NVIDIA card but only the CPU build of PyTorch is installed, the hint tells you to close the Studio and run `run.bat --gpu`.
 
-# 17. Command-line equivalents
+# 18. Command-line equivalents
 
 Everything in this manual can also be done from a terminal in the project folder (activate `.venv` first). The most useful commands:
 
@@ -416,11 +484,15 @@ python transfer.py export --run runs/my-model --with-data
 python transfer.py import my-model.textllm.zip
 python cluster.py coordinator --out runs/cluster-writer --preset cpu --vocab 8192 --local-worker
 python cluster.py worker --join http://ADDRESS:7861 --secret SECRET    # or: run.bat --join ... --secret ...
+python data/build_code.py --local C:/projects/app --github-repos 200 --langs python,typescript
+python tokenizer/train_tokenizer.py --code --raw data/code --vocab 16384 --out tokenizer/bpe-code.json
+python tokenizer/train_tokenizer.py --encode --raw data/code --tok tokenizer/bpe-code.json --bin data/bin-code --fim-rate 0.5
+python finetune/finetune_lora.py --base Qwen/Qwen2.5-Coder-0.5B-Instruct --code data/code --examples 0 --seq 1024 --out runs/my-copilot
 ```
 
 See README.md for every option.
 
-# 18. Troubleshooting
+# 19. Troubleshooting
 
 | Problem | What to do |
 |---|---|
@@ -436,6 +508,9 @@ See README.md for every option.
 | Chat is slow with a fine-tuned model | Open the run and press **Make fast CPU copy**. |
 | A worker keeps saying "coordinator not reachable" | Check the address and port, and that the coordinator's firewall allows port 7861 (Windows asks once; allow it on private and public networks). From another network use the Internet address only when the card says "Reachable from other networks"; otherwise use Tailscale. The worker retries by itself. |
 | "403 wrong secret" when joining | Copy the secret again from the coordinator's Cluster page; a new secret is made each time a cluster starts unless you set one. |
+| A GitHub repository was "skipped, licence …" | Only permissive licences are used (section 9). Pick another repository. |
+| "GitHub rate limit reached; waiting" | Add a GitHub token on the Copilot tab, or let it wait; it continues by itself. |
+| A project file is missing from the collected code | It is in a `.gitignore`, a skipped folder (`build`, `vendor`, …), too big, minified, generated, or not a known language. The log lists how many files each reason skipped. |
 | Learning from news or ratings was "undone" | The quality gate saw the quick-check score drop; the previous model was kept. |
 
 Only use texts you have the right to use. This project trains on public-domain and openly licensed text, plus your own writing.

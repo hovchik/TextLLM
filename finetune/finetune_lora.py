@@ -15,6 +15,15 @@ length-bucketed batches (little padding) and a cache of the tokenized examples.
 Writes runs/<name>/adapter/ (LoRA weights + tokenizer), train_state.pt (optimizer, step, batch
 position), examples.pt (the tokenized examples), meta.json and metrics.jsonl; --gguf also makes the fast quantized copy for chat (export_gguf.py).
 Stopped, or moved to another PC? Run the same command again with --resume to continue from the last save.
+
+Copilot (code) models: --code data/code adds examples cut from source files (data/build_code.py):
+  * fill-in-the-middle (--fim-rate): <|fim_prefix|>before<|fim_suffix|>after<|fim_middle|> → the missing code,
+    in the raw format code models use for editor completion;
+  * plain continuation: the code so far → the next lines;
+  * chat (--code-chat-share): "Complete this Python code: ..." with the Code assistant system prompt,
+    so the model also helps in Chat.
+  python finetune/finetune_lora.py --base Qwen/Qwen2.5-Coder-0.5B-Instruct --code data/code --examples 0 \
+      --code-examples 4000 --seq 1024 --out runs/my-copilot
 """
 import argparse, contextlib, glob, hashlib, json, math, os, random, shutil, subprocess, sys, time
 
@@ -25,6 +34,8 @@ ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, ROOT)
 import devices  # noqa: E402
 import graceful  # noqa: E402
+from coding import fim, langs as L  # noqa: E402
+from writing import formats as F  # noqa: E402
 from writing import hf  # noqa: E402
 
 EOT = "<|endoftext|>"
@@ -67,6 +78,13 @@ def args():
                     help="learn.py: the texts are temporary, so keep no tokenized copy (no data/cache, no "
                          "examples.pt) and leave the run's resume state (train_state.pt) as it was")
     ap.add_argument("--device", default="auto", help="auto (GPU if there is one), cuda, mps, xpu or cpu")
+    cg = ap.add_argument_group("copilot (code) examples")
+    cg.add_argument("--code", default=None, help="folder of code shards from data/build_code.py (e.g. data/code)")
+    cg.add_argument("--code-examples", type=int, default=4000, help="examples cut from the code")
+    cg.add_argument("--fim-rate", type=float, default=0.5, help="share of code examples that are fill-in-the-middle")
+    cg.add_argument("--code-chat-share", type=float, default=0.2,
+                    help="share of code examples in chat form (Chat → Code assistant)")
+    cg.add_argument("--code-langs", default="", help="only these languages, e.g. python,typescript (empty = all)")
     return ap.parse_args()
 
 
@@ -103,11 +121,90 @@ def book_pairs(tok, raw, n, seq, rng, per_doc=8, min_chars=5000):
     return pairs
 
 
-def encode(tok, pairs, seq):
+def code_docs(code_dir, rng, langs):
+    """Yield code documents (one source file each) from the shards under code_dir, in random order."""
+    files = sorted(glob.glob(os.path.join(code_dir, "**", "*.txt"), recursive=True))
+    if not files:
+        raise SystemExit(f"no code under {code_dir} (collect some first: Training → Copilot, or data/build_code.py)")
+    rng.shuffle(files)
+    for f in files:
+        docs = [d.strip("\n") for d in open(f, encoding="utf-8").read().split(EOT) if d.strip()]
+        rng.shuffle(docs)
+        for d in docs:
+            if L.is_code_doc(d) and (not langs or L.wanted(L.doc_lang(d) or "", langs)):
+                yield d
+
+
+def code_window(doc, rng, max_chars):
+    """A piece of a long file that fits the example: the header line plus whole lines from a random start."""
+    head, _, body = doc.partition("\n")
+    if len(body) <= max_chars:
+        return doc
+    lines = body.splitlines(keepends=True)
+    i = rng.randrange(0, len(lines))
+    while i > 0 and sum(map(len, lines[i:])) < max_chars // 2:
+        i -= 1
+    out, n = [], 0
+    for ln in lines[i:]:
+        if n + len(ln) > max_chars and out:
+            break
+        out.append(ln)
+        n += len(ln)
+    return head + "\n" + "".join(out)
+
+
+def code_pairs(tok, code_dir, n, seq, rng, fim_rate=0.5, chat_share=0.2, langs=None, per_doc=8):
+    """Examples for a copilot: fill-in-the-middle, continuation (both raw) and chat-form completion."""
+    has_fim = fim.token_ids(tok) is not None
+    if fim_rate > 0 and not has_fim:
+        print("this base model's tokenizer has no fill-in-the-middle tokens; using continuation examples instead")
+    system = F.system_prompt("code")
+    max_chars = int(seq * 2.6)  # ~3 characters per token in code, keeping room for the answer
     out = []
+    for doc in code_docs(code_dir, rng, langs):
+        for _ in range(min(per_doc, max(1, len(doc) // max(1, max_chars)))):
+            w = code_window(doc, rng, max_chars)
+            r = rng.random()
+            if r < chat_share:
+                head, _, body = w.partition("\n")
+                lines = body.splitlines(keepends=True)
+                if len(lines) < 4:
+                    continue
+                cut = rng.randrange(max(1, len(lines) // 3), len(lines) - 1)
+                k = rng.randint(1, 15)
+                lang = L.doc_lang(w) or "code"
+                f = L.fence(lang)
+                before, nxt = "".join(lines[:cut]).rstrip("\n"), "".join(lines[cut:cut + k]).rstrip("\n")
+                if not nxt.strip():
+                    continue
+                prompt = (f"Complete this {lang} code from {L.doc_path(w)}. Reply with only the lines that come "
+                          f"next.\n\n```{f}\n{before}\n```")
+                out.append((prompt, f"```{f}\n{nxt}\n```", system, False))
+            elif has_fim and r < chat_share + (1 - chat_share) * fim_rate:
+                pre, mid, suf = fim.split(w, rng, max_middle=max_chars // 3)
+                if mid.strip():
+                    out.append((fim.psm(pre, suf), mid, None, True))
+            else:
+                cut = rng.randrange(max(1, len(w) // 4), max(2, len(w) * 3 // 4))
+                cut = w.rfind("\n", 0, cut) + 1 or cut
+                if w[cut:].strip():
+                    out.append((w[:cut], w[cut:cut + max_chars // 3], None, True))
+            if len(out) >= n:
+                return out
+    return out
+
+
+def encode(tok, pairs, seq):
+    """pairs: (prompt, response[, system[, raw]]). raw=True examples (code completion) skip the chat
+    template: the prompt is given as it is and the response ends with the end-of-text token."""
+    out, end = [], None
     for pr in pairs:
-        prompt, resp, system = (pr + (None,))[:3]
-        p, full = fmt(tok, prompt, resp, system)
+        prompt, resp, system, raw = (tuple(pr) + (None, None))[:4]
+        if raw:
+            end = end if end is not None else fim.end_token(tok)
+            p, full = prompt, prompt + resp + end
+        else:
+            p, full = fmt(tok, prompt, resp, system)
         pi = tok(p, add_special_tokens=False)["input_ids"]
         fi = tok(full, add_special_tokens=False)["input_ids"][:seq]
         labels = [-100] * min(len(pi), len(fi)) + fi[len(pi):]  # loss only on the response
@@ -312,6 +409,8 @@ def write_meta(a):
     p = os.path.join(a.out, "meta.json")
     fresh = {"type": "lora", "base": a.base, "lora_r": a.lora_r,
              "instructions": bool(a.instructions), "book_share": a.book_share}
+    if getattr(a, "code", None):
+        fresh.update(task="code", fim=a.fim_rate > 0)
     own = os.path.join(a.out, "adapter")
     continuing = a.resume or (a.init_adapter and os.path.abspath(a.init_adapter) == os.path.abspath(own))
     old = {}
@@ -330,8 +429,12 @@ def load_or_encode(a, tok, rng, cache=True):
     """Build the example mix and tokenize it, cached on disk (re-tokenizing takes minutes).
     cache=False (private, temporary texts) never writes the tokenized examples to disk."""
     srcs = [a.instructions, a.extra] + sorted(glob.glob(os.path.join(a.raw, "**", "*.txt"), recursive=True))
+    if getattr(a, "code", None):
+        srcs += sorted(glob.glob(os.path.join(a.code, "**", "*.txt"), recursive=True))
     key = json.dumps([a.base, a.examples, a.seq, a.book_share, a.pairs_per_doc, a.min_doc_chars,
-                      [(p, os.path.getmtime(p)) for p in srcs if p and os.path.exists(p)]])
+                      [(p, os.path.getmtime(p)) for p in srcs if p and os.path.exists(p)]]
+                     + ([a.code, a.code_examples, a.fim_rate, a.code_chat_share, a.code_langs]
+                        if getattr(a, "code", None) else []))
     path = os.path.join(ROOT, "data", "cache", hashlib.sha1(key.encode()).hexdigest()[:16] + ".pt")
     if cache and os.path.exists(path):
         print(f"using cached tokenized examples ({os.path.relpath(path, ROOT)})")
@@ -349,8 +452,15 @@ def load_or_encode(a, tok, rng, cache=True):
     if a.extra:
         pairs += [(j["prompt"], j["response"], j.get("system"))
                   for j in map(json.loads, open(a.extra, encoding="utf-8")) if j]
+    if getattr(a, "code", None) and a.code_examples > 0:
+        print(f"building {a.code_examples} code examples from {a.code}...")
+        cp = code_pairs(tok, a.code, a.code_examples, a.seq, rng, a.fim_rate, a.code_chat_share,
+                        L.parse_langs(a.code_langs), a.pairs_per_doc)
+        print(f"{len(cp)} code examples ({sum(1 for c in cp if c[3] and c[0].startswith(fim.FIM_PREFIX))} "
+              f"fill-in-the-middle, {sum(1 for c in cp if not c[3])} chat)")
+        pairs += cp
     if not pairs:
-        raise SystemExit("no training examples: give --instructions or put .txt files under --raw")
+        raise SystemExit("no training examples: give --instructions or --code, or put .txt files under --raw")
     data = encode(tok, pairs, a.seq)
     if cache:
         os.makedirs(os.path.dirname(path), exist_ok=True)

@@ -840,11 +840,14 @@ def adopt_legacy(outdir):
 
 
 def hf_parquet(outdir, label, repo, dirs, max_gb, mode="stream", tries=30, cache="data/cache",
-               keep_parquet=False, column="text", filters=None, legacy=False, cache_name=None):
+               keep_parquet=False, column="text", filters=None, legacy=False, cache_name=None,
+               extra=(), make=None):
     """Stream the `column` text of a Hugging Face parquet dataset into shards, up to max_gb.
 
     filters maps column name -> predicate(value); a row is kept only if every predicate is true.
-    Filter columns are read first, so row groups with no matching rows never download their text."""
+    Filter columns are read first, so row groups with no matching rows never download their text.
+    make(text, row) turns a row into the document to save (row: the filter and `extra` columns);
+    it may return None to skip the row."""
     import pyarrow.parquet as pq
 
     p = Progress(outdir, label, int(max_gb * 1024**3), sha=None, file=None, row_group=0, skip_rows=0)
@@ -879,7 +882,8 @@ def hf_parquet(outdir, label, repo, dirs, max_gb, mode="stream", tries=30, cache
                 src = HttpFile(url, size, sess, tries)
             pf = retry(lambda: pq.ParquetFile(src), f"opening {path}", tries)
             try:
-                missing = [c for c in [column, *filters] if c not in pf.schema_arrow.names]
+                side = list(dict.fromkeys([*filters, *extra]))
+                missing = [c for c in [column, *side] if c not in pf.schema_arrow.names]
                 if missing:
                     raise SystemExit(f"{label}: {path} has no column(s) {missing}; columns are "
                                      f"{pf.schema_arrow.names}. The dataset layout changed, please report it.")
@@ -891,14 +895,16 @@ def hf_parquet(outdir, label, repo, dirs, max_gb, mode="stream", tries=30, cache
                         st["skip_rows"] -= rows
                         continue
                     used = st["skip_rows"]
-                    keep = range(used, rows)
-                    if filters:
-                        cols = pf.read_row_group(rg, columns=list(filters))
-                        vals = {c: cols.column(c).to_pylist() for c in filters}
+                    keep, vals = range(used, rows), {}
+                    if side:
+                        cols = pf.read_row_group(rg, columns=side)
+                        vals = {c: cols.column(c).to_pylist() for c in side}
                         keep = [i for i in keep if all(f(vals[c][i]) for c, f in filters.items())]
                     texts = pf.read_row_group(rg, columns=[column]).column(column).to_pylist() if keep else []
                     for i in keep:
                         t = texts[i]
+                        if make and t:
+                            t = make(t, {c: v[i] for c, v in vals.items()})
                         used = i + 1
                         if t:
                             p.write(t)

@@ -861,9 +861,11 @@ def crawler_state():
 class SourceReq(BaseModel):
     url: str | None = None
     name: str | None = None
-    kind: str | None = None          # feed | page | links
+    kind: str | None = None          # feed | page | links | mastodon | bluesky
     license: str | None = None
     rights_confirmed: bool | None = None
+    terms_confirmed: bool | None = None   # social sources: the server's terms allow it
+    min_chars: int | None = None          # social sources: skip shorter posts
     enabled: bool | None = None
     max_items: int | None = None
     credit: str | None = None

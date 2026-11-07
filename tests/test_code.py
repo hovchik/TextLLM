@@ -479,6 +479,7 @@ def auto_env(fake_github, tmp_path, monkeypatch):
     for k, v in {"CODE": code, "CODE_CFG": code / "sources.json", "STATE": tmp_path / "auto",
                  "SETTINGS": tmp_path / "auto" / "settings.json", "STATE_P": tmp_path / "auto" / "state.json",
                  "PENDING": tmp_path / "auto" / "pending", "LOG": tmp_path / "auto" / "log.txt",
+                 "LOCAL_SEEN": tmp_path / "auto" / "local.hashes",
                  "ROOT": tmp_path}.items():
         monkeypatch.setattr(code_update, k, str(v))
     code.mkdir()
@@ -532,6 +533,43 @@ def test_scheduled_updates_train_the_copilot_once_enough_is_new(auto_env, monkey
     assert "waiting" in cu.run_once(s, token="") and not trained  # 2 new files, training starts at 3
     assert "trained on 3 files" in cu.run_once(s, token="")
     assert trained == [(str(run), 7, 3)] and pending_docs(cu) == [] and cu.load_state()["trained_files"] == 3
+
+
+def test_a_failed_run_is_queued_by_the_next_one(auto_env, monkeypatch, project):
+    cu = auto_env
+    real = cu.add_pending
+    monkeypatch.setattr(cu, "add_pending", lambda docs: (_ for _ in ()).throw(RuntimeError("disk full")))
+    s = {**cu.DEFAULTS, "github_new": 1}
+    with pytest.raises(RuntimeError):
+        cu.run_once(s, token="")
+    assert json.load(open(os.path.join(cu.CODE, "github", "progress.json")))["done"] == ["alice/good"]
+    monkeypatch.setattr(cu, "add_pending", real)
+    s["github_new"] = 0
+    cu.run_once(s, token="")  # nothing new on GitHub, but the files of the failed run are queued now
+    assert len(pending_docs(cu)) == 2
+    cu.run_once(s, token="")
+    assert len(pending_docs(cu)) == 2
+    # project folders: what was there before is not queued, a new file is
+    cfg = json.load(open(cu.CODE_CFG))
+    json.dump({**cfg, "local_dirs": [str(project)]}, open(cu.CODE_CFG, "w"))
+    from data import build_code
+
+    build_code.local([str(project)], cu.CODE, set(), 256)
+    s.update(local=True, refresh=False)
+    cu.run_once(s, token="")
+    assert len(pending_docs(cu)) == 2
+    (project / "src" / "new.py").write_text(PY_FILE.replace("add", "sub"))
+    cu.run_once(s, token="")
+    assert len(pending_docs(cu)) == 3 and any("myapp/src/new.py" in d for d in pending_docs(cu))
+
+
+def test_scratch_update_mixes_earlier_code_only_with_the_same_tokenizer(auto_env, tmp_path):
+    cu = auto_env
+    (tmp_path / "tokenizer").mkdir()
+    (tmp_path / "tokenizer" / "bpe-code.json").write_text('{"model": 1}')
+    (tmp_path / "run.json").write_text('{"model": 1}')
+    (tmp_path / "other.json").write_text('{"model": 2}')
+    assert cu.same_tokenizer(str(tmp_path / "run.json")) and not cu.same_tokenizer(str(tmp_path / "other.json"))
 
 
 def test_lora_update_command_trains_only_the_new_code(auto_env, tmp_path):

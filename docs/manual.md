@@ -254,14 +254,19 @@ Several computers, at home or anywhere on the internet, can train **one** from-s
 **Start a cluster** (on the PC with the data):
 
 1. Run Data steps 1–3 first (section 5).
-2. Training → **Cluster** → *Start a cluster on this PC*: name, model size, rounds, minutes per round, learning rate, port (7861). Leave **This PC trains too** on to use this PC as a worker as well.
-3. Press **Start the cluster**. The card at the top shows the address and the secret, plus a ready-made command for other PCs, with a **Copy** button.
+2. Training → **Cluster** → *Start a cluster on this PC*: name, model size, rounds, minutes per round, learning rate, port (7861). Leave **This PC trains too** on to use this PC as a worker as well, and **Let PCs on other networks join** on if any PC is somewhere else.
+3. Press **Start the cluster**. The card at the top shows the addresses and the secret, plus a ready-made command for other PCs, with a **Copy** button. Pick the address the other PC can reach: **Internet** (any network), **Tailscale** (any network, both PCs on Tailscale) or **Same network**.
 
 **Join from another PC:** either open its Studio → Training → Cluster → *Join a cluster*, paste the address and secret, and press **Join**; or, on a PC without the Studio, run `run.bat --join http://ADDRESS:7861 --secret SECRET` (`./run.sh` on Linux/macOS). The first run installs everything, including the GPU build of PyTorch when there is an NVIDIA card. The worker downloads its share of the text once (200 MB by default, resumable), then trains. **Leave** (or Ctrl+C) takes it out; it can rejoin at any time.
 
 ![This PC helping a cluster](manual/12e-cluster-join.png)
 
-**Over the internet.** The simplest safe way is a free private network such as **Tailscale** or ZeroTier installed on every PC; then use the coordinator's Tailscale address (100.x.y.z). The other way is to forward TCP port 7861 on the coordinator's router to it and use your public IP. The secret keeps strangers out, but the traffic itself is not encrypted, so prefer Tailscale.
+**PCs on other networks.** Only the PC that starts the cluster has to be reachable. The workers only connect out to it, like a browser opening a website, so a worker behind any home router or on mobile internet needs no setup.
+
+- With **Let PCs on other networks join** on, the coordinator asks its router to open the port (UPnP, switched on in most home routers) and closes it again when the cluster stops. When that works the card says **✓ Reachable from other networks** and lists an **Internet** address with your public IP.
+- When it says **Same network only**, the router refused or is not the one facing the internet (UPnP switched off, a second router behind the provider's box, or a provider that shares one public address between customers, which is common on mobile internet). Then install the free **Tailscale** on every PC and use the **Tailscale** address, or forward TCP port 7861 to this PC in the router's settings and use your public IP.
+
+The long secret keeps strangers out, but the traffic itself is not encrypted, so Tailscale is the most private choice.
 
 **What speedup to expect.** Roughly 0.6–0.9× each extra PC's own speed: four similar PCs train about 3× faster than one. A GPU worker adds much more than a CPU one. Rounds of 5–10 minutes keep the traffic low; shorter rounds help quality a little but cost more upload.
 
@@ -429,7 +434,7 @@ See README.md for every option.
 | A PDF gives no text | It's a scan: run OCR (`ocrmypdf`) first. |
 | A news source is "skipped until you confirm the rights" | Its license is copyrighted/unknown: tick that you have permission, or remove it. |
 | Chat is slow with a fine-tuned model | Open the run and press **Make fast CPU copy**. |
-| A worker keeps saying "coordinator not reachable" | Check the address and port, that the coordinator's firewall allows port 7861, and that both PCs are on Tailscale (or the port is forwarded). The worker retries by itself. |
+| A worker keeps saying "coordinator not reachable" | Check the address and port, and that the coordinator's firewall allows port 7861 (Windows asks once; allow it on private and public networks). From another network use the Internet address only when the card says "Reachable from other networks"; otherwise use Tailscale. The worker retries by itself. |
 | "403 wrong secret" when joining | Copy the secret again from the coordinator's Cluster page; a new secret is made each time a cluster starts unless you set one. |
 | Learning from news or ratings was "undone" | The quality gate saw the quick-check score drop; the previous model was kept. |
 

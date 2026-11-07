@@ -525,6 +525,7 @@ class ClusterReq(BaseModel):
     port: int = 7861
     secret: str = ""
     local_worker: bool = True     # this PC trains too
+    upnp: bool = True             # ask the router to open the port for PCs on other networks
     batch: int = 16               # this PC's worker
     accum: int = 4
 
@@ -569,7 +570,7 @@ def cluster_start(r: ClusterReq):
     secrets_p = os.path.join(CLUSTER_DIR, "secrets.json")   # run name -> secret, so a resume keeps it
     known = _read_json(secrets_p) or {}
     # Resuming keeps the run's secret (workers still hold it and reconnect by themselves).
-    secret = r.secret.strip() or (known.get(name) if resuming else None) or "-".join(_secrets.token_hex(3) for _ in range(3))
+    secret = r.secret.strip() or (known.get(name) if resuming else None) or "-".join(_secrets.token_hex(4) for _ in range(4))
     cmd = [PY, "cluster.py", "coordinator", "--out", out, "--preset", r.preset, "--vocab", str(r.vocab),
            "--rounds", str(max(1, r.rounds)), "--round-minutes", str(max(0.2, r.round_minutes)), "--lr", str(r.lr),
            "--min-lr", str(min(r.min_lr, r.lr) if r.min_lr > 0 else r.lr / 10), "--warmup", str(max(0, r.warmup)),
@@ -580,6 +581,8 @@ def cluster_start(r: ClusterReq):
            "--local-device", db.get_settings().get("device", "auto") or "auto"]
     if not r.nesterov:
         cmd.append("--no-nesterov")
+    if not r.upnp:
+        cmd.append("--no-upnp")
     if r.local_worker:
         cmd.append("--local-worker")
     if resuming:

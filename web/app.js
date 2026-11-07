@@ -336,6 +336,7 @@ function trainCluster() {
         <label class="field">Port<input class="input" id="c-port" type="number" value="7861"></label>
       </div>
       <label class="row"><span class="switch"><input type="checkbox" id="c-local" checked><span></span></span> This PC trains too</label>
+      <label class="row"><span class="switch"><input type="checkbox" id="c-upnp" checked><span></span></span> Let PCs on other networks join <span class="hint">asks the router to open the port (UPnP); closed again when the cluster stops</span></label>
       <details><summary>Advanced</summary><div class="grid g3" style="margin-top:12px">
         <label class="field">Secret<input class="input mono" id="c-secret" placeholder="made up for you"><span class="hint">workers must type it</span></label>
         <label class="field">Workers needed to start<input class="input" id="c-minw" type="number" min="1" value="1"></label>
@@ -372,13 +373,13 @@ function trainCluster() {
   <div class="card" style="margin-top:16px"><h2>How it works</h2><div class="muted">
     <p>Each round, every PC starts from the same model and trains on its own share of the text for the round's minutes. A GPU simply does more steps than a CPU. Then each PC sends how far its copy moved, the coordinator averages the moves (weighted by how much text each PC read) and everyone continues from the result. PCs can join or leave at any time.</p>
     <p>The internet only carries about one copy of the model each way per PC per round (the CPU size is ~${num(14 * 2)} MB), not gradients on every step, so home connections are fine. Expect roughly <b>0.6–0.9× the extra PCs' own speed</b> on top of yours: four similar PCs ≈ 3× faster than one. A slow PC never holds the others up.</p>
-    <p><b>Over the internet:</b> the simplest safe way is a free private network such as <b>Tailscale</b> or ZeroTier on every PC, then use the coordinator's Tailscale address. Otherwise forward the port (TCP ${7861}) on the coordinator's router. The secret protects the cluster, but the connection itself is not encrypted.</p>
+    <p><b>PCs on other networks:</b> only the PC that starts the cluster must be reachable; the others just connect out to it, so they need no router setup. When you start a cluster, the Studio asks your router to open the port (UPnP, on by default in most home routers) and shows an <b>Internet</b> address to share. If that fails (UPnP off, a second router, or a provider that shares one public address between customers, common on mobile internet), install the free <b>Tailscale</b> on every PC and use the <b>Tailscale</b> address, or forward TCP port 7861 to this PC in the router's settings. The long secret keeps strangers out; the connection itself is not encrypted, so Tailscale is the most private choice.</p>
     <p>On a PC without the Studio: <span class="mono">run.bat --join http://ADDRESS:7861 --secret SECRET</span> (or <span class="mono">./run.sh</span> on Linux/macOS).</p></div></div>`;
   const v = (k) => $("#" + k).value;
   try { const last = JSON.parse(localStorage.getItem("cluster-join") || "null"); if (last) { $("#j-addr").value = last.address || ""; $("#j-name").value = last.name || ""; } } catch {}
   $("#c-start").onclick = async () => {
     try {
-      await api("/api/cluster/start", { json: { name: v("c-name"), preset: v("c-preset"), rounds: +v("c-rounds"), round_minutes: +v("c-minutes"), lr: +v("c-lr"), port: +v("c-port"), local_worker: $("#c-local").checked, secret: v("c-secret"), min_workers: +v("c-minw"), vocab: +v("c-vocab"), min_lr: +v("c-minlr"), warmup: +v("c-warmup"), weight_decay: +v("c-wd"), outer_lr: +v("c-olr"), outer_momentum: +v("c-omom"), eval_every: +v("c-evalevery"), batch: +v("c-batch"), accum: +v("c-accum"), nesterov: $("#c-nesterov").checked, resume: $("#c-resume").checked } });
+      await api("/api/cluster/start", { json: { name: v("c-name"), preset: v("c-preset"), rounds: +v("c-rounds"), round_minutes: +v("c-minutes"), lr: +v("c-lr"), port: +v("c-port"), local_worker: $("#c-local").checked, upnp: $("#c-upnp").checked, secret: v("c-secret"), min_workers: +v("c-minw"), vocab: +v("c-vocab"), min_lr: +v("c-minlr"), warmup: +v("c-warmup"), weight_decay: +v("c-wd"), outer_lr: +v("c-olr"), outer_momentum: +v("c-omom"), eval_every: +v("c-evalevery"), batch: +v("c-batch"), accum: +v("c-accum"), nesterov: $("#c-nesterov").checked, resume: $("#c-resume").checked } });
       toast("Cluster started. Share the address and secret with the other PCs.", "ok");
       await poll(); drawClusterLive();
     } catch (e) { fail(e); }
@@ -406,7 +407,15 @@ async function drawClusterLive() {
     const now = Date.now() / 1000;
     const left = c.train_until ? Math.max(0, c.train_until - now) : null;
     const phase = { waiting: c.workers?.some((x) => x.state !== "left") ? "Waiting for the next round" : "Waiting for workers to join", training: `Round ${num((c.round || 0) + 1)} training · ${dur(left)} left`, averaging: "Averaging", finished: "Finished", stopped: "Stopped" }[c.phase] || "Starting…";
-    const addrs = (c.addresses || []).map((ip) => `http://${ip}:${c.port}`);
+    const KIND = { internet: "Internet", tailscale: "Tailscale", local: "Same network", loopback: "This PC" };
+    const reach = c.reach || {};
+    const opts = (reach.addresses || (c.addresses || []).map((ip) => ({ kind: "local", url: `http://${ip}:${c.port}`, note: "" })));
+    const addrs = opts.map((o) => o.url);
+    const up = reach.upnp;
+    const reachNote = !up ? `<span class="hint">Opening the router port automatically is off. PCs on other networks need Tailscale or a forwarded port ${c.port}.</span>`
+      : up.pending ? `<span class="hint">Asking the router to open port ${c.port} for PCs on other networks…</span>`
+      : up.ok && !up.error ? `<span class="pill good">✓ Reachable from other networks</span> <span class="hint">the router opened port ${c.port} automatically (UPnP); share the Internet address</span>`
+      : `<span class="pill warn">Same network only</span> <span class="hint">${esc(up.error || "the router did not open the port")}. For PCs elsewhere: install <b>Tailscale</b> on every PC (works through any router), or forward TCP port ${c.port} to this PC in the router's settings.</span>`;
     const live = (c.workers || []).filter((x) => x.state !== "left");
     html += `<div class="card"><div class="card-head"><h2>Cluster: ${esc(c.run)}</h2><div class="row" style="gap:8px">${c.running ? '<span class="pill good">● running</span>' : '<span class="pill">not running</span>'}<span class="hint">${esc(phase)}</span>${c.running ? `<button class="btn danger sm" id="cl-stop">${I.stop} Stop</button>` : ""}</div></div>
       <div class="stats" style="margin-top:6px">
@@ -416,8 +425,8 @@ async function drawClusterLive() {
         <div class="stat"><div class="l">Best val loss</div><div class="v">${num(c.best_val, 3)}</div></div>
         <div class="stat"><div class="l">Per transfer</div><div class="v">${num(c.transfer_mb ?? c.model_mb / 2)} MB</div></div>
       </div>
-      ${c.running ? `<div style="margin-top:12px"><b>Other PCs join with</b> <span class="hint">(pick the address they can reach; over the internet use your Tailscale address or forwarded public IP)</span>
-        <div class="grid g2" style="margin-top:8px"><label class="field">Address<select class="input mono" id="cl-addr">${addrs.map((a) => `<option>${esc(a)}</option>`).join("")}</select></label><label class="field">Secret<input class="input mono" readonly value="${esc(c.secret)}" id="cl-secret"></label></div>
+      ${c.running ? `<div style="margin-top:12px"><b>Other PCs join with</b> <div style="margin-top:6px">${reachNote}</div>
+        <div class="grid g2" style="margin-top:8px"><label class="field">Address<select class="input mono" id="cl-addr">${opts.map((o) => `<option value="${esc(o.url)}">${esc(KIND[o.kind] || o.kind)}: ${esc(o.url)}</option>`).join("")}</select><span class="hint" id="cl-addr-note">${esc(opts[0]?.note || "")}</span></label><label class="field">Secret<input class="input mono" readonly value="${esc(c.secret)}" id="cl-secret"></label></div>
         <div class="row" style="margin-top:8px"><code class="mono" id="cl-cmd" style="flex:1;overflow:auto;white-space:nowrap">run.bat --join ${esc(addrs[0] || "")} --secret ${esc(c.secret)}</code><button class="btn sm" id="cl-copy">${I.copy} Copy</button></div></div>` : ""}
       <div class="table-scroll" style="margin-top:14px"><table><thead><tr><th>PC</th><th>Device</th><th>State</th><th>Rounds</th><th>Speed</th><th>Loss</th><th>Last seen</th></tr></thead><tbody>
         ${(c.workers || []).map((x) => `<tr><td><b>${esc(x.name)}</b><div class="hint mono">${esc(x.address || "")}${x.note ? " · " + esc(x.note) : ""}</div></td><td>${esc(x.device_name || x.device)}</td>
@@ -436,13 +445,17 @@ async function drawClusterLive() {
       </div>
       <details style="margin-top:12px"><summary>Log</summary><pre class="console" style="margin-top:8px">${esc(w.log || "")}</pre></details></div>`;
   }
+  S.clusterOpts = c?.reach?.addresses || [];
   const open = $$("#cl-live details").map((x) => x.open);
   const sel = $("#cl-addr")?.value;
   box.innerHTML = html;
   $$("#cl-live details").forEach((x, i) => (x.open = !!open[i]));
   if (sel && $("#cl-addr")) $("#cl-addr").value = sel;
   const cmd = () => `run.bat --join ${$("#cl-addr").value} --secret ${$("#cl-secret").value}`;
-  if ($("#cl-addr")) { $("#cl-cmd").textContent = cmd(); $("#cl-addr").onchange = () => ($("#cl-cmd").textContent = cmd()); }
+  if ($("#cl-addr")) {
+    const upd = () => { $("#cl-cmd").textContent = cmd(); const o = (S.clusterOpts || []).find((x) => x.url === $("#cl-addr").value); $("#cl-addr-note").textContent = o ? o.note : ""; };
+    upd(); $("#cl-addr").onchange = upd;
+  }
   if ($("#cl-copy")) $("#cl-copy").onclick = () => navigator.clipboard.writeText(cmd()).then(() => toast("Copied", "ok"), () => toast("Copy failed; select the text instead", "err"));
   for (const id of ["#cl-stop", "#wk-stop"]) {
     const b = $(id);

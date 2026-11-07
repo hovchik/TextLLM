@@ -113,7 +113,8 @@ def main():
     )
     if ck is not None:
         model.load_state_dict(ck["model"])
-        opt.load_state_dict(ck["opt"])  # moves the optimizer state to the parameters' device
+        if ck.get("opt"):  # a cluster-trained checkpoint (cluster.py) has no optimizer state
+            opt.load_state_dict(ck["opt"])  # moves the optimizer state to the parameters' device
         if ck.get("scaler") and scaler.is_enabled():
             scaler.load_state_dict(ck["scaler"])
         step, best = ck["step"], ck["best_val"]

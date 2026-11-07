@@ -88,8 +88,6 @@ class Writer:
     def __init__(self, out_dir):
         self.dir, self.n, self.f, self.size = out_dir, 0, None, 0
         os.makedirs(out_dir, exist_ok=True)
-        for old in glob.glob(os.path.join(out_dir, "shard_*.txt")):  # from an earlier clean
-            os.remove(old)
 
     def write(self, doc):
         if self.f is None or self.size >= SHARD_BYTES:
@@ -133,8 +131,14 @@ def main():
     srcs = sources(a.raw)
     if not srcs:
         sys.exit(f"No .txt shards under {a.raw}. Download a corpus first (data/build_corpus.py).")
-    if os.path.abspath(a.out) == os.path.abspath(a.raw):
-        sys.exit("--out must differ from --raw (the raw corpus is never modified).")
+    raw_real, out_real = os.path.realpath(a.raw), os.path.realpath(a.out)
+    if (raw_real == out_real or out_real.startswith(raw_real + os.sep)
+            or raw_real.startswith(out_real + os.sep)):
+        sys.exit("--out must not be, contain, or sit inside --raw (the raw corpus is never modified).")
+    # Start from an empty output: shards from an earlier run (including sources that are gone
+    # now) would otherwise still be picked up by the tokenizer.
+    for old in glob.glob(os.path.join(a.out, "*", "shard_*.txt")):
+        os.remove(old)
 
     lsh = None
     if not a.no_near:

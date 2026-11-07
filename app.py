@@ -335,7 +335,8 @@ def train(r: TrainReq):
         import glob
         inst = os.path.join(ROOT, "data/instructions/train.jsonl")
         use_inst = r.instructions and os.path.exists(inst)
-        if not use_inst and not glob.glob(os.path.join(ROOT, "data/raw/**/*.txt"), recursive=True):
+        resuming_saved = r.resume and os.path.exists(os.path.join(out, "train_cmd.json"))
+        if not resuming_saved and not use_inst and not glob.glob(os.path.join(ROOT, "data/raw/**/*.txt"), recursive=True):
             err("Add some text first: build writing instructions or download books (Training → Data).")
         cmd = [PY, "finetune/finetune_lora.py", "--out", out, "--base", r.base, "--examples", str(r.examples),
                "--seq", str(r.seq), "--batch", str(r.batch), "--grad-accum", str(r.accum), "--lr", str(r.lr),
@@ -458,6 +459,12 @@ def styles_train(pid: str, r: StyleTrainReq):
         err(str(e), 404)
     except ValueError as e:
         err(str(e))
+    # saved like /api/train does, so Resume on the Runs page continues with these settings (and --meta-extra)
+    rel = lambda c: os.path.relpath(c, ROOT).replace(os.sep, "/") if os.path.isabs(c) and c.startswith(ROOT) else c
+    json.dump([rel(c) for c in cmd[1:]], open(os.path.join(out, "train_cmd.json"), "w"))
+    mp = os.path.join(out, "metrics.jsonl")
+    if os.path.exists(mp):  # a fresh style run: keep the old curve aside, as /api/train does
+        os.rename(mp, os.path.join(out, f"metrics.{int(time.time())}.jsonl"))
     return _launch("training", styles.run_name(pid), cmd, os.path.join(out, "log.txt"), run=styles.run_name(pid))
 
 

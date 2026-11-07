@@ -130,6 +130,17 @@ except ValueError as e:
     assert "CC0" in str(e)
 assert len(own_posts.from_profile_link("https://w.example/@poet", mine=False, fetcher=F("<p>poems, CC BY 4.0</p>"))) == 1
 assert len(own_posts.from_profile_link("https://w.example/@poet", mine=True, fetcher=F("<p>just poems</p>"))) == 1
+# "keep replies" asks the API for replies; otherwise the API leaves them out
+seen = []
+class G(F):
+    def _request(self, url, host, headers=None, stream=False):
+        seen.append(url)
+        return F._request(self, url, host, headers, stream)
+own_posts.from_profile_link("https://w.example/@poet", mine=True, fetcher=G(""), replies=True)
+assert not any("exclude_replies" in u for u in seen), seen
+seen.clear()
+own_posts.from_profile_link("https://w.example/@poet", mine=True, fetcher=G(""))
+assert any("exclude_replies=true" in u for u in seen), seen
 
 # --- training pairs and the command
 try:

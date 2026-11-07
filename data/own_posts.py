@@ -233,7 +233,7 @@ def from_instagram_account(ig_user_id, token, limit=2000):
     return out
 
 
-def from_profile_link(url, mine, limit=500, fetcher=None):
+def from_profile_link(url, mine, limit=500, fetcher=None, replies=False):
     """A Mastodon or Bluesky profile through the public APIs. Not yours: only if its bio states CC0/BY/BY-SA."""
     host = url.split("/")[2].lower() if "//" in url else ""
     kind = "bluesky" if host in ("bsky.app", "www.bsky.app") else "mastodon"
@@ -245,7 +245,7 @@ def from_profile_link(url, mine, limit=500, fetcher=None):
         fetcher = Fetcher(delay=1.0)
     s = {"kind": kind, "url": url, "license": "own-rights" if mine else "cc-stated", "max_items": limit}
     out, refused = [], 0
-    for p in social.posts(fetcher, s):
+    for p in social.posts(fetcher, s, replies):
         if p["skip"] in ("author states no open license", "author opted out"):
             refused += 1
             continue
@@ -353,7 +353,7 @@ def import_source(pid, name, kind, mine=False, path=None, url=None, page_id=None
         why = social.not_supported(url or "")
         if why:
             raise ValueError(why + " " + NOT_POSSIBLE)
-        posts = from_profile_link(url, mine)
+        posts = from_profile_link(url, mine, replies=keep_replies)
     else:
         raise ValueError(f"unknown source {kind}")
     return add_posts(pid, name, kind, posts, mine, keep_replies, label=url if kind == "profile-link" else None)

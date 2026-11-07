@@ -112,6 +112,12 @@ def run_eval(run, formats=None, quick=False, limit=0, seed=0, max_tokens=None, o
     return res
 
 
+def counts(row):
+    """Whether a history.jsonl row scores the model: not unfinished (partial), not length-capped
+    (the feedback gate's short checks) and not of weights that were undone (rejected)."""
+    return not row.get("partial") and not row.get("max_tokens") and not row.get("rejected")
+
+
 def latest(run, quick=None):
     d = os.path.join(run, "eval")
     h = os.path.join(d, "history.jsonl")

@@ -49,22 +49,35 @@ DEFAULT_SETTINGS = {"device": "auto",  # where training and chat run: auto | cpu
                     "crawl_languages": "", "crawl_gate": True, "crawl_max_drop": 5}
 
 
+_conn = {}  # DB_PATH -> the process's one connection (every use holds _lock)
+
+
 def conn():
-    os.makedirs(os.path.dirname(DB_PATH), exist_ok=True)
-    c = sqlite3.connect(DB_PATH, check_same_thread=False)
-    c.row_factory = sqlite3.Row
-    c.execute("PRAGMA foreign_keys = ON")
+    """The shared connection. Opening one per query cost more than most queries (the sign-in
+    check runs one on every request). `with conn() as c` commits, or rolls back on an error."""
+    c = _conn.get(DB_PATH)
+    if c is None:
+        os.makedirs(os.path.dirname(DB_PATH), exist_ok=True)
+        c = sqlite3.connect(DB_PATH, check_same_thread=False, timeout=30)
+        c.row_factory = sqlite3.Row
+        c.execute("PRAGMA foreign_keys = ON")
+        _conn[DB_PATH] = c
     return c
 
 
-with conn() as _c:
-    _c.executescript(SCHEMA)
-    if "user_id" not in [r["name"] for r in _c.execute("PRAGMA table_info(conversations)")]:
-        _c.execute("ALTER TABLE conversations ADD COLUMN user_id INTEGER")  # owner (studio/auth.py)
-    _cols = [r["name"] for r in _c.execute("PRAGMA table_info(messages)")]
-    for _col, _type in (("format", "TEXT"), ("fields", "TEXT"), ("check_score", "REAL")):
-        if _col not in _cols:  # writing format of a request/answer, its form fields (JSON), automatic score
-            _c.execute(f"ALTER TABLE messages ADD COLUMN {_col} {_type}")
+def init():
+    """Create the tables and add columns that newer versions use (run at import)."""
+    with _lock, conn() as c:
+        c.executescript(SCHEMA)
+        if "user_id" not in [r["name"] for r in c.execute("PRAGMA table_info(conversations)")]:
+            c.execute("ALTER TABLE conversations ADD COLUMN user_id INTEGER")  # owner (studio/auth.py)
+        cols = [r["name"] for r in c.execute("PRAGMA table_info(messages)")]
+        for col, typ in (("format", "TEXT"), ("fields", "TEXT"), ("check_score", "REAL")):
+            if col not in cols:  # writing format of a request/answer, its form fields (JSON), automatic score
+                c.execute(f"ALTER TABLE messages ADD COLUMN {col} {typ}")
+
+
+init()
 
 
 def q(sql, args=(), one=False):

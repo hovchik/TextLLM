@@ -79,6 +79,18 @@ def autocast(dev, dtype):
     return nullcontext()
 
 
+def cpu_autocast(dev):
+    """bf16 autocast for training on a CPU with native bf16 matmuls (AVX-512 BF16 / AMX), about
+    1.7x faster there; weights and optimizer stay fp32. None elsewhere. TEXTLLM_BF16=0 turns it off."""
+    import torch
+
+    from writing import hf
+
+    if kind(dev) == "cpu" and hf.cpu_bf16_ok():
+        return torch.autocast("cpu", dtype=torch.bfloat16)
+    return None
+
+
 def grad_scaler(dev, dtype):
     """A GradScaler that only does something for fp16 (bf16/fp32 don't need loss scaling)."""
     import torch

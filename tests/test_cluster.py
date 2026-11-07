@@ -104,7 +104,9 @@ def test_wrong_secret_is_refused(cluster, tmp_path):
                 time.sleep(0.2)
         with pytest.raises(RuntimeError, match="403"):
             Client(f"http://127.0.0.1:{port}", "nope").call("POST", "/join", {"name": "x"}, retries=0)
-        info = good.call("POST", "/join", {"name": "late", "device": "cpu"})
+        with pytest.raises(RuntimeError, match="different version"):
+            good.call("POST", "/join", {"name": "old-copy", "device": "cpu"}, retries=0)
+        info = good.call("POST", "/join", {"name": "late", "device": "cpu", "protocol": 1})
         assert info["config"]["vocab_size"] == cluster["vocab"] and info["data"]["shard"] is None
     finally:
         coord.terminate()

@@ -254,6 +254,8 @@ latency would make synchronous training crawl:
 * Over the internet use Tailscale/ZeroTier (simplest and encrypted) or forward TCP 7861. Every request
   needs the shared secret; weights are loaded with `torch.load(weights_only=True)`, never as pickled code.
 
+Every PC uses its own clone of this repository (`git clone`, then `run.bat --join ...`); nothing has to be published or shared except the address and secret. Keep the clones on the same version (`git pull` on all of them): a worker from a different version is refused with a clear message.
+
 The result is a normal run (`runs/<name>/ckpt.pt`): chat, export or keep training it with `train.py --resume`.
 From the command line: `python cluster.py coordinator --out runs/cluster-writer --preset cpu --vocab 8192 --local-worker`
 and `python cluster.py worker --join http://ADDRESS:7861 --secret SECRET` (see `python cluster.py worker -h`).

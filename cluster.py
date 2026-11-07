@@ -323,6 +323,9 @@ class Coordinator:
         name = (str(body.get("name") or "worker")[:40]).strip() or "worker"
         with self.lock:
             wid = secrets.token_hex(4)
+            if body.get("protocol") != PROTOCOL:
+                raise ValueError("this PC's copy of Text LLM is a different version than the coordinator's; "
+                                 "update both copies from GitHub (git pull) and start again")
             if body.get("vocab_ok") is False:
                 raise ValueError("worker data does not fit this model's vocabulary")
             want = int(max(1, float(body.get("data_mb") or 0)) * 1e6 // 2) if body.get("data_mb") else 0
@@ -648,7 +651,7 @@ class Worker:
 
         info = self.client.call("POST", "/join", {"name": self.a.name, "device": self.dev, "device_name": devname,
                                                   "data_mb": None if self.local_data else self.a.data_mb,
-                                                  "torch": torch.__version__}, say=self.say)
+                                                  "torch": torch.__version__, "protocol": PROTOCOL}, say=self.say)
         self.wid = info["worker"]
         return info
 

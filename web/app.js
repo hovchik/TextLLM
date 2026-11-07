@@ -191,7 +191,7 @@ pages.dashboard = async () => {
   $$("[data-run]").forEach((b) => (b.onclick = () => openRun(b.dataset.run)));
   S.onStatus = (s) => { if (!!s.job.running !== !!$("#live")) route(); };
 };
-const deviceNote = (dv) => !dv ? "" : `<div class="hint">${dv.gpu ? "⚡ Training and chat run on the GPU" : "Training and chat run on the CPU"}: <b>${esc(dv.name)}</b>${dv.hint ? ` · ${esc(dv.hint)}` : ""}</div>`;
+const deviceNote = (dv) => !dv ? "" : `<div class="hint">${dv.gpu ? "⚡ Training and chat run on the GPU" : "Training and chat run on the CPU"}: <b>${esc(dv.name)}</b>${dv.hint ? ` · ${esc(dv.hint)}` : ""} · <a href="#/settings"><u>change</u></a></div>`;
 const kpi = (l, v, ic, sub) => `<div class="card kpi"><div class="ic">${ic}</div><div class="l">${l}</div><div class="v">${v}</div><div class="sub">${sub || ""}</div></div>`;
 const modelCard = (m) => `<div class="card model-card">
   <div class="row" style="justify-content:space-between"><div class="name">${esc(m.name)}</div>${typePill(m.type)}</div>
@@ -268,6 +268,17 @@ function trainNew() {
         <label class="field">Tokens / example<input class="input" id="f-seq" type="number" value="512"></label>
         <label class="field">LoRA rank<input class="input" id="f-lorar" type="number" value="8"><span class="hint">8 below 1B · 16 for 2B+</span></label>
         <label class="field">Passes over the data<input class="input" id="f-epochs" type="number" step="0.5" value="0"><span class="hint">0 = use training steps</span></label>
+      </div>
+      <div class="grid g4" style="margin-top:12px" id="adv-scratch">
+        <label class="field">Warmup steps<input class="input" id="f-warmup" type="number" min="0" value="0"><span class="hint">0 = automatic (steps ÷ 40)</span></label>
+        <label class="field">Final learning rate<input class="input" id="f-minlr" type="number" step="any" min="0" value="0"><span class="hint">0 = 0.00006</span></label>
+        <label class="field">Weight decay<input class="input" id="f-wd" type="number" step="0.01" min="0" value="0.1"></label>
+        <label class="row" style="align-self:center"><span class="switch"><input type="checkbox" id="f-compile"><span></span></span> torch.compile <span class="hint">faster on a GPU, slow start</span></label>
+      </div>
+      <div class="grid g3" style="margin-top:12px" id="adv-lora" hidden>
+        <label class="field">Continue from a fine-tuned model<select class="input" id="f-initfrom"><option value="">No, start a fresh adapter</option></select><span class="hint">Keeps what it learned and trains more on top. Same base model.</span></label>
+        <label class="field">Examples per book<input class="input" id="f-ppd" type="number" min="1" value="8"><span class="hint">max passages taken from one book</span></label>
+        <label class="field">Shortest book (characters)<input class="input" id="f-mindoc" type="number" min="0" step="500" value="5000"></label>
       </div><label class="row" style="margin-top:12px"><span class="switch"><input type="checkbox" id="f-resume"><span></span></span> Resume from the last checkpoint</label></details></div>
       <div class="row end"><button class="btn primary" id="start">${I.play} Start training</button></div>
     </div>
@@ -282,6 +293,7 @@ function trainNew() {
     st.mode = m;
     $$("#modes .opt").forEach((o) => o.classList.toggle("on", o.dataset.v === m));
     $("#sizebox").hidden = m !== "scratch"; $("#basebox").hidden = m === "scratch";
+    $("#adv-scratch").hidden = m !== "scratch"; $("#adv-lora").hidden = m === "scratch";
     Object.entries(m === "scratch" ? { steps: 20000, lr: 0.001, batch: 16, accum: 4, name: "my-writer" } : { steps: 300, lr: 0.0002, batch: 2, accum: 8, name: "my-social-writer" })
       .forEach(([k, v]) => ($("#f-" + k).value = v));
     expect();
@@ -290,12 +302,16 @@ function trainNew() {
   $$("#presets .opt").forEach((o) => (o.onclick = () => { st.preset = o.dataset.v; $$("#presets .opt").forEach((x) => x.classList.toggle("on", x === o)); }));
   const baseHint = () => { const b = BASES.find((x) => x.id === $("#f-basepick").value); $("#f-basehint").textContent = b ? b.h : "Any causal LM on Hugging Face"; if (b) { $("#f-base").value = b.id; $("#f-lorar").value = b.r; } };
   $("#f-basepick").onchange = baseHint; baseHint();
+  api("/api/models").then((ms) => {
+    $("#f-initfrom").innerHTML += ms.filter((x) => x.type === "lora").map((x) => `<option value="${esc(x.name)}" data-base="${esc(x.base || "")}">${esc(x.name)}${x.base ? " · " + esc(x.base) : ""}</option>`).join("");
+  }).catch(() => {});
+  $("#f-initfrom").onchange = () => { const b = $("#f-initfrom").selectedOptions[0].dataset.base; if (b) { $("#f-base").value = b; const known = BASES.some((x) => x.id === b); $("#f-basepick").value = known ? b : ""; } };
   $("#f-bookshare").oninput = (e) => ($("#f-bsv").textContent = e.target.value);
   expect();
   $("#start").onclick = async () => {
     const v = (k) => $("#f-" + k).value;
     try {
-      await api("/api/train", { json: { mode: st.mode, name: v("name"), resume: $("#f-resume").checked, preset: st.preset, vocab: +v("vocab"), steps: +v("steps"), batch: +v("batch"), accum: +v("accum"), lr: +v("lr"), base: v("base"), examples: +v("examples"), seq: +v("seq"), instructions: $("#f-inst").checked, book_share: +v("bookshare") / 100, lora_r: +v("lorar"), epochs: +v("epochs"), gguf: $("#f-gguf").checked } });
+      await api("/api/train", { json: { mode: st.mode, name: v("name"), resume: $("#f-resume").checked, preset: st.preset, vocab: +v("vocab"), steps: +v("steps"), batch: +v("batch"), accum: +v("accum"), lr: +v("lr"), base: v("base"), examples: +v("examples"), seq: +v("seq"), instructions: $("#f-inst").checked, book_share: +v("bookshare") / 100, lora_r: +v("lorar"), epochs: +v("epochs"), gguf: $("#f-gguf").checked, warmup: +v("warmup"), min_lr: +v("minlr"), weight_decay: +v("wd"), compile: $("#f-compile").checked, init_from: v("initfrom"), pairs_per_doc: +v("ppd"), min_doc_chars: +v("mindoc") } });
       toast(`Training <b>${esc(v("name"))}</b> started`, "ok");
       location.hash = "#/training/runs";
       setTimeout(() => openRun(v("name")), 400);
@@ -332,16 +348,43 @@ function trainData() {
             <li><b>Wikipedia</b>: encyclopedia articles in any language code (en, de, fr, hy...), CC BY-SA 4.0.</li>
             <li><b>Common Pile</b>: EleutherAI's openly licensed collection: CC news sites, Public Domain Review essays, open books, CC-licensed blogs. NC/ND rows are dropped.</li>
             <li>Not offered: BookCorpus, BookCorpusOpen, The Pile and RedPajama books (copyrighted books), Open Library (no book text).</li>
-          </ul></details></div>
+          </ul>
+          <div class="row" style="margin-top:8px"><label class="field" style="width:190px">Common Corpus language<input class="input" id="d-cclang" value="en" maxlength="12"><span class="hint">code, or <span class="mono">all</span></span></label></div></details>
+        <details style="margin-top:10px"><summary><b>Downloading</b> <span class="hint">for a connection that drops</span></summary>
+          <div class="row" style="margin-top:8px;flex-wrap:wrap">
+            <label class="field" style="width:260px">Hugging Face sources<select class="input" id="d-hfmode"><option value="stream">Stream (read parts over HTTP)</option><option value="download">Download whole files first (resumable)</option></select></label>
+            <label class="field" style="width:150px">Retries per request<input class="input" id="d-retries" type="number" min="0" value="30"><span class="hint">30 ≈ 45 min offline</span></label>
+            <label class="field" style="width:150px">Parallel downloads<input class="input" id="d-workers" type="number" min="1" max="64" value="8"></label>
+            <label class="row hint" style="align-self:center"><span class="switch"><input type="checkbox" id="d-keepparq"><span></span></span> Keep downloaded parquet files</label>
+          </div></details></div>
         <button class="btn" data-step="download">${I.play} Run</button></div>
       <div class="step ${d.tokenizer ? "done" : ""}"><div class="num">${d.tokenizer ? "✓" : 2}</div><div><b>Build the tokenizer</b><div class="hint">${d.tokenizer ? `${num(d.vocab)}-token vocabulary` : "Learns the word pieces the model reads and writes"}</div>
-        <div class="row" style="margin-top:8px"><label class="field" style="width:200px">Vocabulary<select class="input" id="d-vocab"><option value="8192">8,192 (CPU)</option><option value="32000">32,000 (GPU)</option></select></label></div></div>
+        <div class="row" style="margin-top:8px"><label class="field" style="width:200px">Vocabulary<select class="input" id="d-vocab"><option value="8192">8,192 (CPU)</option><option value="32000">32,000 (GPU)</option></select></label>
+          <label class="field" style="width:200px">Files used to learn it<input class="input" id="d-samplefiles" type="number" min="1" value="40"><span class="hint">more = slower, slightly better</span></label></div></div>
         <button class="btn" data-step="tokenizer">${I.play} Run</button></div>
-      <div class="step ${d.train_tokens ? "done" : ""}"><div class="num">${d.train_tokens ? "✓" : 3}</div><div><b>Encode the corpus</b><div class="hint">${d.train_tokens ? `${num(d.train_tokens / 1e6, 1)}M tokens ready to train` : "Converts every text into token files for fast training"}</div></div>
+      <div class="step ${d.train_tokens ? "done" : ""}"><div class="num">${d.train_tokens ? "✓" : 3}</div><div><b>Encode the corpus</b><div class="hint">${d.train_tokens ? `${num(d.train_tokens / 1e6, 1)}M tokens ready to train` : "Converts every text into token files for fast training"}</div>
+          <div class="row" style="margin-top:8px"><label class="field" style="width:200px">Held out for validation (%)<input class="input" id="d-valfrac" type="number" min="0.01" max="50" step="0.1" value="0.5"></label></div></div>
         <button class="btn" data-step="encode">${I.play} Run</button></div>
       <div class="step ${d.instructions ? "done" : ""}"><div class="num">${d.instructions ? "✓" : 4}</div><div><b>Build writing instructions</b> <span class="pill">for fine-tuning</span><div class="hint">${d.instructions ? `${num(d.instructions)} examples of posts, stories and essays` : "Public-domain stories and essays from Gutenberg, your liked and corrected chat answers, and (optional) OpenAssistant + Dolly"}</div>
         <div class="row" style="margin-top:8px"><label class="row hint"><span class="switch"><input type="checkbox" id="d-hfsets" checked><span></span></span> Include oasst2 (Apache 2.0) and Dolly (CC BY-SA 3.0)</label></div>
-        <div class="hint" style="margin-top:6px">Your own posts and synthetic posts from a bigger model: see <code>data/build_instructions.py --help</code>.</div></div>
+        <details style="margin-top:8px"><summary><b>Your own posts</b> <span class="hint" id="d-mpcount"></span></summary>
+          <div class="hint" style="margin:6px 0">A <span class="mono">.txt</span> file with posts separated by <span class="mono">---</span> lines, or <span class="mono">.jsonl</span> with <span class="mono">{"format": "linkedin_post", "text": "..."}</span>. Only your own posts.</div>
+          <div class="files" id="d-mplist"></div>
+          <div class="row" style="margin-top:6px"><label class="btn sm">${I.upload} Add files<input type="file" id="d-mpfile" accept=".txt,.jsonl" multiple hidden></label>
+            <label class="row hint"><span class="switch"><input type="checkbox" id="d-mpuse" checked><span></span></span> Use them in this build</label></div></details>
+        <details style="margin-top:8px"><summary><b>More options</b> <span class="hint">Gutenberg, synthetic posts</span></summary>
+          <div class="row" style="margin-top:8px;flex-wrap:wrap">
+            <label class="row hint" style="width:100%"><span class="switch"><input type="checkbox" id="d-igut" checked><span></span></span> Stories and essays from Project Gutenberg</label>
+            <label class="field" style="width:130px">Stories<input class="input" id="d-istories" type="number" min="0" value="1200"></label>
+            <label class="field" style="width:130px">Essays<input class="input" id="d-iessays" type="number" min="0" value="1200"></label>
+            <label class="field" style="width:190px">Books to read per kind<input class="input" id="d-ibooks" type="number" min="1" value="300"></label>
+            <label class="field" style="width:110px">Seed<input class="input" id="d-iseed" type="number" value="0"></label>
+          </div>
+          <div class="row" style="margin-top:8px;flex-wrap:wrap">
+            <label class="field" style="width:300px">Model that writes example posts<input class="input" id="d-synth" placeholder="empty = none · e.g. Qwen/Qwen3-8B or C:\\models\\x.gguf"><span class="hint">Apache 2.0 model. Use a GPU; on CPU a 4B GGUF writes ~50 per format in hours.</span></label>
+            <label class="field" style="width:160px">Posts per format<input class="input" id="d-synthn" type="number" min="1" value="200"></label>
+            <label class="field" style="width:300px">Model that writes the requests<input class="input" id="d-bt" placeholder="empty = simple templates"><span class="hint">Back-translation: writes a better request for each text. GPU recommended.</span></label>
+          </div></details></div>
         <button class="btn" data-step="instructions">${I.play} Run</button></div>
     </div></div>
     <div class="card"><h2>Tips</h2><ul class="muted" style="padding-left:18px">
@@ -351,10 +394,20 @@ function trainData() {
     <div class="card" style="margin-top:16px"><div class="card-head"><h2>Log</h2></div><pre class="console" id="dlog">${esc(S.status.job.kind === "data" ? S.status.job.log : "No data job yet.")}</pre></div>`;
   $$("[data-step]").forEach((b) => (b.onclick = async () => {
     try {
-      await api("/api/data", { json: { step: b.dataset.step, books: +$("#d-books").value, web_gb: +$("#d-web").value, gutenberg_method: $("#d-gmethod").value, pg19_books: +$("#d-pg19").value, standard_ebooks: +$("#d-se").value, common_corpus_gb: +$("#d-cc").value, archive_books: +$("#d-ia").value, cosmopedia_gb: +$("#d-cosmo").value, cosmopedia_subsets: $("#d-cosmosub").value, wikipedia_gb: +$("#d-wiki").value, wikipedia_lang: $("#d-wikilang").value, common_pile_gb: +$("#d-cp").value, common_pile_subsets: $("#d-cpsub").value, vocab: +$("#d-vocab").value, hf_sets: $("#d-hfsets").checked } });
+      await api("/api/data", { json: { fineweb_mode: $("#d-hfmode").value, retries: +$("#d-retries").value, workers: +$("#d-workers").value, keep_parquet: $("#d-keepparq").checked, common_corpus_lang: $("#d-cclang").value, sample_files: +$("#d-samplefiles").value, val_frac: (+$("#d-valfrac").value || 0.5) / 100, inst_gutenberg: $("#d-igut").checked, inst_stories: +$("#d-istories").value, inst_essays: +$("#d-iessays").value, inst_books: +$("#d-ibooks").value, seed: +$("#d-iseed").value, inst_my_posts: $("#d-mpuse").checked, synth_model: $("#d-synth").value, synth_per_format: +$("#d-synthn").value, backtranslate: $("#d-bt").value, step: b.dataset.step, books: +$("#d-books").value, web_gb: +$("#d-web").value, gutenberg_method: $("#d-gmethod").value, pg19_books: +$("#d-pg19").value, standard_ebooks: +$("#d-se").value, common_corpus_gb: +$("#d-cc").value, archive_books: +$("#d-ia").value, cosmopedia_gb: +$("#d-cosmo").value, cosmopedia_subsets: $("#d-cosmosub").value, wikipedia_gb: +$("#d-wiki").value, wikipedia_lang: $("#d-wikilang").value, common_pile_gb: +$("#d-cp").value, common_pile_subsets: $("#d-cpsub").value, vocab: +$("#d-vocab").value, hf_sets: $("#d-hfsets").checked } });
       toast("Started", "ok"); poll();
     } catch (e) { fail(e); }
   }));
+  const drawMp = (list) => {
+    $("#d-mpcount").textContent = list.length ? `${list.length} file(s)` : "none yet";
+    $("#d-mplist").innerHTML = list.map((f) => `<span class="file">📄 ${esc(f.name)} <span class="faint">${num(f.kb)} KB</span><button data-mp="${esc(f.name)}" title="Remove">✕</button></span>`).join("");
+    $$("[data-mp]").forEach((x) => (x.onclick = async () => { try { drawMp(await api(`/api/data/my-posts/${encodeURIComponent(x.dataset.mp)}`, { method: "DELETE" })); } catch (e) { fail(e); } }));
+  };
+  api("/api/data/my-posts").then(drawMp).catch(() => {});
+  $("#d-mpfile").onchange = async (e) => {
+    const fd = new FormData(); [...e.target.files].forEach((f) => fd.append("files", f));
+    try { drawMp(await api("/api/data/my-posts", { method: "POST", body: fd })); toast("Added", "ok"); } catch (x) { fail(x); } finally { e.target.value = ""; }
+  };
   const prev = S.onStatus;
   S.onStatus = (s) => { prev && prev(s); const l = $("#dlog"); if (l && s.job.kind === "data") { l.textContent = s.job.log; l.scrollTop = 1e9; } };
 }
@@ -377,6 +430,9 @@ async function trainTexts() {
     <div class="grid g2" id="xlearn">
       <label class="field">Model to teach<select class="input" id="x-model">${models.map((m) => `<option value="${esc(m.name)}">${esc(m.label)}</option>`).join("") || "<option value=''>No trained models yet</option>"}</select></label>
       <label class="field"><span>Read each text <b id="x-pv">3</b> times</span><input type="range" id="x-passes" min="1" max="10" value="3"></label>
+      <details class="span2" style="grid-column:1/-1"><summary>Advanced</summary><div class="grid g2" style="margin-top:8px">
+        <label class="field">Old text mixed in, per new token<input class="input" id="x-mix" type="number" min="0" max="10" step="0.5" value="1"><span class="hint">From-scratch models only: keeps them from forgetting. 0 = only the new texts.</span></label>
+        <label class="field">Learning rate<input class="input" id="x-lr" type="number" min="0" step="any" value="0"><span class="hint">0 = automatic (0.0003 from scratch, 0.0001 fine-tuned)</span></label></div></details>
     </div>
     <div class="row end"><button class="btn primary" id="x-start">${I.play} Start</button></div>
   </div>
@@ -404,6 +460,7 @@ async function trainTexts() {
     fd.append("urls", $("#x-urls").value); fd.append("paths", $("#x-paths").value);
     fd.append("action", action); fd.append("model", $("#x-model").value);
     fd.append("passes", $("#x-passes").value); fd.append("delete_local", $("#x-del").checked);
+    fd.append("mix", $("#x-mix").value || "1"); fd.append("lr", $("#x-lr").value || "0");
     try {
       await api("/api/texts", { method: "POST", body: fd });
       toast(action === "learn" ? "Reading your texts and training…" : "Adding texts to the corpus…", "ok");
@@ -699,16 +756,23 @@ function drawRuns(rs) {
 async function openRun(name) {
   let timer;
   const close = modal(`<div class="row" style="justify-content:space-between"><div><h1 style="font-size:22px" id="r-title"></h1><div class="muted" id="r-sub"></div></div><div class="row" id="r-btns"></div></div>
-    <div class="stats" id="r-stats"></div><div class="card"><div class="card-head"><h2>Loss</h2><span class="hint">training · validation · learning from ratings</span></div><div id="r-chart"></div></div>
+    <div class="stats" id="r-stats"></div><div id="r-opts"></div><div class="card"><div class="card-head"><h2>Loss</h2><span class="hint">training · validation · learning from ratings</span></div><div id="r-chart"></div></div>
     <div><div class="card-head"><h2>Log</h2></div><pre class="console" id="r-log"></pre></div>`, (m) => {
+    let optsDrawn = false;
+    const drawOpts = async (s) => {
+      optsDrawn = true;
+      const fm = Object.fromEntries((await api("/api/formats").catch(() => [])).map((f) => [f.id, f.label]));
+      $("#r-opts", m).innerHTML = `<div class="card">${evalOptsHtml(fm)}${s.type === "lora" ? `<details style="margin-top:8px"><summary>Fast CPU copy options</summary><div class="row" style="margin-top:8px"><label class="field" style="width:260px">Quality<select class="input" id="r-quant"><option value="Q4_K_M">Q4_K_M · smallest, fastest (default)</option><option value="Q5_K_M">Q5_K_M · a bit better</option><option value="Q6_K">Q6_K · close to the original</option><option value="Q8_0">Q8_0 · near lossless, biggest</option></select></label></div><div class="hint">Making the copy again replaces the old one.</div></details>` : ""}</div>`;
+    };
     const load = async () => {
       if (!document.body.contains(m)) return clearInterval(timer);
       let d;
       try { d = await api(`/api/runs/${encodeURIComponent(name)}`); } catch (e) { clearInterval(timer); return fail(e); }
       const s = d.summary;
+      if (!optsDrawn && s.ready) drawOpts(s);
       $("#r-title", m).textContent = s.name;
       $("#r-sub", m).innerHTML = `${typePill(s.type)} ${s.base ? esc(s.base) : s.preset ? esc(s.preset) + " size" : ""} ${s.running ? '<span class="pill good">● training</span>' : ""}`;
-      $("#r-btns", m).innerHTML = `${s.ready ? `<button class="btn sm primary" id="r-chat">${I.chat} Chat</button>` : ""}${s.ready && !s.running ? `<button class="btn sm" id="r-eval" title="Score it on the 60 fixed prompts">Evaluate</button><button class="btn sm ghost" id="r-quick" title="8 prompts, a few minutes">Quick check</button>` : ""}${s.type === "lora" && s.ready && !s.running ? `<button class="btn sm ${s.fast ? "ghost" : ""}" id="r-gguf" title="Merge, convert to GGUF and quantize to 4-bit">${s.fast ? "⚡ Fast copy ✓" : "⚡ Make fast CPU copy"}</button>` : ""}${s.ready && !s.running ? `<button class="btn sm" id="r-resume" title="Continue training from the last checkpoint">${I.play} Resume</button><button class="btn sm ghost" id="r-export" title="Download as one .zip to continue on another PC">${I.download} Export</button>` : ""}${s.running ? `<button class="btn sm danger" id="r-stop">${I.stop} Stop</button>` : `<button class="btn sm ghost" id="r-del">${I.trash}</button>`}`;
+      $("#r-btns", m).innerHTML = `${s.ready ? `<button class="btn sm primary" id="r-chat">${I.chat} Chat</button>` : ""}${s.ready && !s.running ? `<button class="btn sm" id="r-eval" title="Score it on the 60 fixed prompts">Evaluate</button><button class="btn sm ghost" id="r-quick" title="8 prompts, a few minutes">Quick check</button>` : ""}${s.type === "lora" && s.ready && !s.running ? `<button class="btn sm ${s.fast ? "ghost" : ""}" id="r-gguf" title="Merge, convert to GGUF and quantize (quality under Fast CPU copy options)">${s.fast ? "⚡ Fast copy ✓ (redo)" : "⚡ Make fast CPU copy"}</button>` : ""}${s.ready && !s.running ? `<button class="btn sm" id="r-resume" title="Continue training from the last checkpoint">${I.play} Resume</button><button class="btn sm ghost" id="r-export" title="Download as one .zip to continue on another PC">${I.download} Export</button>` : ""}${s.running ? `<button class="btn sm danger" id="r-stop">${I.stop} Stop</button>` : `<button class="btn sm ghost" id="r-del">${I.trash}</button>`}`;
       $("#r-stats", m).innerHTML = [
         ["Progress", `${(s.progress * 100).toFixed(0)}%`], ["Step", `${num(s.step)} / ${num(s.max_steps)}`], ["ETA", s.running ? dur(s.eta_sec) : "—"],
         ["Train loss", num(s.train_loss, 3)], ["Val loss", num(s.val_loss, 3)], ["Perplexity", num(s.perplexity, 1)],
@@ -721,9 +785,9 @@ async function openRun(name) {
       log.textContent = d.log || "No log yet."; if (atEnd) log.scrollTop = 1e9;
       const on = (id, f) => { const b = $(id, m); if (b) b.onclick = f; };
       on("#r-chat", () => { close(); localStorage.setItem("chatModel", s.name); location.hash = "#/chat"; });
-      on("#r-eval", () => startEval(s.name, false).then(load));
-      on("#r-quick", () => startEval(s.name, true).then(load));
-      on("#r-gguf", async () => { try { await api(`/api/runs/${encodeURIComponent(s.name)}/gguf`, { method: "POST" }); toast("Making the fast CPU copy…", "ok"); poll(); load(); } catch (e) { fail(e); } });
+      on("#r-eval", () => startEval(s.name, false, readEvalOpts(m)).then(load));
+      on("#r-quick", () => startEval(s.name, true, readEvalOpts(m)).then(load));
+      on("#r-gguf", async () => { try { await api(`/api/runs/${encodeURIComponent(s.name)}/gguf?quant=${encodeURIComponent($("#r-quant", m)?.value || "Q4_K_M")}`, { method: "POST" }); toast("Making the fast CPU copy…", "ok"); poll(); load(); } catch (e) { fail(e); } });
       on("#r-stop", async () => { await api("/api/stop", { method: "POST" }).catch(fail); toast("Stopped. The last checkpoint is kept."); load(); });
       on("#r-resume", async () => {
         try { await api("/api/train", { json: { mode: s.type, name: s.name, resume: true, preset: s.preset || "cpu", base: s.base || undefined, steps: s.max_steps, vocab: S.status?.data?.vocab || 8192 } }); toast("Resumed", "ok"); load(); } catch (e) { fail(e); }
@@ -742,8 +806,20 @@ async function openRun(name) {
   });
 }
 
-async function startEval(name, quick) {
-  try { await api("/api/eval", { json: { model: name, quick } }); toast(`${quick ? "Quick check" : "Evaluation"} of <b>${esc(name)}</b> started`, "ok"); poll(); }
+// Evaluate options (evaluate.py --formats/--limit/--max-tokens). A subset run is not comparable,
+// so the promotion gate ignores it.
+const evalOptsHtml = (fmts) => `<details class="evalopts"><summary>Evaluation options</summary><div class="row" style="margin-top:8px;flex-wrap:wrap;align-items:flex-start">
+  <label class="field" style="width:240px">Only these formats<select class="input" data-eo="formats" multiple size="4">${Object.entries(fmts).filter(([k]) => k !== "free").map(([k, l]) => `<option value="${esc(k)}">${esc(l)}</option>`).join("")}</select><span class="hint">None selected = all. Ctrl/⌘-click for several.</span></label>
+  <label class="field" style="width:150px">At most (prompts)<input class="input" data-eo="limit" type="number" min="0" value="0"><span class="hint">0 = all</span></label>
+  <label class="field" style="width:170px">Max answer length<input class="input" data-eo="max" type="number" min="0" step="16" value="0"><span class="hint">tokens · 0 = format default · lower is faster</span></label></div>
+  <div class="hint">Runs with only some formats or prompts are saved but not used by the promotion gate.</div></details>`;
+const readEvalOpts = (root) => {
+  const box = root && $(".evalopts", root);
+  if (!box) return {};
+  return { formats: [...$('[data-eo="formats"]', box).selectedOptions].map((o) => o.value).join(","), limit: +$('[data-eo="limit"]', box).value || 0, max_tokens: +$('[data-eo="max"]', box).value || 0 };
+};
+async function startEval(name, quick, opts = {}) {
+  try { await api("/api/eval", { json: { model: name, quick, ...opts } }); toast(`${quick ? "Quick check" : "Evaluation"} of <b>${esc(name)}</b> started`, "ok"); poll(); }
   catch (e) { fail(e); }
 }
 
@@ -1016,7 +1092,7 @@ function evalSection(a, ev) {
     <div class="table-scroll"><table><thead><tr><th>Model</th><th>Overall</th>${fmts.map((f) => `<th>${esc(ev.formats[f])}</th>`).join("")}<th>Evaluated</th><th></th></tr></thead><tbody>
       ${ready.map((r) => { const l = byModel[r.name]; return `<tr><td><b>${esc(r.name)}</b> ${r.name === ev.default_model ? '<span class="pill good">default</span>' : ""} ${r.fast ? '<span class="pill" title="Chat uses the quantized GGUF copy">⚡ fast</span>' : ""}</td>${cell(l?.score)}${fmts.map((f) => cell(l?.per_format?.[f])).join("")}
         <td class="muted">${l ? `${ago(l.time)}${l.quick ? " · quick" : ""}` : "never"}</td><td style="text-align:right;white-space:nowrap"><button class="btn sm" data-eval="${esc(r.name)}">Evaluate</button> <button class="btn sm ghost" data-quick="${esc(r.name)}">Quick</button></td></tr>`; }).join("") || `<tr><td colspan="${fmts.length + 4}" class="empty">No trained models yet</td></tr>`}
-    </tbody></table></div></div>
+    </tbody></table></div>${evalOptsHtml(ev.formats)}</div>
   <div class="grid g2">
     <div class="card" style="display:flex;flex-direction:column;gap:12px"><div class="card-head"><h2>Compare and promote</h2></div>
       <p class="hint" style="margin:0">A new model becomes the default only if it wins at least 55% of blind votes and no format's checks drop by more than 5 points.</p>
@@ -1033,8 +1109,8 @@ function evalSection(a, ev) {
   </tbody></table></div>`;
 }
 function bindEval(a, ev) {
-  $$("[data-eval]").forEach((b) => (b.onclick = () => startEval(b.dataset.eval, false)));
-  $$("[data-quick]").forEach((b) => (b.onclick = () => startEval(b.dataset.quick, true)));
+  $$("[data-eval]").forEach((b) => (b.onclick = () => startEval(b.dataset.eval, false, readEvalOpts(b.closest(".card")))));
+  $$("[data-quick]").forEach((b) => (b.onclick = () => startEval(b.dataset.quick, true, readEvalOpts(b.closest(".card")))));
   const cand = () => $("#g-cand").value, cur = () => $("#g-cur").value;
   const showGate = (g) => {
     const verdict = g.pass === true ? '<span class="pill good">passes</span>' : g.pass === false ? '<span class="pill bad">does not pass</span>' : '<span class="pill warn">not enough evidence</span>';
@@ -1082,6 +1158,11 @@ pages.feedback = async () => {
         <label class="row"><span class="switch"><input type="checkbox" id="auto" ${st.auto_train ? "checked" : ""}><span></span></span> Train automatically</label>
         <label class="field">After this many new ratings<input class="input" type="number" id="thr" min="1" value="${st.auto_threshold}"></label>
         <label class="row"><span class="switch"><input type="checkbox" id="gatefb" ${st.gate_on_feedback !== false ? "checked" : ""}><span></span></span> Quality gate: undo if quick checks get worse</label>
+        <details><summary>Training options</summary><div class="grid g3" style="margin-top:8px">
+          <label class="field">Passes<input class="input" type="number" id="fb-ep" min="0.5" max="20" step="0.5" value="${st.feedback_epochs ?? 3}"></label>
+          <label class="field">Learning rate<input class="input" type="number" id="fb-lr" min="0" step="any" value="${st.feedback_lr ?? 0.00005}"></label>
+          <label class="field">Preference strength<input class="input" type="number" id="fb-beta" min="0.01" max="2" step="0.01" value="${st.feedback_beta ?? 0.1}"><span class="hint">DPO beta</span></label></div>
+          <div class="hint">Used by "Train now" and by automatic learning.</div></details>
         <p class="hint" style="margin:0">Starts when the app is idle. Fine-tuned models use supervised + preference (DPO) training; from-scratch models re-read liked answers. The gate runs a quick check before and after (a few minutes on CPU).</p></div>
     </div>
     <div class="card"><div class="card-head"><h2>All rated answers</h2><div class="tabs" id="ff"><button class="on" data-f="all">All</button><button data-f="liked">Liked</button><button data-f="disliked">Disliked</button><button data-f="corrected">Corrected</button><button data-f="pending">Not learned yet</button></div></div>
@@ -1097,8 +1178,8 @@ pages.feedback = async () => {
   };
   draw("all");
   $$("#ff button").forEach((b) => (b.onclick = () => { $$("#ff button").forEach((x) => x.classList.toggle("on", x === b)); draw(b.dataset.f); }));
-  const save = async () => { try { S.status.settings = await api("/api/settings", { json: { auto_train: $("#auto").checked, auto_threshold: Math.max(1, +$("#thr").value), gate_on_feedback: $("#gatefb").checked } }); toast("Saved", "ok"); } catch (e) { fail(e); } };
-  $("#auto").onchange = save; $("#thr").onchange = save; $("#gatefb").onchange = save;
+  const save = async () => { try { S.status.settings = await api("/api/settings", { json: { auto_train: $("#auto").checked, auto_threshold: Math.max(1, +$("#thr").value), gate_on_feedback: $("#gatefb").checked, feedback_epochs: +$("#fb-ep").value || 3, feedback_lr: +$("#fb-lr").value || 0.00005, feedback_beta: +$("#fb-beta").value || 0.1 } }); toast("Saved", "ok"); } catch (e) { fail(e); } };
+  ["#auto", "#thr", "#gatefb", "#fb-ep", "#fb-lr", "#fb-beta"].forEach((id) => ($(id).onchange = save));
   $$("[data-train]").forEach((b) => (b.onclick = async () => {
     try { await api("/api/feedback/train", { json: { model: b.dataset.train } }); toast(`🎓 <b>${esc(b.dataset.train)}</b> is learning from your ratings`, "ok"); openRun(b.dataset.train); poll(); } catch (e) { fail(e); }
   }));
@@ -1121,12 +1202,27 @@ pages.settings = async () => {
         <label class="field"><span>Creativity <b id="s-tv">${p.temperature}</b></span><input type="range" id="s-temp" min="0" max="1.5" step="0.05" value="${p.temperature}"><span class="hint">Low = focused and predictable · high = surprising</span></label>
         <label class="field"><span>Max length <b id="s-mv">${p.max_tokens}</b> tokens</span><input type="range" id="s-max" min="32" max="1024" step="16" value="${p.max_tokens}"></label>
         <div class="row end"><button class="btn primary sm" id="s-save-chat">Save</button></div></div>
+      ${isAdmin() ? `<div class="card"><h2>Hardware <span class="pill">admin</span></h2>
+        <label class="field">Train and chat on<select class="input" id="s-device"></select><span class="hint" id="s-devhint"></span></label>
+        <div class="row end"><button class="btn primary sm" id="s-save-dev">Save</button></div></div>` : ""}
       <div class="card"><h2>Password</h2>
         <label class="field">Current password<input class="input" type="password" id="s-cur" autocomplete="current-password"></label>
         <label class="field">New password<input class="input" type="password" id="s-new" autocomplete="new-password"><span class="hint">At least 6 characters. Other devices get signed out.</span></label>
         <label class="field">Repeat new password<input class="input" type="password" id="s-new2" autocomplete="new-password"></label>
         <div class="row end"><button class="btn primary sm" id="s-save-pw">Change password</button></div></div>
     </div></div>`;
+  if (isAdmin()) {
+    const drawDev = async () => {
+      await poll();
+      const dv = S.status.device || {};
+      const ch = dv.choices || [{ id: "auto", name: "Automatic" }, { id: "cpu", name: "CPU" }];
+      if (dv.choice && !ch.some((c) => c.id === dv.choice)) ch.push({ id: dv.choice, name: `${dv.choice} (not found on this PC)` });
+      $("#s-device").innerHTML = ch.map((c) => `<option value="${esc(c.id)}" ${c.id === (dv.choice || "auto") ? "selected" : ""}>${esc(c.name)}</option>`).join("");
+      $("#s-devhint").innerHTML = `Now: <b>${esc(dv.name || "?")}</b>. Applies to the next training job and reloads chat models.${dv.hint ? "<br>" + esc(dv.hint) : ""}${!dv.cuda_build ? "<br>For an NVIDIA GPU this PyTorch has to be the CUDA build: close the Studio and run <span class=\"mono\">run.bat --gpu</span> (or <span class=\"mono\">./run.sh --gpu</span>)." : ""}`;
+    };
+    drawDev();
+    $("#s-save-dev").onclick = async () => { try { await api("/api/settings", { json: { device: $("#s-device").value } }); toast("Saved", "ok"); drawDev(); } catch (e) { fail(e); } };
+  }
   $("#s-temp").oninput = (e) => ($("#s-tv").textContent = e.target.value);
   $("#s-max").oninput = (e) => ($("#s-mv").textContent = e.target.value);
   const save = async (body, msg) => { try { setUser(await api("/api/me", { json: body })); toast(msg, "ok"); return true; } catch (e) { fail(e); } };

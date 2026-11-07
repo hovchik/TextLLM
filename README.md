@@ -49,7 +49,9 @@ python app.py        # open http://127.0.0.1:7860
 | **Analytics** | Writing-quality scores per format, blind A/B votes, promotion of the default model, ratings per format, validation loss, ratings per day, leaderboard, job history |
 | **Feedback** | Every rated answer, "Train now" per model, and automatic learning after N new ratings |
 | **Users** | Add people, set their role (admin or user), reset passwords, remove accounts |
-| **Settings** | Your display name, password and chat defaults (model, creativity, length) |
+| **Settings** | Your display name, password and chat defaults (model, creativity, length). Admins also pick the device: automatic, CPU or a specific GPU |
+
+Every script option you would normally need is in the Studio too: download mode, retries and workers for a flaky connection (Training → Data → *Downloading*), your own posts and synthetic posts for the writing instructions (step 4), warmup / weight decay / torch.compile and "continue from a fine-tuned model" (New model → *Advanced*), the GGUF quality level and evaluation subsets (open a run), and the ratings-training passes, learning rate and DPO strength (Feedback → *Training options*). Only the installer flags of `run.py` (`--gpu`, `--cpu`, `--torch-index`, `--reinstall`) stay on the command line, because they run before the Studio starts.
 
 ![dashboard](docs/studio-dashboard.png)
 ![chat](docs/studio-chat.png)

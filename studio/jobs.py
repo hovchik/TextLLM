@@ -29,7 +29,7 @@ def external_job():
     return info if _alive(info.get("pid")) else None
 
 
-def launch(kind, name, cmd, log_path, run=None, cleanup=()):
+def launch(kind, name, cmd, log_path, run=None, cleanup=(), env=None):
     with _lock:
         if running():
             raise RuntimeError(f"A job is already running ({JOB['kind']}: {JOB['name']}). Stop it first.")
@@ -44,7 +44,7 @@ def launch(kind, name, cmd, log_path, run=None, cleanup=()):
         logf.flush()
         # own process group, so Stop reaches the trainers a job starts, not just the job (graceful.py)
         proc = subprocess.Popen(cmd, cwd=ROOT, stdout=logf, stderr=subprocess.STDOUT,
-                                env={**os.environ, "PYTHONUNBUFFERED": "1"}, **graceful.popen_kwargs())
+                                env={**os.environ, "PYTHONUNBUFFERED": "1", **(env or {})}, **graceful.popen_kwargs())
         with open(LOCK_PATH, "w") as lk:
             lk.write(json.dumps({"pid": proc.pid, "kind": kind, "name": name, "started": time.time()}))
         JOB.update(proc=proc, name=name, kind=kind, log=log_path, run=run, started=time.time(),
@@ -55,6 +55,7 @@ def launch(kind, name, cmd, log_path, run=None, cleanup=()):
 
 def _watch(proc):
     rc = proc.wait()
+    _raw_scan["v"] = None  # a data job may have added or removed shards
     try:
         if json.load(open(LOCK_PATH)).get("pid") == proc.pid:
             os.remove(LOCK_PATH)
@@ -70,21 +71,41 @@ def _watch(proc):
                             "ended": time.time(), "exit": rc}) + "\n")
 
 
-def stop(grace=20):
-    """Stop the running job and everything it started. Works on Windows too (graceful.py)."""
+# Longer than graceful.run_child's 120 s, so a job that waits for its trainer to save (learn.py)
+# gets to finish, and its cleanup (deleting the extracted texts) runs before anything is killed.
+STOP_GRACE = 150
+
+
+def stop(grace=STOP_GRACE, wait=False):
+    """Stop the running job and everything it started. Works on Windows too (graceful.py).
+
+    Returns at once; a background thread force-kills the job if it is still running after `grace`
+    seconds. wait=True blocks until then (used when the Studio itself shuts down)."""
     p = JOB["proc"]
     if not running():
         return status()
     graceful.interrupt(p)
-    try:
-        p.wait(grace)
-    except subprocess.TimeoutExpired:
-        graceful.kill(p)
-        try:
-            p.wait(10)
-        except subprocess.TimeoutExpired:
-            pass
+
+    def reap():
+        if not _wait(p, grace):
+            graceful.kill(p)
+            _wait(p, 10)
+
+    if wait:
+        reap()
+    else:
+        threading.Thread(target=reap, daemon=True).start()
+        _wait(p, 2)  # most jobs exit within a moment; then the status below already says so
     return status()
+
+
+def _wait(p, seconds):
+    """True if the process ended within `seconds`."""
+    try:
+        p.wait(seconds)
+        return True
+    except subprocess.TimeoutExpired:
+        return False
 
 
 def tail(path, n=200):
@@ -114,21 +135,51 @@ def history(n=50):
 
 
 # ---------------------------------------------------------------- data & runs
+RAW_SCAN_TTL = 15  # seconds; the Studio asks for the status every 3 s
+_raw_scan = {"t": 0.0, "v": None}
+_vocab = {"key": None, "v": None}
+
+
+def _scan_raw():
+    """(files, MB, custom files) of data/raw. Walking thousands of book shards on every status
+    poll was the slowest part of /api/status, so the result is reused for a few seconds."""
+    if _raw_scan["v"] is None or time.time() - _raw_scan["t"] > RAW_SCAN_TTL:
+        raw = glob.glob(os.path.join(ROOT, "data/raw/**/*.txt"), recursive=True)
+        size = 0
+        for f in raw:
+            try:
+                size += os.path.getsize(f)
+            except OSError:  # removed while scanning (a crawl or data job is running)
+                pass
+        custom = sum(1 for f in raw if os.sep + "custom" + os.sep in f)
+        _raw_scan.update(t=time.time(), v=(len(raw), round(size / 1e6, 1), custom))
+    return _raw_scan["v"]
+
+
+def _vocab_size(tokp):
+    """Vocabulary size of the tokenizer file, re-read only when the file changes (it is MBs of JSON)."""
+    try:
+        st = os.stat(tokp)
+    except OSError:
+        return None
+    key = (st.st_mtime, st.st_size)
+    if _vocab["key"] != key:
+        try:
+            v = len(json.load(open(tokp, encoding="utf-8"))["model"]["vocab"])
+        except Exception:
+            v = None
+        _vocab.update(key=key, v=v)
+    return _vocab["v"]
+
+
 def data_status():
-    raw = glob.glob(os.path.join(ROOT, "data/raw/**/*.txt"), recursive=True)
-    custom = [f for f in raw if os.sep + "custom" + os.sep in f]
+    n_raw, raw_mb, n_custom = _scan_raw()
     tb = os.path.join(ROOT, "data/bin/train.bin")
     tokp = os.path.join(ROOT, "tokenizer/bpe.json")
-    vocab = None
-    if os.path.exists(tokp):
-        try:
-            vocab = len(json.load(open(tokp))["model"]["vocab"])
-        except Exception:
-            pass
     return {
-        "raw_files": len(raw), "raw_mb": round(sum(os.path.getsize(f) for f in raw) / 1e6, 1),
-        "custom_files": len(custom),
-        "tokenizer": os.path.exists(tokp), "vocab": vocab,
+        "raw_files": n_raw, "raw_mb": raw_mb,
+        "custom_files": n_custom,
+        "tokenizer": os.path.exists(tokp), "vocab": _vocab_size(tokp),
         "train_tokens": os.path.getsize(tb) // 2 if os.path.exists(tb) else 0,
         "instructions": _instruction_stats(),
     }
@@ -194,8 +245,10 @@ def run_summary(run_dir):
     ev_p = os.path.join(run_dir, "eval", "history.jsonl")
     ev = None
     if os.path.exists(ev_p):
+        from evaluate import counts
+
         try:
-            ev = [r for r in (json.loads(l) for l in open(ev_p) if l.strip()) if not r.get("partial")][-1]
+            ev = [r for r in (json.loads(l) for l in open(ev_p) if l.strip()) if counts(r)][-1]
         except (ValueError, IndexError):
             ev = None
     times = [r["time"] for r in rows]

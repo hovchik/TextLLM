@@ -51,6 +51,7 @@ import graceful  # noqa: E402
 from data.ingest import EOT, clean, from_docx, from_html, from_pdf  # noqa: E402
 from data import lang as langmod  # noqa: E402
 from data import social  # noqa: E402
+from evaluate import counts  # noqa: E402
 from graceful import run_child  # noqa: E402
 
 STATE = os.path.join(ROOT, "runs", "_crawler")
@@ -712,8 +713,7 @@ def quick_score(run, since=0):
     if not os.path.exists(h):
         return None
     rows = [r for r in (json.loads(l) for l in open(h) if l.strip())
-            if r.get("quick") and not r.get("partial") and not r.get("max_tokens") and not r.get("rejected")
-            and r["time"] >= since]
+            if r.get("quick") and counts(r) and r["time"] >= since]
     return rows[-1]["score"] if rows else None
 
 

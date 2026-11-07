@@ -12,6 +12,10 @@
     python run.py --no-venv          # use the current Python instead of .venv
     python run.py --no-fast          # skip llama-cpp-python (fast quantized chat on CPU)
     python run.py --lite             # skip the AI toolkit extras (requirements-ai.txt / -gpu.txt)
+    python run.py --join http://ADDRESS:7861 --secret SECRET
+                                     # don't start the Studio: set up, then lend this PC (CPU or GPU)
+                                     # to a cluster another PC started (Training → Cluster). Other
+                                     # worker options pass through, e.g. --name, --device, --data-mb
 
 What it does:
   1. Creates a virtual environment in .venv (first run only).
@@ -334,7 +338,13 @@ def main():
     ap.add_argument("--no-venv", action="store_true", help="use the current Python instead of .venv")
     ap.add_argument("--no-fast", action="store_true", help="don't install llama-cpp-python")
     ap.add_argument("--lite", action="store_true", help="don't install the AI toolkit extras")
-    a = ap.parse_args()
+    ap.add_argument("--join", metavar="URL", help="join a training cluster as a worker instead of starting the Studio")
+    ap.add_argument("--secret", help="the cluster's secret (with --join)")
+    a, extra = ap.parse_known_args()
+    if extra and not a.join:
+        ap.error(f"unrecognized arguments: {' '.join(extra)}")
+    if a.join and not a.secret:
+        ap.error("--join needs --secret (shown on the coordinator's Training → Cluster page)")
 
     if sys.version_info < (3, 9):
         sys.exit(f"[run] Python 3.9 or newer is needed (this is {sys.version.split()[0]}).")
@@ -349,6 +359,18 @@ def main():
 
     if a.cpu:
         os.environ["TEXTLLM_DEVICE"] = "cpu"  # the app and every training job it starts stay on the CPU
+    if a.join:
+        say(f"Joining the training cluster at {a.join}  (Ctrl+C to leave)")
+        proc = subprocess.Popen([py, os.path.join(ROOT, "cluster.py"), "worker", "--join", a.join, *extra], cwd=ROOT,
+                                env={**os.environ, "TEXTLLM_CLUSTER_SECRET": a.secret})
+        try:
+            sys.exit(proc.wait())
+        except KeyboardInterrupt:  # the worker got Ctrl+C too and says goodbye to the coordinator
+            try:
+                sys.exit(proc.wait(timeout=30))
+            except subprocess.TimeoutExpired:
+                proc.kill()
+                sys.exit(1)
     port = pick_port(a.host, a.port)
     shown = "127.0.0.1" if a.host == "0.0.0.0" else a.host
     url = f"http://{shown}:{port}"

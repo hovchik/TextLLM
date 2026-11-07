@@ -8,7 +8,8 @@ Three kinds of model:
 """
 import glob, json, os, threading
 
-import torch
+# torch is imported where a model is loaded, not here: app.py imports this module, and torch
+# takes a second or more to import, which would delay the Studio's start.
 
 ROOT = os.path.dirname(os.path.abspath(__file__))
 RUNS = os.path.join(ROOT, "runs")
@@ -30,6 +31,8 @@ def list_models():
             else os.path.isdir(os.path.join(d, "adapter")) or bool(gguf_path(d))
         if ready:
             label = "from scratch" if meta["type"] == "scratch" else f"fine-tuned {meta['base'].split('/')[-1]}"
+            if meta.get("style"):
+                label = f"writes like {meta['style']['name']}"
             out[f"{os.path.basename(d)} ({label})"] = d
     return out
 
@@ -78,8 +81,22 @@ def has_llama_cpp():
         return False
 
 
+def _Cancel(event):
+    """A transformers stopping criterion that ends generate() once `event` is set."""
+    import torch
+    from transformers import StoppingCriteria
+
+    class Cancel(StoppingCriteria):
+        def __call__(self, input_ids, scores, **kw):
+            return torch.full((input_ids.shape[0],), event.is_set(), dtype=torch.bool, device=input_ids.device)
+
+    return Cancel()
+
+
 class Engine:
     def __init__(self, run_dir, backend=None):
+        import torch
+
         self.run_dir = run_dir
         self.meta = json.load(open(os.path.join(run_dir, "meta.json")))
         self.device = devices.pick()
@@ -135,16 +152,18 @@ class Engine:
             pass
         return out
 
-    @torch.no_grad()
     def _stream_scratch(self, prompt, n, temperature, top_p):
         # The from-scratch model only continues text, so the message is used as the opening.
+        import torch
+
         ids = torch.tensor([self.tok.encode(prompt).ids], device=self.device)
-        start, stop = ids.shape[1], self.tok.token_to_id("<|endoftext|>")
-        for _ in range(n):
-            ids = self.model.generate(ids, 1, temperature, 50, top_p)
-            if ids[0, -1].item() == stop:
+        stop, new = self.tok.token_to_id("<|endoftext|>"), []
+        for nxt in self.model.stream(ids, n, temperature, 50, top_p):  # key/value cache: one token per step
+            t = nxt.item()
+            if t == stop:
                 break
-            yield prompt + self.tok.decode(ids[0, start:].tolist())
+            new.append(t)
+            yield prompt + self.tok.decode(new)
 
     def _stream_gguf(self, msgs, s):
         out = ""
@@ -157,7 +176,7 @@ class Engine:
                 yield out
 
     def _stream_hf(self, msgs, s):
-        from transformers import TextIteratorStreamer
+        from transformers import StoppingCriteriaList, TextIteratorStreamer
 
         text = hf.chat_text(self.tok, msgs)
         inputs = self.tok(text, return_tensors="pt", add_special_tokens=False).to(self.device)
@@ -167,11 +186,32 @@ class Engine:
                   temperature=max(t, 1e-5), top_p=s.get("top_p", 0.95), top_k=s.get("top_k", 40),
                   repetition_penalty=hf.repetition_from_presence(s.get("presence_penalty")),
                   pad_token_id=self.tok.pad_token_id or self.tok.eos_token_id)
-        threading.Thread(target=self.model.generate, kwargs=kw, daemon=True).start()
+        # generate() runs in a thread and feeds the streamer. If it fails (out of memory, ...) the
+        # streamer is closed so this loop ends and the error is reported instead of hanging with
+        # the model's lock held; if the reader goes away (browser stopped), generation is stopped
+        # before the lock is released, so two generations never share the model.
+        cancel, failed = threading.Event(), []
+        kw["stopping_criteria"] = StoppingCriteriaList([_Cancel(cancel)])
+
+        def run():
+            try:
+                self.model.generate(**kw)
+            except Exception as e:  # noqa: BLE001 - reported to the reader below
+                failed.append(e)
+                streamer.end()
+
+        th = threading.Thread(target=run, daemon=True)
+        th.start()
         out = ""
-        for piece in streamer:
-            out += piece
-            yield out
+        try:
+            for piece in streamer:
+                out += piece
+                yield out
+        finally:
+            cancel.set()
+            th.join()
+        if failed:
+            raise failed[0]
 
     # ------------------------------------------------------------ formats
     def write(self, fmt, message, fields=None, history=None, sampling=None):

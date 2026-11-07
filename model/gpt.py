@@ -55,12 +55,27 @@ class Attention(nn.Module):
         self.proj = nn.Linear(c.n_embd, c.n_embd, bias=False)
         self.dropout = c.dropout
 
-    def forward(self, x, cos, sin):
+    def forward(self, x, cos, sin, kv=None):
+        """kv: (cache, layer) during generation. The new keys/values are written into the cache's
+        preallocated buffers, so the next token only attends to what is stored (no copying)."""
         B, T, C = x.shape
         q, k, v = self.qkv(x).view(B, T, 3, self.n_head, self.head_dim).permute(2, 0, 3, 1, 4)
         q, k = apply_rope(q, cos, sin), apply_rope(k, cos, sin)
+        mask, causal = None, True
+        if kv is not None:
+            cache, i = kv
+            pos, end = cache.pos, cache.pos + T
+            if cache.k[i] is None:  # first use: room for the whole window
+                shape = (B, self.n_head, cache.size, self.head_dim)
+                cache.k[i], cache.v[i] = k.new_empty(shape), v.new_empty(shape)
+            cache.k[i][:, :, pos:end], cache.v[i][:, :, pos:end] = k, v
+            k, v = cache.k[i][:, :, :end], cache.v[i][:, :, :end]
+            if pos:
+                causal = False
+                if T > 1:  # new tokens see all cached ones plus the new ones up to themselves
+                    mask = torch.ones(T, end, dtype=torch.bool, device=x.device).tril(pos)
         y = F.scaled_dot_product_attention(
-            q, k, v, is_causal=True, dropout_p=self.dropout if self.training else 0.0
+            q, k, v, attn_mask=mask, is_causal=causal, dropout_p=self.dropout if self.training else 0.0
         )
         return self.proj(y.transpose(1, 2).reshape(B, T, C))
 
@@ -83,8 +98,8 @@ class Block(nn.Module):
         self.n1, self.attn, self.n2, self.mlp = RMSNorm(c.n_embd), Attention(c), RMSNorm(c.n_embd), MLP(c)
         self.drop = nn.Dropout(c.dropout)
 
-    def forward(self, x, cos, sin):
-        x = x + self.drop(self.attn(self.n1(x), cos, sin))
+    def forward(self, x, cos, sin, kv=None):
+        x = x + self.drop(self.attn(self.n1(x), cos, sin, kv))
         return x + self.drop(self.mlp(self.n2(x)))
 
 
@@ -113,33 +128,75 @@ class GPT(nn.Module):
     def num_params(self):
         return sum(p.numel() for p in self.parameters())
 
-    def forward(self, idx, targets=None):
+    def forward(self, idx, targets=None, cache=None):
+        """cache: from new_cache(), for generation. The new tokens are placed after the ones
+        already in the cache, and only the last position's logits are computed."""
         T = idx.shape[1]
-        assert T <= self.config.block_size
+        pos = cache.pos if cache is not None else 0
+        assert pos + T <= self.config.block_size
         x = self.wte(idx)
-        for b in self.blocks:
-            x = b(x, self.cos[:T], self.sin[:T])
+        cos, sin = self.cos[pos:pos + T], self.sin[pos:pos + T]
+        for i, b in enumerate(self.blocks):
+            x = b(x, cos, sin, (cache, i) if cache is not None else None)
+        if cache is not None:
+            cache.pos += T
+        if cache is not None and targets is None:
+            x = x[:, -1:]  # the vocabulary projection is the costliest layer; skip it for the prompt
         logits = self.lm_head(self.norm(x))
         loss = None
         if targets is not None:
             loss = F.cross_entropy(logits.float().view(-1, logits.size(-1)), targets.view(-1))
         return logits, loss
 
+    def new_cache(self):
+        return KVCache(len(self.blocks), self.config.block_size)
+
     @torch.no_grad()
-    def generate(self, idx, max_new_tokens, temperature=0.8, top_k=50, top_p=0.95, stop_id=None):
+    def stream(self, idx, max_new_tokens, temperature=0.8, top_k=50, top_p=0.95, stop_id=None, keep=0.75):
+        """Yield one sampled token per step, shape (B, 1), using a key/value cache so each step
+        only runs the new token through the model (instead of the whole context again).
+
+        When the context fills the model's window, the cache is rebuilt from the last
+        `keep` share of the window, so long texts keep going at the same speed."""
+        bs = self.config.block_size
+        cache, ctx = self.new_cache(), idx[:, -bs:]
+        logits, _ = self(ctx, cache=cache)
         for _ in range(max_new_tokens):
-            logits, _ = self(idx[:, -self.config.block_size:])
-            logits = logits[:, -1, :] / max(temperature, 1e-5)
-            if top_k:
-                v, _ = torch.topk(logits, min(top_k, logits.size(-1)))
-                logits[logits < v[:, [-1]]] = -float("inf")
-            if top_p < 1.0:
-                sl, si = torch.sort(logits, descending=True)
-                cum = torch.softmax(sl, -1).cumsum(-1)
-                sl[cum - torch.softmax(sl, -1) > top_p] = -float("inf")
-                logits = torch.full_like(logits, -float("inf")).scatter(1, si, sl)
-            nxt = torch.multinomial(torch.softmax(logits, -1), 1)
-            idx = torch.cat([idx, nxt], 1)
+            nxt = sample(logits[:, -1, :], temperature, top_k, top_p)
+            yield nxt
             if stop_id is not None and (nxt == stop_id).all():
-                break
-        return idx
+                return
+            ctx = torch.cat([ctx, nxt], 1)
+            if cache.pos >= bs:
+                ctx = ctx[:, -max(1, int(bs * keep)):]
+                cache.pos = 0  # reuse the buffers
+                logits, _ = self(ctx, cache=cache)
+            else:
+                logits, _ = self(nxt, cache=cache)
+
+    def generate(self, idx, max_new_tokens, temperature=0.8, top_k=50, top_p=0.95, stop_id=None):
+        out = [idx] + list(self.stream(idx, max_new_tokens, temperature, top_k, top_p, stop_id))
+        return torch.cat(out, 1)
+
+
+class KVCache:
+    """Keys and values of the tokens seen so far, per layer, for generation. Buffers hold the
+    whole window and are allocated on first use (batch size, device and dtype of the model)."""
+
+    def __init__(self, n_layer, size):
+        self.size, self.pos = size, 0
+        self.k, self.v = [None] * n_layer, [None] * n_layer
+
+
+def sample(logits, temperature=0.8, top_k=50, top_p=0.95):
+    """Pick the next token from (B, vocab) logits with temperature, top-k and nucleus sampling."""
+    logits = logits / max(temperature, 1e-5)
+    if top_k:
+        v, _ = torch.topk(logits, min(top_k, logits.size(-1)))
+        logits = logits.masked_fill(logits < v[:, [-1]], -float("inf"))
+    if top_p < 1.0:
+        sl, si = torch.sort(logits, descending=True)
+        p = torch.softmax(sl, -1)
+        sl = sl.masked_fill(p.cumsum(-1) - p > top_p, -float("inf"))  # keep the smallest set over top_p
+        logits = torch.full_like(logits, -float("inf")).scatter(1, si, sl)
+    return torch.multinomial(torch.softmax(logits, -1), 1)

@@ -166,7 +166,7 @@ def _json(f, url):
     return r.json(), r
 
 
-def _mastodon_posts(f, t, limit):
+def _mastodon_posts(f, t, limit, replies=False):
     base = f"https://{t['host']}/api/v1/"
     if t["api"] == "tag":
         path = f"timelines/tag/{quote(t['tag'])}?limit=40"
@@ -174,7 +174,7 @@ def _mastodon_posts(f, t, limit):
         path = "timelines/public?limit=40" + ("&local=true" if t["local"] else "")
     else:
         acc, _ = _json(f, base + "accounts/lookup?acct=" + quote(t["acct"]))
-        path = f"accounts/{acc['id']}/statuses?limit=40&exclude_replies=true&exclude_reblogs=true"
+        path = f"accounts/{acc['id']}/statuses?limit=40&exclude_reblogs=true" + ("" if replies else "&exclude_replies=true")
     got, max_id = [], None
     while len(got) < limit:
         page, _ = _json(f, base + path + (f"&max_id={max_id}" if max_id else ""))
@@ -205,9 +205,10 @@ def _mastodon_posts(f, t, limit):
                "lang": st.get("language"), "skip": skip}
 
 
-def _bsky_posts(f, t, limit):
+def _bsky_posts(f, t, limit, replies=False):
     if t["api"] == "author":
-        method, q = "app.bsky.feed.getAuthorFeed", f"actor={quote(t['actor'])}&filter=posts_no_replies&limit=100"
+        method, q = "app.bsky.feed.getAuthorFeed", \
+            f"actor={quote(t['actor'])}&filter={'posts_with_replies' if replies else 'posts_no_replies'}&limit=100"
     elif t["api"] == "feed":
         did = t["actor"]
         if not did.startswith("did:"):
@@ -252,11 +253,12 @@ def _bsky_posts(f, t, limit):
                "published": rec.get("createdAt"), "lang": (rec.get("langs") or [None])[0], "skip": skip}
 
 
-def posts(f, s):
-    """Yield posts of a social source: {url, text (scrubbed), author, published, lang, license, skip}."""
+def posts(f, s, replies=False):
+    """Yield posts of a social source: {url, text (scrubbed), author, published, lang, license, skip}.
+    replies=True also asks the API for the account's replies (they still come with skip="reply")."""
     t = parse_target(s["kind"], s["url"])
     gen = _mastodon_posts if s["kind"] == "mastodon" else _bsky_posts
-    for p in gen(f, t, s.get("max_items", 30)):
+    for p in gen(f, t, s.get("max_items", 30), replies):
         if not p["url"]:
             continue
         lic = stated_license(p["bio"])

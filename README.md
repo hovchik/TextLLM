@@ -82,6 +82,8 @@ python tokenizer/train_tokenizer.py --encode --raw data/clean --tok tokenizer/bp
 **Left out on purpose:** `flash-attn` (PyTorch's built-in `scaled_dot_product_attention`, which the GPT and transformers already use, gives most of the speed-up without a long CUDA compile that usually fails on Windows), `vllm` (a server for big GPUs, not laptops), `deepspeed` (multi-GPU clusters), and `unsloth` (pins its own torch and transformers versions, which conflicts with this stack).
 
 ## Text LLM Studio (web app)
+A step-by-step user manual with screenshots of every page: [docs/Studio-Manual.pdf](docs/Studio-Manual.pdf) (source: [docs/manual.md](docs/manual.md); rebuild with `docs/manual-build/build.sh`, needs pandoc and Playwright).
+
 | Page | What it does |
 |---|---|
 | **Dashboard** | KPIs, learning curves, setup checklist and your models at a glance |
@@ -90,7 +92,9 @@ python tokenizer/train_tokenizer.py --encode --raw data/clean --tok tokenizer/bp
 | **Analytics** | Writing-quality scores per format, blind A/B votes, promotion of the default model, ratings per format, validation loss, ratings per day, leaderboard, job history |
 | **Feedback** | Every rated answer, "Train now" per model, and automatic learning after N new ratings |
 | **Users** | Add people, set their role (admin or user), reset passwords, remove accounts |
-| **Settings** | Your display name, password and chat defaults (model, creativity, length) |
+| **Settings** | Your display name, password and chat defaults (model, creativity, length). Admins also pick the device: automatic, CPU or a specific GPU |
+
+Every script option you would normally need is in the Studio too: download mode, retries and workers for a flaky connection (Training → Data → *Downloading*), your own posts and synthetic posts for the writing instructions (step 4), warmup / weight decay / torch.compile and "continue from a fine-tuned model" (New model → *Advanced*), the GGUF quality level and evaluation subsets (open a run), and the ratings-training passes, learning rate and DPO strength (Feedback → *Training options*). Only the installer flags of `run.py` (`--gpu`, `--cpu`, `--torch-index`, `--reinstall`) stay on the command line, because they run before the Studio starts.
 
 ![dashboard](docs/studio-dashboard.png)
 ![chat](docs/studio-chat.png)
@@ -194,6 +198,31 @@ python data/crawl.py --add https://bsky.app/hashtag/shortstory --kind bluesky --
   (paid API, terms forbid training), Facebook, Instagram, Threads, LinkedIn and TikTok (no public
   API for this, terms forbid scraping). Adding one of their links explains why.
 
+## Write in your own style (style profiles)
+
+Training → **Your style** learns how one account writes (length, tone, vocabulary, emoji and hashtag
+habits) from its posts, then Chat writes new posts in that voice with the format
+**Write like a style profile**.
+
+1. **Import posts** into a profile. Sources:
+   - your **X archive** (Settings → Download an archive of your data), **Facebook** or **Instagram**
+     "Download your information" export (Format: JSON), or **Mastodon** archive. Upload the .zip; it is
+     read in place and deleted right after the import;
+   - a **Facebook Page** or **Instagram professional account you manage**, through the Meta Graph API
+     with a Page access token (used once, not stored);
+   - a **Mastodon or Bluesky profile**: yours, or one whose author states CC0 / CC BY / CC BY-SA.
+2. **Train**: a LoRA fine-tune (`runs/style-<profile>`), from the base model or on top of an
+   existing fine-tuned run so it keeps its writing skills. At least 30 posts.
+3. **Chat**: pick the `style-<profile>` model; give it a topic.
+
+```bash
+python data/own_posts.py --profile me --name "Me" --x-archive twitter.zip --i-own-these
+```
+
+Reposts, replies and photo-only posts are dropped; links, @mentions, e-mails and phone numbers are
+removed. Other people's Facebook, Instagram, Threads or X accounts can't be imported: Meta has no API
+for them and forbids scraping, and X's developer terms forbid training models on X content.
+
 ## CPU-only quick path (recommended for a laptop or desktop)
 CPU training is about 100× slower than a GPU, so this path uses a 14M-parameter model, an 8k vocabulary, and roughly 3,000 books.
 The `--gutenberg-max 3000` flag takes the first 3,000 English books in the catalog (about 1 GB, roughly 300M tokens).
@@ -225,10 +254,12 @@ All of these are off by default (0 = skip). Pick them in the Studio under Traini
 | `--common-corpus-gb G` | [Common Corpus](https://huggingface.co/datasets/PleIAs/common_corpus), only the "Open Culture" part (public-domain books and newspapers, OCR). `--common-corpus-lang en` or `all`. | public domain |
 | `--archive-books N` | Internet Archive scans published before 1931 (americana, toronto, europeanlibraries collections; never the lending library). OCR text, keep it a small share. | public domain (US) |
 | `--cosmopedia-gb G` | [Cosmopedia](https://huggingface.co/datasets/HuggingFaceTB/cosmopedia) synthetic text by Mixtral. `--cosmopedia-subsets stories,wikihow,...` (the GB are split evenly, one folder per subset) | Apache 2.0 |
+| `--wikipedia-gb G` | [Wikipedia](https://huggingface.co/datasets/wikimedia/wikipedia) (2023-11-01 dump). `--wikipedia-lang en` or any language code (`de`, `fr`, `hy`, ...); one folder per language. | CC BY-SA 4.0 |
+| `--common-pile-gb G` | [Common Pile v0.1](https://huggingface.co/collections/common-pile/common-pile-v01-filtered-data) (EleutherAI, openly licensed only). `--common-pile-subsets` picks parts, default `news,public_domain_review,pressbooks,cccc`; also `doab`, `wikimedia` (Wikibooks/Wikinews/Wikiquote/Wikisource/Wikiversity/Wikivoyage), `youtube`, `foodista`, `stackexchange`, `library_of_congress`, `pre_1929_books`, `oercommons`, `libretexts`, `uk_hansard`. The GB are shared in order, so a small part leaves its unused share to the next. Rows marked NC or ND are dropped. | CC BY / BY-SA / PD |
 
 ```bash
 python data/build_corpus.py --gutenberg-max 3000 --pg19-books 3000 --standard-ebooks 500 \
-    --cosmopedia-gb 0.3 --fineweb-gb 0.3
+    --cosmopedia-gb 0.3 --common-pile-gb 0.5 --fineweb-gb 0.3
 ```
 Left out on purpose: **BookCorpus** and **BookCorpusOpen** (copyrighted Smashwords books copied without permission),
 **The Pile** (contains Books3, taken down after a DMCA notice), **RedPajama's book subset** (PG-19 plus Books3),
@@ -237,6 +268,46 @@ and **Open Library dumps** (catalog metadata only, no book text). **Dolma's book
 
 It saves a checkpoint every 250 steps (about 20 minutes on 4 cores, sooner on more), so you can try `generate.py` while it trains.
 Expect grammatical, book-flavoured prose that drifts after a few sentences. It won't produce coherent stories or follow instructions.
+
+## Train on several PCs at once (cluster, over the internet)
+
+Several computers (CPU or GPU, any mix, at home or across the internet) can train one from-scratch
+model together. In the Studio: **Training → Cluster → Start a cluster on this PC** on the PC with
+the prepared data, then on every other PC either **Join a cluster** in its Studio or:
+
+```
+run.bat --join http://ADDRESS:7861 --secret SECRET      # ./run.sh on Linux/macOS; installs everything first
+```
+
+It uses local training with periodic averaging (DiLoCo-style), not per-step DDP, because internet
+latency would make synchronous training crawl:
+
+* Training runs in rounds (5 min by default). Each PC trains on its own share of the text for the
+  round's time with its own AdamW, as many steps as it manages (a GPU does more than a CPU).
+* Each PC uploads how far its weights moved (bf16). The coordinator averages the moves weighted by
+  tokens and takes one Nesterov-momentum outer step (lr 0.7, momentum 0.9). Workers then download
+  only the bf16 change. Traffic per PC per round ≈ one model copy each way: 28 MB for the CPU size,
+  220 MB for Small.
+* PCs can join or leave at any time; a slow PC never holds the others up; a stopped coordinator
+  resumes with `--resume` and the workers reconnect by themselves. Workers without data download
+  their share of `train.bin` once (resumable).
+* Expect about 0.6–0.9× each extra PC's own speed (four similar PCs ≈ 3× one PC).
+* PCs on other networks: only the coordinator must be reachable (workers connect out, so they need no
+  router setup). On start the coordinator asks its router to forward the port with UPnP (`netreach.py`,
+  standard library, closed again on stop; `--no-upnp` / the Studio toggle turns it off) and shows the
+  router's public address. If that fails (UPnP off, double NAT, carrier NAT on mobile internet) use
+  Tailscale on every PC, or forward TCP 7861 by hand. The Cluster tab lists Internet, Tailscale and
+  same-network addresses. Every request needs the shared 128-bit secret; weights are loaded with
+  `torch.load(weights_only=True)`, never as pickled code. The connection itself is plain HTTP, so
+  Tailscale is the most private choice. `TEXTLLM_UPNP_LOCATION` names the router's UPnP description URL
+  if it doesn't answer the multicast search.
+
+Every PC uses its own clone of this repository (`git clone`, then `run.bat --join ...`); nothing has to be published or shared except the address and secret. Keep the clones on the same version (`git pull` on all of them): a worker from a different version is refused with a clear message.
+
+The result is a normal run (`runs/<name>/ckpt.pt`): chat, export or keep training it with `train.py --resume`.
+From the command line: `python cluster.py coordinator --out runs/cluster-writer --preset cpu --vocab 8192 --local-worker`
+and `python cluster.py worker --join http://ADDRESS:7861 --secret SECRET` (see `python cluster.py worker -h`).
+Cluster mode covers from-scratch models; LoRA fine-tuning still runs on one PC.
 
 ## Move a model to another PC and keep training
 Both kinds of model can be stopped on one PC and continued on another (CPU or GPU, Windows or Linux).
@@ -302,6 +373,19 @@ python generate.py --prompt "Chapter One. The storm came in from the sea" --toke
 The architecture is a pre-norm decoder with RMSNorm, rotary position embeddings, SwiGLU MLP, and tied embeddings.
 Checkpoints are written to `checkpoints/ckpt.pt` at every evaluation.
 The default `--max-steps 100000` with batch 16×8×1024 is about 13B tokens, so lower it if you want a shorter run.
+
+Writing with a from-scratch model uses a key/value cache, so each new token runs only that token through the
+model (about 5–6× faster than recomputing the whole text). When the text outgrows the model's context, the
+last three quarters of the window are kept and generation continues. On CPUs with native bf16
+(AVX-512 BF16 or AMX, e.g. recent Xeons and AMD Zen 4/5) `train.py` runs matmuls in bf16 with fp32 weights,
+about 1.7× faster; set `TEXTLLM_BF16=0` to turn it off.
+
+## Tests
+
+    pip install pytest
+    python -m pytest
+
+They run offline on a CPU in well under a minute, using tiny models made on the spot (no downloads).
 
 ## Phase 2: a writing model for posts, stories and essays (LoRA)
 The recommended path on CPU: fine-tune a small Apache 2.0 instruct model on writing instructions, run it as a

@@ -79,6 +79,18 @@ def autocast(dev, dtype):
     return nullcontext()
 
 
+def cpu_autocast(dev):
+    """bf16 autocast for training on a CPU with native bf16 matmuls (AVX-512 BF16 / AMX), about
+    1.7x faster there; weights and optimizer stay fp32. None elsewhere. TEXTLLM_BF16=0 turns it off."""
+    import torch
+
+    from writing import hf
+
+    if kind(dev) == "cpu" and hf.cpu_bf16_ok():
+        return torch.autocast("cpu", dtype=torch.bfloat16)
+    return None
+
+
 def grad_scaler(dev, dtype):
     """A GradScaler that only does something for fp16 (bf16/fp32 don't need loss scaling)."""
     import torch
@@ -120,6 +132,25 @@ def info():
            "cuda_build": bool(torch.version.cuda)}
     if not out["gpu"] and not torch.version.cuda and _nvidia_present():
         out["hint"] = "An NVIDIA GPU is present but this PyTorch is the CPU build. Run run.bat / run.sh again to switch."
+    return out
+
+
+def available():
+    """Devices this PC can use, for the Studio's device picker: [{"id": "cuda:0", "name": ...}, ...]."""
+    out = [{"id": "auto", "name": "Automatic (fastest available)"}, {"id": "cpu", "name": "CPU"}]
+    try:
+        import torch
+    except ImportError:
+        return out
+    try:
+        for i in range(torch.cuda.device_count() if torch.cuda.is_available() else 0):
+            out.append({"id": f"cuda:{i}" if i else "cuda", "name": describe(f"cuda:{i}")})
+    except Exception:
+        pass
+    if _xpu_ok(torch):
+        out.append({"id": "xpu", "name": describe("xpu")})
+    if _mps_ok(torch):
+        out.append({"id": "mps", "name": describe("mps")})
     return out
 
 

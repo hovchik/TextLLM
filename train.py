@@ -17,6 +17,7 @@ from torch.nn.parallel import DistributedDataParallel as DDP
 import devices
 import graceful
 from model.gpt import GPT, GPTConfig, PRESETS
+from writing import hf
 
 
 def get_args():
@@ -78,12 +79,18 @@ def main():
     torch.manual_seed(1337 + rank)
     torch.backends.cuda.matmul.allow_tf32 = True
 
-    cuda = devices.kind(a.device) == "cuda"
+    kind = devices.kind(a.device)
+    cuda = kind == "cuda"
     dtype = devices.train_dtype(a.device)
     autocast = devices.autocast(a.device, dtype)
+    prec = str(dtype).split(".")[-1]
+    if kind == "cpu":
+        hf.set_threads()  # physical cores (or TEXTLLM_THREADS)
+        if cpu_ac := devices.cpu_autocast(a.device):
+            autocast, prec = cpu_ac, "fp32 + bf16 autocast"
     scaler = devices.grad_scaler(a.device, dtype)  # only active for fp16 (older NVIDIA GPUs)
     if master:
-        print(f"device {a.device}: {devices.describe(a.device)} · {str(dtype).split('.')[-1]}")
+        print(f"device {a.device}: {devices.describe(a.device)} · {prec}")
 
     cfg = GPTConfig(vocab_size=a.vocab, **PRESETS[a.preset])
     step, best = 0, float("inf")
@@ -106,7 +113,8 @@ def main():
     )
     if ck is not None:
         model.load_state_dict(ck["model"])
-        opt.load_state_dict(ck["opt"])  # moves the optimizer state to the parameters' device
+        if ck.get("opt"):  # a cluster-trained checkpoint (cluster.py) has no optimizer state
+            opt.load_state_dict(ck["opt"])  # moves the optimizer state to the parameters' device
         if ck.get("scaler") and scaler.is_enabled():
             scaler.load_state_dict(ck["scaler"])
         step, best = ck["step"], ck["best_val"]

@@ -41,12 +41,11 @@ def learn_scratch(a, meta, text_dir, tmp):
     cfg, step = ck["config"], ck["step"]
     tok = Tokenizer.from_file(tokenizer_path(a.run, meta))
     eot = tok.token_to_id(EOT)
-    ids = []
-    for f in os.listdir(text_dir):
-        for d in open(os.path.join(text_dir, f), encoding="utf-8").read().split(EOT):
-            if d.strip():
-                ids += tok.encode(d.strip()).ids + [eot]
-    new = np.array(ids, dtype=np.uint16)
+    docs = [d.strip() for f in sorted(os.listdir(text_dir))
+            for d in open(os.path.join(text_dir, f), encoding="utf-8").read().split(EOT) if d.strip()]
+    # encode_batch tokenizes on all cores; each document ends with the end-of-text token
+    parts = [np.array(e.ids + [eot], dtype=np.uint16) for e in tok.encode_batch(docs)]
+    new = np.concatenate(parts) if parts else np.zeros(0, dtype=np.uint16)
     block = cfg["block_size"]
     if len(new) < block + 2:
         raise SystemExit(f"text too short: {len(new)} tokens, need at least {block + 2}")
@@ -86,7 +85,8 @@ def learn_lora(a, meta, text_dir):
             "--pairs-per-doc", "1000", "--min-doc-chars", "500", "--seq", str(seq),
             "--batch", str(bs), "--grad-accum", str(acc), "--max-steps", str(steps),
             "--lr", str(a.lr or 1e-4),
-            "--eval-every", str(max(1, steps // 5)), "--save-every", str(steps), "--step-offset", str(last_step(a.run))]
+            "--eval-every", str(max(1, steps // 5)), "--save-every", str(steps), "--step-offset", str(last_step(a.run)),
+            "--private-texts"]
 
 
 def main():

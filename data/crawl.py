@@ -39,7 +39,7 @@ Without the Studio: --install-schedule 6 registers the crawl with Windows Task S
 cron) every 6 hours; --uninstall-schedule removes it. Only one crawl runs at a time, and the
 learn step waits while the Studio is running another job.
 """
-import argparse, hashlib, json, os, re, sqlite3, subprocess, sys, time
+import argparse, hashlib, json, os, re, sqlite3, sys, time
 import xml.etree.ElementTree as ET
 from email.utils import parsedate_to_datetime
 from urllib.parse import parse_qsl, urlencode, urljoin, urlsplit, urlunsplit
@@ -51,6 +51,7 @@ import graceful  # noqa: E402
 from data.ingest import EOT, clean, from_docx, from_html, from_pdf  # noqa: E402
 from data import lang as langmod  # noqa: E402
 from data import social  # noqa: E402
+from core import schedule  # noqa: E402
 from evaluate import counts  # noqa: E402
 from graceful import run_child  # noqa: E402
 
@@ -924,51 +925,17 @@ def crawl_command(learn=None, min_docs=20, passes=2, languages="", gate=True):
 
 def schedule_status():
     """Is the crawl registered with the OS scheduler (runs without the Studio)?"""
-    try:
-        if os.name == "nt":
-            r = subprocess.run(["schtasks", "/Query", "/TN", TASK_NAME, "/FO", "LIST"], capture_output=True, text=True)
-            return {"installed": r.returncode == 0, "kind": "Task Scheduler", "detail": r.stdout.strip()[-400:] if r.returncode == 0 else ""}
-        r = subprocess.run(["crontab", "-l"], capture_output=True, text=True)
-        line = next((l for l in r.stdout.splitlines() if TASK_NAME in l), "")
-        return {"installed": bool(line), "kind": "cron", "detail": line}
-    except FileNotFoundError:
-        return {"installed": False, "kind": "none", "detail": "no scheduler found"}
+    return schedule.status(TASK_NAME)
 
 
 def install_schedule(every_hours=6, learn=None, min_docs=20, passes=2, languages="", gate=True):
     """Register the crawl with Windows Task Scheduler or cron, so it runs when the Studio is closed."""
-    log = os.path.join(STATE, "log.txt")
-    os.makedirs(STATE, exist_ok=True)
-    cmd = crawl_command(learn, min_docs, passes, languages, gate)
-    q = lambda s: f'"{s}"' if " " in s or os.name == "nt" else s
-    hours = max(1, int(round(every_hours)))
-    if os.name == "nt":
-        tr = "cmd /c " + " ".join(q(c) for c in cmd) + f" >> {q(log)} 2>&1"
-        args = ["schtasks", "/Create", "/F", "/TN", TASK_NAME, "/SC", "HOURLY", "/MO", str(hours), "/TR", tr]
-        r = subprocess.run(args, capture_output=True, text=True)
-        if r.returncode != 0:
-            raise RuntimeError((r.stderr or r.stdout).strip() or "schtasks failed")
-        return f"Task Scheduler runs the crawl every {hours} h, also when the Studio is closed."
-    r = subprocess.run(["crontab", "-l"], capture_output=True, text=True)
-    lines = [l for l in (r.stdout.splitlines() if r.returncode == 0 else []) if TASK_NAME not in l]
-    sched = f"0 */{hours} * * *" if hours < 24 else "0 3 * * *"
-    lines.append(f"{sched} cd {q(ROOT)} && " + " ".join(q(c) for c in cmd) + f" >> {q(log)} 2>&1  # {TASK_NAME}")
-    r = subprocess.run(["crontab", "-"], input="\n".join(lines) + "\n", capture_output=True, text=True)
-    if r.returncode != 0:
-        raise RuntimeError((r.stderr or r.stdout).strip() or "crontab failed")
-    return f"cron runs the crawl every {hours} h, also when the Studio is closed."
+    return schedule.install(TASK_NAME, crawl_command(learn, min_docs, passes, languages, gate),
+                            os.path.join(STATE, "log.txt"), every_hours, ROOT, "the crawl")
 
 
 def uninstall_schedule():
-    if os.name == "nt":
-        r = subprocess.run(["schtasks", "/Delete", "/F", "/TN", TASK_NAME], capture_output=True, text=True)
-        if r.returncode != 0 and "cannot find" not in (r.stderr + r.stdout).lower():
-            raise RuntimeError((r.stderr or r.stdout).strip())
-        return "Removed from Task Scheduler."
-    r = subprocess.run(["crontab", "-l"], capture_output=True, text=True)
-    lines = [l for l in (r.stdout.splitlines() if r.returncode == 0 else []) if TASK_NAME not in l]
-    subprocess.run(["crontab", "-"], input="\n".join(lines) + ("\n" if lines else ""), capture_output=True, text=True)
-    return "Removed from cron."
+    return schedule.remove(TASK_NAME)
 
 
 def recover_batches():

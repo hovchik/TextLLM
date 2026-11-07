@@ -245,6 +245,11 @@ python train.py --data data/bin-code --vocab 16384 --preset cpu --out runs/my-co
 Use it in Chat (**Complete code at &lt;cursor&gt;**, **Code assistant**) or from an editor/script with
 `POST /api/code/complete {"model", "prefix", "suffix", "max_tokens"}` (signed-in session cookie).
 
+**Automatic updates** (Copilot tab, or `python data/code_update.py`): every N hours it adds new permissive
+repositories (your languages, topics and minimum stars), takes new commits of the ones you have and of your
+watchlist (only new or changed files), and can keep training a chosen copilot on just the new code.
+`--install-schedule HOURS` registers it with Task Scheduler or cron so it runs when the Studio is closed.
+
 ## CPU-only quick path (recommended for a laptop or desktop)
 CPU training is about 100× slower than a GPU, so this path uses a 14M-parameter model, an 8k vocabulary, and roughly 3,000 books.
 The `--gutenberg-max 3000` flag takes the first 3,000 English books in the catalog (about 1 GB, roughly 300M tokens).

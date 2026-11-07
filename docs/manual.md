@@ -295,6 +295,31 @@ POST http://127.0.0.1:7860/api/code/complete
 → {"completion": "a + b", "model": "my-copilot"}      (an example answer)
 ```
 
+## 9.4 Automatic updates
+
+The **Automatic updates** card, under the training options, keeps the copilot up to date with new public code without you pressing anything.
+
+![Automatic updates: new repositories, new commits and training on the new code](manual/12i-copilot-auto.png)
+
+Each run does three things:
+
+1. **New repositories.** It adds up to **New repositories per run** public repositories, using the languages, licences, minimum stars and token from the GitHub section above. **Topics** narrows the search to GitHub topics such as `cli,django,react`; a repository needs any one of them. When every search has been read to the end, the next run starts the searches again from the top, so newly popular repositories are found too.
+2. **New commits.** With **Take new commits** on, it asks GitHub whether each repository you already have was pushed since it was downloaded. If so, it downloads it again and adds only the files that are new or changed (duplicates are skipped as always). The repositories you listed under *…or exactly these repositories* are your **watchlist**: they are checked first on every run. **Repositories checked per run** caps the number of GitHub requests (without a token GitHub allows 60 an hour); the ones checked longest ago go first.
+3. **Your projects.** With **Re-read my projects** on, your project folders are read again and their changed files are added too.
+
+The licence rule stays the same. A repository whose licence stops being permissive, or whose LICENSE file disappears, gets no further updates. The code taken while it was permissive stays, and `ATTRIBUTION.md` keeps the licence each download had.
+
+**Then train.** Choose a copilot you trained here, and the code that is new since its last training is queued. When at least **Train when this many files are new** files are waiting, the copilot trains on just those files for **Training steps** steps:
+
+- a fine-tuned copilot continues its LoRA adapter, with fill-in-the-middle, continuation and chat examples cut from the new files;
+- a from-scratch copilot continues from its checkpoint with its own tokenizer. **Earlier code mixed in** adds that many tokens of `data/bin-code` per new token, so it doesn't forget what it learned before.
+
+Choose *No, only collect the code* to only grow the collection, for a bigger training run later.
+
+**When it runs.** Switch on **Run automatically** and set **Every (hours)**. The Studio then runs it while it is open, waiting if another job is busy. **Run when closed** registers it with Windows Task Scheduler (or cron on Linux and macOS), so it also runs when the Studio is closed. The task always uses the settings saved here, so press **Update** only after changing the interval. **Run now** starts one run at once. The card shows the last run and its result, how many files are waiting, and the update log. A scheduled run that finds the Studio busy skips that turn.
+
+From the command line: `python data/code_update.py` (one run with the saved settings), `--install-schedule 24` and `--uninstall-schedule`. The building blocks are also in `data/build_code.py`: `--github-new N`, `--topics cli,web`, `--refresh` and `--refresh-limit N`.
+
 # 10. Training: Corpus
 
 Shows what the models learn from: one row per folder under `data/raw/`.
@@ -492,6 +517,8 @@ python data/build_code.py --local C:/projects/app --github-repos 200 --langs pyt
 python tokenizer/train_tokenizer.py --code --raw data/code --vocab 16384 --out tokenizer/bpe-code.json
 python tokenizer/train_tokenizer.py --encode --raw data/code --tok tokenizer/bpe-code.json --bin data/bin-code --fim-rate 0.5
 python finetune/finetune_lora.py --base Qwen/Qwen2.5-Coder-0.5B-Instruct --code data/code --examples 0 --seq 1024 --out runs/my-copilot
+python data/code_update.py                         # automatic updates: one run with the Copilot tab's settings
+python data/code_update.py --install-schedule 24   # every 24 h, also when the Studio is closed
 ```
 
 See README.md for every option.

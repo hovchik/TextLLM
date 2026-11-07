@@ -17,7 +17,7 @@ def running():
 
 
 def external_job():
-    """A job started outside the Studio (the scheduled crawler training a model), from runs/_job.lock."""
+    """A job started outside the Studio (the scheduled crawler or code updates), from runs/_job.lock."""
     try:
         info = json.load(open(LOCK_PATH))
     except (OSError, ValueError):
@@ -35,7 +35,7 @@ def launch(kind, name, cmd, log_path, run=None, cleanup=(), env=None):
             raise RuntimeError(f"A job is already running ({JOB['kind']}: {JOB['name']}). Stop it first.")
         ext = external_job()
         if ext:
-            raise RuntimeError(f"The scheduled news crawler is training ({ext.get('name', 'crawl')}, "
+            raise RuntimeError(f"A scheduled job is running ({ext.get('name', 'crawl')}, "
                                f"since {time.strftime('%H:%M', time.localtime(ext.get('started', 0)))}). "
                                "Wait for it to finish.")
         os.makedirs(os.path.dirname(log_path), exist_ok=True)

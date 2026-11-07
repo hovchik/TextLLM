@@ -243,6 +243,8 @@ def code_delete(sid: str):
     if jobs.running() and jobs.JOB["kind"] == "data":
         err("Stop the running data job first.", 409)
     shutil.rmtree(d)
+    if parts == ["github"]:
+        auto.update_state(gh_queued=None)  # automatic updates start counting again from the new collection
     if parts == ["github"] and os.path.exists(os.path.join(CODE, "ATTRIBUTION.md")):
         os.remove(os.path.join(CODE, "ATTRIBUTION.md"))
     return code_state()

@@ -30,6 +30,7 @@ SETTINGS = os.path.join(STATE, "settings.json")
 STATE_P = os.path.join(STATE, "state.json")
 PENDING = os.path.join(STATE, "pending")
 LOG = os.path.join(STATE, "log.txt")
+LOCAL_SEEN = os.path.join(STATE, "local.hashes")   # project files already queued (or trained on before)
 CODE = os.path.join(ROOT, "data", "code")
 CODE_CFG = os.path.join(CODE, "sources.json")
 JOB_LOCK = os.path.join(ROOT, "runs", "_job.lock")
@@ -162,6 +163,25 @@ def github_mark():
     return st.get("shard", 0), st.get("shard_bytes", 0)
 
 
+def queued_mark():
+    """Where the last run's GitHub files were queued up to. It moves only after they are safely in pending/,
+    so a run that fails halfway is picked up again by the next one."""
+    now = github_mark()
+    m = load_state().get("gh_queued")
+    if m is None:  # first run: start from here, and remember it before collecting anything
+        update_state(gh_queued=list(now))
+        return now
+    m = tuple(m)
+    return m if m <= now else (0, 0)  # the GitHub code was deleted and collected again
+
+
+def load_local_seen():
+    try:
+        return set(open(LOCAL_SEEN).read().split())
+    except OSError:
+        return None
+
+
 def github_new_docs(mark):
     """GitHub shards only grow: everything after the checkpoint saved before this run is new."""
     idx, size = mark
@@ -212,6 +232,16 @@ def lora_cmd(run, meta, steps, empty_dir):
             "--step-offset", str(last_step(run)), "--private-texts"]
 
 
+def same_tokenizer(tok_p):
+    """data/bin-code is encoded with tokenizer/bpe-code.json; its token ids mean the same to this model only
+    when the model's own tokenizer copy is that same tokenizer (a rebuilt or imported one may differ)."""
+    shared = os.path.join(ROOT, "tokenizer", "bpe-code.json")
+    try:
+        return open(tok_p, "rb").read() == open(shared, "rb").read()
+    except OSError:
+        return False
+
+
 def scratch_cmd(run, meta, steps, mix, tmp):
     """Encode the new code with the model's own tokenizer (with fill-in-the-middle), mix in some of
     data/bin-code (what it learned before) and continue from the checkpoint."""
@@ -223,7 +253,8 @@ def scratch_cmd(run, meta, steps, mix, tmp):
     cfg, step = ck["config"], ck["step"]
     del ck
     bindir = os.path.join(tmp, "bin")
-    encode(PENDING, os.path.join(run, meta.get("tok", "tokenizer.json")), bindir, 0.0, fim_rate=0.5,
+    tok_p = os.path.join(run, meta.get("tok", "tokenizer.json"))
+    encode(PENDING, tok_p, bindir, 0.0, fim_rate=0.5,
            seed=int(time.time()))
     new = np.fromfile(os.path.join(bindir, "train.bin"), dtype=np.uint16)
     block = cfg["block_size"]
@@ -231,7 +262,9 @@ def scratch_cmd(run, meta, steps, mix, tmp):
         raise SystemExit(f"the new code is too short to train on ({len(new)} tokens)")
     parts = [new]
     old_p = os.path.join(ROOT, "data", "bin-code", "train.bin")
-    if mix > 0 and os.path.exists(old_p):
+    if mix > 0 and os.path.exists(old_p) and not same_tokenizer(tok_p):
+        say("not mixing in data/bin-code: it was encoded with a different code tokenizer than this model's")
+    elif mix > 0 and os.path.exists(old_p):
         old = np.memmap(old_p, dtype=np.uint16, mode="r")
         n = min(len(old) - 1, int(len(new) * mix))
         if n > block:
@@ -282,7 +315,7 @@ def run_once(s=None, token=None):
     new_docs = []
     os.makedirs(CODE, exist_ok=True)
     if s["github_new"] > 0 or s["refresh"] or watch:
-        mark = github_mark()
+        mark = queued_mark()
         say(f"== GitHub: {s['github_new']} new repositories"
             + (f" (topics: {', '.join(topics)})" if topics else "")
             + (", checking for new commits" if s["refresh"] else "") + (f", watchlist {len(watch)}" if watch else ""))
@@ -292,15 +325,27 @@ def run_once(s=None, token=None):
         gh = github_new_docs(mark)
         say(f"github: {len(gh)} new files in this run")
         new_docs += gh
+    seen = None
     if s["local"] and c["local_dirs"]:
-        before = local_hashes()
+        seen = load_local_seen()
+        if seen is None:  # first time: what is there now was part of the normal training
+            seen = local_hashes()
         say(f"== your projects: reading {len(c['local_dirs'])} folder(s) again")
         B.local(c["local_dirs"], CODE, langs, int(c["max_file_kb"]))
-        loc = [d for p in glob.glob(os.path.join(CODE, "local", "*", "shard_*.txt")) for d in _docs(p)
-               if _hash(d) not in before]
+        now = [d for p in glob.glob(os.path.join(CODE, "local", "*", "shard_*.txt")) for d in _docs(p)]
+        loc = [d for d in now if _hash(d) not in seen]
+        seen |= {_hash(d) for d in now}
         say(f"local: {len(loc)} new or changed files")
         new_docs += loc
     pending = add_pending(new_docs)
+    # only now that the files are in pending/ do the cursors move on
+    if s["github_new"] > 0 or s["refresh"] or watch:
+        update_state(gh_queued=list(github_mark()))
+    if seen is not None:
+        tmp = LOCAL_SEEN + ".tmp"
+        with open(tmp, "w") as f:
+            f.write("\n".join(sorted(seen)))
+        os.replace(tmp, LOCAL_SEEN)
     files = lambda n: f"{n} new file" + ("" if n == 1 else "s")
     result = f"{files(len(new_docs))}; {pending} waiting for training"
     run = s.get("train_model")

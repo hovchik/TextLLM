@@ -19,6 +19,7 @@ from chat_engine import ROOT, RUNS, Engine, gguf_path, list_models, weights_stam
 from data import crawl
 from studio import auth, db, feedback, gate, jobs
 from writing import formats as F
+from studio import styles
 
 PY = jobs.PY
 WEB = os.path.join(ROOT, "web")
@@ -334,7 +335,8 @@ def train(r: TrainReq):
         import glob
         inst = os.path.join(ROOT, "data/instructions/train.jsonl")
         use_inst = r.instructions and os.path.exists(inst)
-        if not use_inst and not glob.glob(os.path.join(ROOT, "data/raw/**/*.txt"), recursive=True):
+        resuming_saved = r.resume and os.path.exists(os.path.join(out, "train_cmd.json"))
+        if not resuming_saved and not use_inst and not glob.glob(os.path.join(ROOT, "data/raw/**/*.txt"), recursive=True):
             err("Add some text first: build writing instructions or download books (Training → Data).")
         cmd = [PY, "finetune/finetune_lora.py", "--out", out, "--base", r.base, "--examples", str(r.examples),
                "--seq", str(r.seq), "--batch", str(r.batch), "--grad-accum", str(r.accum), "--lr", str(r.lr),
@@ -366,6 +368,104 @@ def train(r: TrainReq):
     if not r.resume and os.path.exists(mp):
         os.rename(mp, os.path.join(out, f"metrics.{int(time.time())}.jsonl"))
     return _launch("training", name, cmd, os.path.join(out, "log.txt"), run=name)
+
+
+# ---------------------------------------------------------------- style profiles (write like an account)
+@app.get("/api/styles")
+def styles_list():
+    from data import own_posts
+
+    out = []
+    for p in own_posts.list_profiles():
+        rd = os.path.join(RUNS, styles.run_name(p["id"]))
+        out.append({**p, "run": styles.run_name(p["id"]), "trained": os.path.isdir(os.path.join(rd, "adapter")),
+                    "training": jobs.running() and jobs.JOB["run"] == styles.run_name(p["id"])})
+    return {"profiles": out, "kinds": own_posts.KINDS, "not_possible": own_posts.NOT_POSSIBLE,
+            "min_posts": styles.MIN_POSTS}
+
+
+@app.post("/api/styles/import")
+async def styles_import(name: str = Form(...), kind: str = Form(...), mine: bool = Form(False),
+                        url: str = Form(""), page_id: str = Form(""), token: str = Form(""),
+                        keep_replies: bool = Form(False), profile: str = Form(""),
+                        file: UploadFile | None = File(default=None)):
+    """Import posts into a style profile. An uploaded export is read, then deleted right away."""
+    from data import own_posts
+
+    pid = own_posts.slug(profile or name)
+    path = None
+    if kind in ("x-archive", "facebook-export", "instagram-export", "mastodon-archive"):
+        if not file or not file.filename:
+            err("Choose the export .zip file.")
+        up = os.path.join(RUNS, "_uploads")
+        os.makedirs(up, exist_ok=True)
+        path = os.path.join(up, f"style-{int(time.time() * 1000)}.zip")
+        with open(path, "wb") as f:
+            while chunk := await file.read(1 << 20):
+                f.write(chunk)
+    try:
+        import asyncio
+
+        return await asyncio.to_thread(own_posts.import_source, pid, name, kind, mine, path, url.strip() or None,
+                                       page_id or None, token or None, keep_replies)
+    except (ValueError, KeyError, json.JSONDecodeError) as e:
+        err(str(e))
+    finally:  # the export holds private data (messages, contacts): never keep it
+        if path and os.path.exists(path):
+            os.remove(path)
+
+
+@app.get("/api/styles/{pid}/sample")
+def styles_sample(pid: str, n: int = 5):
+    from data import own_posts
+
+    import random
+
+    posts = own_posts.load_posts(own_posts.slug(pid))
+    return random.sample(posts, min(n, len(posts)))
+
+
+@app.delete("/api/styles/{pid}")
+def styles_delete(pid: str, model: bool = False):
+    from data import own_posts
+
+    pid = own_posts.slug(pid)
+    if jobs.running() and jobs.JOB["run"] == styles.run_name(pid):
+        err("Stop the training first.", 409)
+    try:
+        own_posts.delete_profile(pid)
+    except LookupError as e:
+        err(str(e), 404)
+    if model:
+        shutil.rmtree(os.path.join(RUNS, styles.run_name(pid)), ignore_errors=True)
+    return {"ok": True}
+
+
+class StyleTrainReq(BaseModel):
+    start_from: str = ""      # a fine-tuned run, or "" for the base model
+    epochs: float = 3.0
+    gguf: bool = True
+
+
+@app.post("/api/styles/{pid}/train")
+def styles_train(pid: str, r: StyleTrainReq):
+    from data import own_posts
+
+    pid = own_posts.slug(pid)
+    try:
+        cmd, out = styles.train_command(pid, PY, RUNS, run_dir(r.start_from) if r.start_from else None,
+                                        max(0.5, min(10, r.epochs)), r.gguf)
+    except LookupError as e:
+        err(str(e), 404)
+    except ValueError as e:
+        err(str(e))
+    # saved like /api/train does, so Resume on the Runs page continues with these settings (and --meta-extra)
+    rel = lambda c: os.path.relpath(c, ROOT).replace(os.sep, "/") if os.path.isabs(c) and c.startswith(ROOT) else c
+    json.dump([rel(c) for c in cmd[1:]], open(os.path.join(out, "train_cmd.json"), "w"))
+    mp = os.path.join(out, "metrics.jsonl")
+    if os.path.exists(mp):  # a fresh style run: keep the old curve aside, as /api/train does
+        os.rename(mp, os.path.join(out, f"metrics.{int(time.time())}.jsonl"))
+    return _launch("training", styles.run_name(pid), cmd, os.path.join(out, "log.txt"), run=styles.run_name(pid))
 
 
 @app.post("/api/texts")
@@ -498,12 +598,14 @@ def models(request: Request):
         s = jobs.run_summary(d)
         stats = db.q("SELECT COUNT(rating) n, AVG(rating) avg FROM messages WHERE model=? AND rating IS NOT NULL",
                      (s["name"],), one=True)
-        out.append({**s, "label": label, "ratings": stats["n"], "avg_rating": stats["avg"],
+        meta_p = os.path.join(d, "meta.json")
+        style = (json.load(open(meta_p)).get("style") if os.path.exists(meta_p) else None)
+        out.append({**s, "label": label, "style": style, "ratings": stats["n"], "avg_rating": stats["avg"],
                     "pending_feedback": db.pending_feedback(s["name"]), "default": s["name"] == default,
                     "fast": bool(gguf_path(d))})
     out.sort(key=lambda m: not m["default"])
     if not is_admin(request):  # chat only needs to pick a model
-        keep = ("name", "type", "label", "level", "ratings", "avg_rating", "default")
+        keep = ("name", "type", "label", "level", "ratings", "avg_rating", "default", "style")
         out = [{k: m.get(k) for k in keep} for m in out]
     return out
 

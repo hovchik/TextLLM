@@ -30,6 +30,8 @@ def list_models():
             else os.path.isdir(os.path.join(d, "adapter")) or bool(gguf_path(d))
         if ready:
             label = "from scratch" if meta["type"] == "scratch" else f"fine-tuned {meta['base'].split('/')[-1]}"
+            if meta.get("style"):
+                label = f"writes like {meta['style']['name']}"
             out[f"{os.path.basename(d)} ({label})"] = d
     return out
 

@@ -153,6 +153,31 @@ python data/crawl.py --add https://bsky.app/hashtag/shortstory --kind bluesky --
   (paid API, terms forbid training), Facebook, Instagram, Threads, LinkedIn and TikTok (no public
   API for this, terms forbid scraping). Adding one of their links explains why.
 
+## Write in your own style (style profiles)
+
+Training → **Your style** learns how one account writes (length, tone, vocabulary, emoji and hashtag
+habits) from its posts, then Chat writes new posts in that voice with the format
+**Write like a style profile**.
+
+1. **Import posts** into a profile. Sources:
+   - your **X archive** (Settings → Download an archive of your data), **Facebook** or **Instagram**
+     "Download your information" export (Format: JSON), or **Mastodon** archive. Upload the .zip; it is
+     read in place and deleted right after the import;
+   - a **Facebook Page** or **Instagram professional account you manage**, through the Meta Graph API
+     with a Page access token (used once, not stored);
+   - a **Mastodon or Bluesky profile**: yours, or one whose author states CC0 / CC BY / CC BY-SA.
+2. **Train**: a LoRA fine-tune (`runs/style-<profile>`), from the base model or on top of an
+   existing fine-tuned run so it keeps its writing skills. At least 30 posts.
+3. **Chat**: pick the `style-<profile>` model; give it a topic.
+
+```bash
+python data/own_posts.py --profile me --name "Me" --x-archive twitter.zip --i-own-these
+```
+
+Reposts, replies and photo-only posts are dropped; links, @mentions, e-mails and phone numbers are
+removed. Other people's Facebook, Instagram, Threads or X accounts can't be imported: Meta has no API
+for them and forbids scraping, and X's developer terms forbid training models on X content.
+
 ## CPU-only quick path (recommended for a laptop or desktop)
 CPU training is about 100× slower than a GPU, so this path uses a 14M-parameter model, an 8k vocabulary, and roughly 3,000 books.
 The `--gutenberg-max 3000` flag takes the first 3,000 English books in the catalog (about 1 GB, roughly 300M tokens).

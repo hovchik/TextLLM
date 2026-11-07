@@ -225,7 +225,7 @@ pages.training = async (sub = "new") => {
   if (sub === "live") sub = "runs";
   main.innerHTML = `<div class="page">
     <div class="page-head"><div><h1>Training</h1><p>Prepare data, train new models, and teach existing models from your own files and links.</p></div>
-      <div class="tabs" id="ttabs">${[["new", "New model"], ["data", "Data"], ["texts", "Your texts"], ["news", "News & web"], ["corpus", "Corpus"], ["runs", "Runs"]].map(([k, l]) => `<button data-k="${k}" class="${k === sub ? "on" : ""}">${l}</button>`).join("")}</div></div>
+      <div class="tabs" id="ttabs">${[["new", "New model"], ["data", "Data"], ["texts", "Your texts"], ["news", "News & web"], ["style", "Your style"], ["corpus", "Corpus"], ["runs", "Runs"]].map(([k, l]) => `<button data-k="${k}" class="${k === sub ? "on" : ""}">${l}</button>`).join("")}</div></div>
     <div id="tlive"></div><div id="tbody"></div></div>`;
   $$("#ttabs button").forEach((b) => (b.onclick = () => (location.hash = `#/training/${b.dataset.k}`)));
   await poll();
@@ -233,7 +233,7 @@ pages.training = async (sub = "new") => {
   const renderLive = (rs) => { $("#tlive").innerHTML = liveCard(rs.find((r) => r.running)); bindLive(); };
   renderLive(runsList);
   S.onStatus = async () => { const rs = await api("/api/runs").catch(() => []); renderLive(rs); if (sub === "runs") drawRuns(rs); };
-  ({ new: trainNew, data: trainData, texts: trainTexts, news: trainNews, corpus: trainCorpus, runs: () => drawRuns(runsList) }[sub] || trainNew)();
+  ({ new: trainNew, data: trainData, texts: trainTexts, news: trainNews, style: trainStyle, corpus: trainCorpus, runs: () => drawRuns(runsList) }[sub] || trainNew)();
 };
 
 function trainNew() {
@@ -511,6 +511,111 @@ async function trainNews() {
   S.onStatus = (s) => { prev && prev(s); const l = $("#nlog"); if (l && s.job && s.job.kind === "crawl") { l.textContent = s.job.log; l.scrollTop = 1e9; } };
 }
 
+// ---------------------------------------------------------------- style profiles
+const STYLE_SRC = {
+  "x-archive": { file: true, help: "X → Settings → Your account → <b>Download an archive of your data</b>. Upload the .zip as it is; only <span class=\"mono\">data/tweets.js</span> is read and the file is deleted right after." },
+  "facebook-export": { file: true, help: "Facebook → Settings → <b>Download your information</b> → Format <b>JSON</b>, at least <i>Posts</i>. The .zip is deleted right after the import." },
+  "instagram-export": { file: true, help: "Instagram → Accounts Center → Your information → <b>Download your information</b> → Format <b>JSON</b>. Captions of your posts and reels are used." },
+  "mastodon-archive": { file: true, help: "Mastodon → Preferences → Import and export → <b>Request your archive</b>. Public posts from <span class=\"mono\">outbox.json</span> are used." },
+  "meta-page": { id: "Page ID", token: true, help: "A Facebook Page <b>you manage</b>. Get a Page access token (permission <span class=\"mono\">pages_read_engagement</span>) in Meta's Graph API Explorer. The token is used once and not stored." },
+  "instagram-account": { id: "Instagram account ID", token: true, help: "An Instagram professional account linked to a Page you manage, read through the Graph API (<span class=\"mono\">instagram_basic</span>). The token is used once and not stored." },
+  "profile-link": { url: true, help: "A Mastodon or Bluesky profile, e.g. <span class=\"mono\">https://bsky.app/profile/you.bsky.social</span>. Your own (tick below), or someone whose profile states CC0, CC BY or CC BY-SA." },
+};
+async function trainStyle() {
+  const [st, models] = await Promise.all([api("/api/styles"), api("/api/models").catch(() => [])]);
+  const lora = models.filter((m) => m.type === "lora" && !m.style);
+  const srcLine = (p) => p.sources.map((x) => `${esc(x.label)} +${num(x.added)}`).join(" · ");
+  $("#tbody").innerHTML = `<div class="grid g3"><div class="span2" style="display:flex;flex-direction:column;gap:16px">
+    <div class="card"><div class="card-head"><h2>Style profiles</h2><span class="hint">one per account · a model learns to write like it</span></div>
+      ${st.profiles.length ? `<div class="table-scroll"><table><thead><tr><th>Profile</th><th>Posts</th><th>Model</th><th></th></tr></thead><tbody>
+      ${st.profiles.map((p) => `<tr data-pid="${esc(p.id)}"><td><b>${esc(p.name)}</b><div class="hint">${srcLine(p)}</div></td><td>${num(p.posts || 0)}</td>
+        <td>${p.training ? '<span class="pill good">● training</span>' : p.trained ? `<span class="pill good">${esc(p.run)}</span>` : '<span class="muted">not trained</span>'}</td>
+        <td class="row" style="gap:6px;justify-content:flex-end"><button class="btn sm" data-sample>Examples</button>${p.trained ? `<a class="btn sm" href="#/chat" data-chat="${esc(p.run)}">${I.chat} Write</a>` : ""}<button class="btn" data-del title="Delete profile">${I.trash}</button></td></tr>
+        <tr data-sample-row="${esc(p.id)}" hidden><td colspan="4"></td></tr>`).join("")}</tbody></table></div>` : '<p class="muted">No profiles yet. Import your posts below.</p>'}</div>
+    <div class="card"><h2>Import posts</h2>
+      <div class="grid g2" style="margin-top:10px">
+        <label class="field">Profile name<input class="input" id="s-name" placeholder="e.g. Hovhannes" list="s-names"><datalist id="s-names">${st.profiles.map((p) => `<option value="${esc(p.name)}">`).join("")}</datalist><span class="hint">Same name = add to that profile</span></label>
+        <label class="field">From<select class="input" id="s-kind">${Object.entries(st.kinds).map(([k, l]) => `<option value="${k}">${esc(l)}</option>`).join("")}</select></label>
+      </div>
+      <p class="hint" id="s-help" style="margin:10px 0"></p>
+      <div class="grid g2">
+        <label class="field" id="s-file-f">Export file (.zip)<input class="input" id="s-file" type="file" accept=".zip"></label>
+        <label class="field" id="s-url-f">Profile link<input class="input" id="s-url" placeholder="https://bsky.app/profile/you.bsky.social"></label>
+        <label class="field" id="s-id-f"><span id="s-id-l">Page ID</span><input class="input" id="s-id"></label>
+        <label class="field" id="s-token-f">Access token<input class="input" id="s-token" type="password" autocomplete="off"></label>
+      </div>
+      <label class="row" style="margin-top:10px"><span class="switch"><input type="checkbox" id="s-mine"><span></span></span> <span>These are <b>my own posts</b> (or I have the author's written permission).</span></label>
+      <label class="row" style="margin-top:6px"><span class="switch"><input type="checkbox" id="s-replies"><span></span></span> <span class="muted">Keep replies too</span></label>
+      <div class="row end" style="margin-top:12px"><button class="btn primary" id="s-import">${I.plus} Import</button></div></div>
+    <div class="card"><h2>Teach a model the style</h2>
+      <div class="grid g2" style="margin-top:10px">
+        <label class="field">Profile<select class="input" id="t-profile">${st.profiles.map((p) => `<option value="${esc(p.id)}" ${p.posts < st.min_posts ? "disabled" : ""}>${esc(p.name)} (${num(p.posts || 0)} posts${p.posts < st.min_posts ? `, need ${st.min_posts}` : ""})</option>`).join("") || "<option value=''>Import posts first</option>"}</select></label>
+        <label class="field">Start from<select class="input" id="t-from"><option value="">Base model (Qwen3 0.6B)</option>${lora.map((m) => `<option value="${esc(m.name)}">${esc(m.name)}: keeps its writing skills</option>`).join("")}</select></label>
+        <label class="field">Read each post (times)<input class="input" id="t-epochs" type="number" min="0.5" max="10" step="0.5" value="3"></label>
+      </div>
+      <p class="hint" style="margin-top:8px">Makes the model <span class="mono">style-&lt;profile&gt;</span>. Then open Chat, pick it, and the format switches to <b>Write like a style profile</b>. Give it a topic, e.g. “our new bakery opening on Saturday”. On CPU, a few hundred posts take roughly an hour.</p>
+      <div class="row end" style="margin-top:12px"><button class="btn primary" id="t-go" ${st.profiles.some((p) => p.posts >= st.min_posts) ? "" : "disabled"}>${I.play} Train</button></div></div>
+  </div>
+  <div style="display:flex;flex-direction:column;gap:16px">
+    <div class="card"><h2>Why not any public page?</h2><p class="muted" style="margin-top:6px">${esc(st.not_possible)}</p>
+      <ul class="muted" style="padding-left:18px">
+        <li><b>X / Twitter</b>: only your own archive. The API is paid and its terms forbid training models on X content.</li>
+        <li><b>Facebook, Instagram, Threads</b>: your own export, or Pages and professional accounts you manage. There is no API for other people's posts, and scraping breaks Meta's terms.</li>
+        <li><b>Mastodon, Bluesky</b>: your own profile, or any author whose profile states CC0, CC BY or CC BY-SA.</li>
+        <li>Copying a living person's voice without asking can mislead readers. Use other people's styles only with their permission.</li></ul></div>
+    <div class="card"><h2>What is kept</h2><ul class="muted" style="padding-left:18px">
+      <li>Only your original posts with text. Reposts, retweets, replies and photo-only posts are dropped.</li>
+      <li>Links, @mentions, e-mail addresses and phone numbers are removed.</li>
+      <li>Uploaded exports are deleted as soon as the posts are read. Posts stay in <span class="mono">runs/_styles/</span> until you delete the profile.</li></ul></div>
+  </div></div>`;
+  const refresh = () => trainStyle();
+  const show = () => {
+    const c = STYLE_SRC[$("#s-kind").value] || {};
+    $("#s-help").innerHTML = c.help || "";
+    $("#s-file-f").hidden = !c.file; $("#s-url-f").hidden = !c.url; $("#s-id-f").hidden = !c.id; $("#s-token-f").hidden = !c.token;
+    $("#s-id-l").textContent = c.id || "";
+  };
+  $("#s-kind").onchange = show; show();
+  $("#s-import").onclick = async () => {
+    const fd = new FormData();
+    const name = $("#s-name").value.trim();
+    if (!name) return fail(new Error("Give the profile a name."));
+    const known = st.profiles.find((p) => p.name.toLowerCase() === name.toLowerCase());
+    fd.append("name", name); fd.append("profile", known ? known.id : name); fd.append("kind", $("#s-kind").value);
+    fd.append("mine", $("#s-mine").checked); fd.append("keep_replies", $("#s-replies").checked);
+    fd.append("url", $("#s-url").value); fd.append("page_id", $("#s-id").value); fd.append("token", $("#s-token").value);
+    if ($("#s-file").files[0]) fd.append("file", $("#s-file").files[0]);
+    $("#s-import").disabled = true; $("#s-import").textContent = "Importing…";
+    try {
+      const r = await api("/api/styles/import", { method: "POST", body: fd });
+      const dr = Object.entries(r.dropped).filter(([, v]) => v).map(([k, v]) => `${v} ${k}`).join(", ");
+      toast(`${num(r.added)} posts added to ${esc(r.profile.name)}${dr ? ` (skipped: ${esc(dr)})` : ""}`, "ok");
+      refresh();
+    } catch (e) { fail(e); $("#s-import").disabled = false; $("#s-import").textContent = "Import"; }
+  };
+  $("#t-go").onclick = async () => {
+    try {
+      await api(`/api/styles/${encodeURIComponent($("#t-profile").value)}/train`, { json: { start_from: $("#t-from").value, epochs: +$("#t-epochs").value } });
+      toast("Training started", "ok"); location.hash = "#/training/runs";
+    } catch (e) { fail(e); }
+  };
+  $$("tr[data-pid]").forEach((tr) => {
+    const pid = tr.dataset.pid;
+    $("[data-del]", tr).onclick = async () => {
+      if (!confirm("Delete this profile and its imported posts?")) return;
+      const alsoModel = tr.innerHTML.includes("style-") && confirm("Also delete the model trained on it?");
+      try { await api(`/api/styles/${encodeURIComponent(pid)}?model=${alsoModel}`, { method: "DELETE" }); refresh(); } catch (e) { fail(e); }
+    };
+    $("[data-sample]", tr).onclick = async () => {
+      const row = $(`tr[data-sample-row="${CSS.escape(pid)}"]`);
+      if (!row.hidden) return void (row.hidden = true);
+      try { const ps = await api(`/api/styles/${encodeURIComponent(pid)}/sample`); row.firstElementChild.innerHTML = ps.map((p) => `<div class="hint" style="white-space:pre-wrap;border-left:3px solid var(--border);padding:4px 10px;margin:6px 0">${esc(p.text)}</div>`).join("") || '<span class="muted">No posts</span>'; row.hidden = false; } catch (e) { fail(e); }
+    };
+    const w = $("[data-chat]", tr);
+    if (w) w.onclick = () => { try { localStorage.setItem("chatModel", w.dataset.chat); localStorage.setItem("chatFormat", "style"); } catch {} };
+  });
+}
+
 // ---------------------------------------------------------------- corpus
 async function trainCorpus() {
   let c;
@@ -663,12 +768,16 @@ pages.chat = async () => {
     </div></div>`;
   [C.models, C.formats] = await Promise.all([api("/api/models").catch(() => []), api("/api/formats").catch(() => [])]);
   const pref = (() => { try { return localStorage.getItem("chatModel"); } catch { return null; } })() || S.user.prefs.model || (C.models.find((m) => m.default) || {}).name;
-  $("#model").innerHTML = C.models.length ? C.models.map((m) => `<option value="${esc(m.name)}" ${m.name === pref ? "selected" : ""}>${esc(m.name)} · ${m.type === "lora" ? "fine-tuned" : "from scratch"}${m.default ? " · default" : ""}</option>`).join("") : `<option value="">No trained models yet</option>`;
+  $("#model").innerHTML = C.models.length ? C.models.map((m) => `<option value="${esc(m.name)}" ${m.name === pref ? "selected" : ""}>${esc(m.name)} · ${m.style ? `writes like ${esc(m.style.name)}` : m.type === "lora" ? "fine-tuned" : "from scratch"}${m.default ? " · default" : ""}</option>`).join("") : `<option value="">No trained models yet</option>`;
   const modelInfo = () => {
     const m = C.models.find((x) => x.name === $("#model").value);
     $("#model-info").innerHTML = m ? `${m.type === "lora" ? "" : levelBar(m.level)} <span class="pill">${starsText(m.avg_rating)} · ${m.ratings} ratings</span>` : "";
   };
-  $("#model").onchange = () => { try { localStorage.setItem("chatModel", $("#model").value); } catch {} modelInfo(); };
+  const styleFormat = () => {   // a style model writes best with the format it was trained with
+    const m = C.models.find((x) => x.name === $("#model").value);
+    if (m && m.style && C.formats.some((f) => f.id === "style") && $("#format")) { C.format = "style"; $("#format").value = "style"; drawFields(); drawSampling(); }
+  };
+  $("#model").onchange = () => { try { localStorage.setItem("chatModel", $("#model").value); } catch {} modelInfo(); styleFormat(); };
   modelInfo();
   $("#settings-btn").onclick = (e) => { e.stopPropagation(); $("#settings").hidden = !$("#settings").hidden; };
   document.addEventListener("click", (e) => { const p = $("#settings"); if (p && !p.contains(e.target)) p.hidden = true; }, { once: false });
@@ -681,7 +790,7 @@ pages.chat = async () => {
   if (!C.formats.some((f) => f.id === C.format)) C.format = "free";
   $("#format").value = C.format;
   $("#format").onchange = () => { C.format = $("#format").value; try { localStorage.setItem("chatFormat", C.format); } catch {} drawFields(); drawSampling(); };
-  drawFields(); drawSampling();
+  drawFields(); drawSampling(); styleFormat();
   const input = $("#input");
   input.oninput = () => { input.style.height = "auto"; input.style.height = Math.min(input.scrollHeight, 200) + "px"; };
   input.onkeydown = (e) => { if (e.key === "Enter" && !e.shiftKey) { e.preventDefault(); send(); } };

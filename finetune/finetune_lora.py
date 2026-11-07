@@ -62,6 +62,7 @@ def args():
     ap.add_argument("--step-offset", type=int, default=0, help="added to logged steps (continued runs)")
     ap.add_argument("--resume", action="store_true",
                     help="continue from <out>/adapter + <out>/train_state.pt (optimizer, step, schedule)")
+    ap.add_argument("--meta-extra", default=None, help="JSON object merged into meta.json (e.g. a style profile)")
     ap.add_argument("--device", default="auto", help="auto (GPU if there is one), cuda, mps, xpu or cpu")
     return ap.parse_args()
 
@@ -253,7 +254,8 @@ def main():
         os.replace(tmp, ad)
         os.replace(state_p + ".tmp", state_p)
         json.dump({"type": "lora", "base": a.base, "lora_r": a.lora_r,
-                   "instructions": bool(a.instructions), "book_share": a.book_share},
+                   "instructions": bool(a.instructions), "book_share": a.book_share,
+                   **(json.loads(a.meta_extra) if a.meta_extra else {})},
                   open(os.path.join(a.out, "meta.json"), "w"))
 
     if state is None:

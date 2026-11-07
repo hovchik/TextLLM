@@ -46,7 +46,7 @@ def load_causal_lm(name, dtype=None):
     import torch
     from transformers import AutoModelForCausalLM
 
-    kw = {"dtype": dtype or torch.float32}
+    kw = {dtype_kwarg(): dtype or torch.float32}
     try:
         return AutoModelForCausalLM.from_pretrained(name, **kw)
     except (ValueError, KeyError) as e:
@@ -59,6 +59,15 @@ def load_causal_lm(name, dtype=None):
         except (AttributeError, ValueError, KeyError) as e:
             last = e
     raise last
+
+
+def dtype_kwarg():
+    """from_pretrained's precision argument: "dtype" since transformers 4.56, "torch_dtype" before
+    (older versions silently ignore "dtype" and load fp32, twice the memory)."""
+    import transformers
+
+    major, minor = (int(x) for x in transformers.__version__.split(".")[:2])
+    return "dtype" if (major, minor) >= (4, 56) else "torch_dtype"
 
 
 def load_tokenizer(name):

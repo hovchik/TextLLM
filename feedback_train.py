@@ -187,25 +187,38 @@ def main():
 
         had_gguf = bool(gguf_path(a.run))
         before = quick_score(a.run) if a.gate else None
-        ad, prev = os.path.join(a.run, "adapter"), os.path.join(a.run, "adapter.prev")
-        shutil.rmtree(prev, ignore_errors=True)
-        shutil.copytree(ad, prev)
+        from data.crawl import backup_weights, reject_evals, restore_weights
+
+        bk = backup_weights(a.run) if a.gate else None
         ok = train_lora(a, meta, examples) is None
         if ok and a.gate:
-            after = quick_score(a.run, fresh=True)
             from studio.gate import check_drops
 
+            def undo():
+                # The backup keeps the old file times, so the 'before' evaluation counts as current
+                # again; the evaluation of the undone adapter is marked rejected so it never does.
+                restore_weights(a.run, bk)
+                reject_evals(a.run, since=t_after)
+
+            t_after = time.time()
+            try:
+                after = quick_score(a.run, fresh=True)
+            except KeyboardInterrupt:  # stopped before the check finished: don't keep an unchecked adapter
+                say("stopped during the quality check; restoring the previous adapter")
+                undo()
+                raise
             drops = check_drops(after, before)
             if drops:
                 say("⚠️ quick checks got worse (" + ", ".join(f"{k}: {c} → {n}" for k, (n, c) in drops.items()) +
                     "); restoring the previous adapter. These ratings are marked 'gate-rejected' and won't be "
                     "retried until someone rates them again.")
-                shutil.rmtree(ad)
-                shutil.copytree(prev, ad)
+                undo()
                 if ids:
                     feedback.mark_trained(ids, f"gate-rejected@{time.strftime('%Y-%m-%d %H:%M')}")
                 sys.exit(3)
             say(f"gate passed: quick score {before and before['score']} → {after['score']}")
+        if bk:
+            shutil.rmtree(bk, ignore_errors=True)
         if ok and had_gguf:
             subprocess.call([sys.executable, os.path.join(ROOT, "export_gguf.py"), "--run", a.run], cwd=ROOT)
     else:

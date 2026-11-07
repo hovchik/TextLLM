@@ -291,6 +291,19 @@ The architecture is a pre-norm decoder with RMSNorm, rotary position embeddings,
 Checkpoints are written to `checkpoints/ckpt.pt` at every evaluation.
 The default `--max-steps 100000` with batch 16×8×1024 is about 13B tokens, so lower it if you want a shorter run.
 
+Writing with a from-scratch model uses a key/value cache, so each new token runs only that token through the
+model (about 5–6× faster than recomputing the whole text). When the text outgrows the model's context, the
+last three quarters of the window are kept and generation continues. On CPUs with native bf16
+(AVX-512 BF16 or AMX, e.g. recent Xeons and AMD Zen 4/5) `train.py` runs matmuls in bf16 with fp32 weights,
+about 1.7× faster; set `TEXTLLM_BF16=0` to turn it off.
+
+## Tests
+
+    pip install pytest
+    python -m pytest
+
+They run offline on a CPU in well under a minute, using tiny models made on the spot (no downloads).
+
 ## Phase 2: a writing model for posts, stories and essays (LoRA)
 The recommended path on CPU: fine-tune a small Apache 2.0 instruct model on writing instructions, run it as a
 4-bit GGUF, write with per-format templates, and only promote a new model when it measurably wins.

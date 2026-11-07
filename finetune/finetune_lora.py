@@ -63,6 +63,9 @@ def args():
     ap.add_argument("--resume", action="store_true",
                     help="continue from <out>/adapter + <out>/train_state.pt (optimizer, step, schedule)")
     ap.add_argument("--meta-extra", default=None, help="JSON object merged into meta.json (e.g. a style profile)")
+    ap.add_argument("--private-texts", action="store_true",
+                    help="learn.py: the texts are temporary, so keep no tokenized copy (no data/cache, no "
+                         "examples.pt) and leave the run's resume state (train_state.pt) as it was")
     ap.add_argument("--device", default="auto", help="auto (GPU if there is one), cuda, mps, xpu or cpu")
     return ap.parse_args()
 
@@ -156,12 +159,16 @@ def main():
         data = torch.load(ex_p, weights_only=False)
         print(f"using this run's saved examples ({len(data)})")
     else:
-        data = load_or_encode(a, tok, rng)
-        torch.save(data, ex_p + ".tmp")
-        os.replace(ex_p + ".tmp", ex_p)
+        data = load_or_encode(a, tok, rng, cache=not a.private_texts)
+        if not a.private_texts:
+            torch.save(data, ex_p + ".tmp")
+            os.replace(ex_p + ".tmp", ex_p)
     data = list(data)
+    if len(data) < 2:
+        raise SystemExit(f"only {len(data)} usable example(s): give more text, or a larger --seq "
+                         f"(examples whose prompt alone is longer than --seq {a.seq} are dropped)")
     random.Random(1).shuffle(data)  # same train/val split every time for the same examples
-    n_val = max(4, len(data) // 50)
+    n_val = min(max(4, len(data) // 50), len(data) // 2)  # small sets keep at least half for training
     val, train = data[:n_val], data[n_val:]
     print(f"{len(train)} train / {len(val)} val examples")
 
@@ -173,9 +180,10 @@ def main():
     model = hf.load_causal_lm(a.base, dtype).to(a.device)
     # On CPU the weights stay fp32 (LoRA needs fp32 master weights) and matmuls run in bf16 when
     # the CPU has native bf16 instructions; otherwise plain fp32.
-    cpu_bf16 = a.device == "cpu" and hf.cpu_bf16_ok()
+    cpu_ac = devices.cpu_autocast(a.device)
+    cpu_bf16 = cpu_ac is not None
     if cpu_bf16:
-        autocast = lambda: torch.autocast("cpu", dtype=torch.bfloat16)
+        autocast = lambda: cpu_ac
     elif amp == torch.float16:
         autocast = lambda: devices.autocast(a.device, amp)
     else:
@@ -247,16 +255,15 @@ def main():
         shutil.rmtree(tmp, ignore_errors=True)
         model.save_pretrained(tmp)
         tok.save_pretrained(tmp)
-        torch.save({"opt": opt.state_dict(), "step": step, "steps": steps, "batches": step * a.grad_accum,
-                    "torch_rng": torch.get_rng_state(), "base": a.base,
-                    "scaler": scaler.state_dict() if scaler.is_enabled() else None}, state_p + ".tmp")
+        if not a.private_texts:  # a learn step must not replace the run's own resume point
+            torch.save({"opt": opt.state_dict(), "step": step, "steps": steps, "batches": step * a.grad_accum,
+                        "torch_rng": torch.get_rng_state(), "base": a.base,
+                        "scaler": scaler.state_dict() if scaler.is_enabled() else None}, state_p + ".tmp")
         shutil.rmtree(ad, ignore_errors=True)
         os.replace(tmp, ad)
-        os.replace(state_p + ".tmp", state_p)
-        json.dump({"type": "lora", "base": a.base, "lora_r": a.lora_r,
-                   "instructions": bool(a.instructions), "book_share": a.book_share,
-                   **(json.loads(a.meta_extra) if a.meta_extra else {})},
-                  open(os.path.join(a.out, "meta.json"), "w"))
+        if not a.private_texts:
+            os.replace(state_p + ".tmp", state_p)
+        write_meta(a)
 
     if state is None:
         log(kind="val", step=0, loss=evaluate())
@@ -298,15 +305,37 @@ def main():
                   "Retry from the run's page with 'Make fast CPU copy'.")
 
 
-def load_or_encode(a, tok, rng):
-    """Build the example mix and tokenize it, cached on disk (re-tokenizing takes minutes)."""
+def write_meta(a):
+    """Write <out>/meta.json. A run that continues its own adapter (learn.py, the crawler, Resume)
+    keeps what its meta.json already says (style profile, gguf, LoRA rank, instructions); only
+    --meta-extra and the base are written over it."""
+    p = os.path.join(a.out, "meta.json")
+    fresh = {"type": "lora", "base": a.base, "lora_r": a.lora_r,
+             "instructions": bool(a.instructions), "book_share": a.book_share}
+    own = os.path.join(a.out, "adapter")
+    continuing = a.resume or (a.init_adapter and os.path.abspath(a.init_adapter) == os.path.abspath(own))
+    old = {}
+    if continuing and os.path.exists(p):
+        try:
+            old = json.load(open(p))
+        except ValueError:
+            pass
+    meta = {**fresh, **old, "type": "lora", "base": a.base, **(json.loads(a.meta_extra) if a.meta_extra else {})}
+    with open(p + ".tmp", "w") as f:
+        json.dump(meta, f)
+    os.replace(p + ".tmp", p)
+
+
+def load_or_encode(a, tok, rng, cache=True):
+    """Build the example mix and tokenize it, cached on disk (re-tokenizing takes minutes).
+    cache=False (private, temporary texts) never writes the tokenized examples to disk."""
     srcs = [a.instructions, a.extra] + sorted(glob.glob(os.path.join(a.raw, "**", "*.txt"), recursive=True))
     key = json.dumps([a.base, a.examples, a.seq, a.book_share, a.pairs_per_doc, a.min_doc_chars,
                       [(p, os.path.getmtime(p)) for p in srcs if p and os.path.exists(p)]])
-    cache = os.path.join(ROOT, "data", "cache", hashlib.sha1(key.encode()).hexdigest()[:16] + ".pt")
-    if os.path.exists(cache):
-        print(f"using cached tokenized examples ({os.path.relpath(cache, ROOT)})")
-        return torch.load(cache)
+    path = os.path.join(ROOT, "data", "cache", hashlib.sha1(key.encode()).hexdigest()[:16] + ".pt")
+    if cache and os.path.exists(path):
+        print(f"using cached tokenized examples ({os.path.relpath(path, ROOT)})")
+        return torch.load(path)
     pairs = []
     if a.instructions:
         rows = [json.loads(l) for l in open(a.instructions, encoding="utf-8") if l.strip()]
@@ -323,8 +352,9 @@ def load_or_encode(a, tok, rng):
     if not pairs:
         raise SystemExit("no training examples: give --instructions or put .txt files under --raw")
     data = encode(tok, pairs, a.seq)
-    os.makedirs(os.path.dirname(cache), exist_ok=True)
-    torch.save(data, cache)
+    if cache:
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+        torch.save(data, path)
     return data
 
 

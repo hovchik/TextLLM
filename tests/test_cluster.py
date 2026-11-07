@@ -109,3 +109,41 @@ def test_wrong_secret_is_refused(cluster, tmp_path):
     finally:
         coord.terminate()
         coord.wait(30)
+
+
+def test_client_retries_a_cut_off_download():
+    """A response that ends before its Content-Length (connection dropped mid-body) is retried."""
+    import threading
+    from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+
+    from cluster import Client
+
+    hits = []
+
+    class H(BaseHTTPRequestHandler):
+        def log_message(self, *a):
+            pass
+
+        def do_GET(self):
+            hits.append(1)
+            self.send_response(200)
+            self.send_header("Content-Length", "100")
+            self.end_headers()
+            self.wfile.write(b"x" * (10 if len(hits) == 1 else 100))
+            if len(hits) == 1:
+                self.close_connection = True
+
+    srv = ThreadingHTTPServer(("127.0.0.1", 0), H)
+    threading.Thread(target=srv.serve_forever, daemon=True).start()
+    try:
+        import cluster
+
+        sleep, cluster.time.sleep = cluster.time.sleep, lambda s: None
+        try:
+            out = Client(f"http://127.0.0.1:{srv.server_address[1]}", "s").call("GET", "/data", raw=True, retries=3,
+                                                                                 say=lambda *_: None)
+        finally:
+            cluster.time.sleep = sleep
+        assert out == b"x" * 100 and len(hits) == 2
+    finally:
+        srv.shutdown()

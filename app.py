@@ -566,7 +566,10 @@ def cluster_start(r: ClusterReq):
     meta_p = os.path.join(out, "meta.json")
     if not (resuming and os.path.exists(meta_p)):
         json.dump({"type": "scratch", "tok": "tokenizer.json", "preset": r.preset, "cluster": True}, open(meta_p, "w"))
-    secret = r.secret.strip() or "-".join(_secrets.token_hex(3) for _ in range(3))
+    secrets_p = os.path.join(CLUSTER_DIR, "secrets.json")   # run name -> secret, so a resume keeps it
+    known = _read_json(secrets_p) or {}
+    # Resuming keeps the run's secret (workers still hold it and reconnect by themselves).
+    secret = r.secret.strip() or (known.get(name) if resuming else None) or "-".join(_secrets.token_hex(3) for _ in range(3))
     cmd = [PY, "cluster.py", "coordinator", "--out", out, "--preset", r.preset, "--vocab", str(r.vocab),
            "--rounds", str(max(1, r.rounds)), "--round-minutes", str(max(0.2, r.round_minutes)), "--lr", str(r.lr),
            "--min-lr", str(min(r.min_lr, r.lr) if r.min_lr > 0 else r.lr / 10), "--warmup", str(max(0, r.warmup)),
@@ -591,6 +594,7 @@ def cluster_start(r: ClusterReq):
             pass
     os.makedirs(CLUSTER_DIR, exist_ok=True)
     json.dump({"run": name, "secret": secret, "port": r.port, "started": time.time()}, open(CLUSTER_LAST, "w"))
+    json.dump({**known, name: secret}, open(secrets_p, "w"))
     # the secret goes through the environment, so it isn't written into log.txt with the command
     return _launch("cluster", name, cmd, os.path.join(out, "log.txt"), run=name, env={"TEXTLLM_CLUSTER_SECRET": secret})
 

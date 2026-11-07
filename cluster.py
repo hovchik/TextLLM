@@ -28,7 +28,7 @@ for the Studio). Every request needs the shared secret (X-Secret header). Plain 
 open internet use a private network such as Tailscale/ZeroTier/WireGuard, or forward one port.
 Weights travel as tensors only (torch.load(weights_only=True)), never as pickled code.
 """
-import argparse, hmac, io, json, math, os, secrets, socket, subprocess, sys, threading, time
+import argparse, hmac, http.client, io, json, math, os, secrets, socket, subprocess, sys, threading, time
 import urllib.error, urllib.parse, urllib.request
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
@@ -595,7 +595,7 @@ class Client:
                 if e.code in (400, 403, 409):
                     raise RuntimeError(f"{e.code}: {msg}")
                 err = f"HTTP {e.code}"
-            except (urllib.error.URLError, OSError, ConnectionError) as e:
+            except (urllib.error.URLError, OSError, ConnectionError, http.client.HTTPException) as e:  # incl. IncompleteRead
                 err = str(getattr(e, "reason", e))
             n += 1
             if retries is not None and n > retries:

@@ -493,11 +493,16 @@ def github(out, max_repos, explicit, langs, licences, min_stars, max_kb, max_rep
                     if page < 0:
                         continue
                     items = search_repos(sess, lg, lc, min_stars, page, tries)
-                    st["pages"][key] = -1 if not items else page + 1
+                    finished = True
                     for repo in items or []:
                         if len(done) >= target:
+                            finished = False  # a bigger total later continues on this same page
                             break
                         progressed |= take(repo)
+                    # Advance only once the whole page is handled; repositories already done or refused
+                    # are skipped at once when a page is read again (after a stop, or a bigger total).
+                    if finished:
+                        st["pages"][key] = -1 if not items else page + 1
                     save()
                     progressed |= bool(items)
                 if not progressed:
@@ -540,8 +545,8 @@ def hf_code(out, max_gb, langs, licences, max_kb, mode, tries, cache, keep_parqu
     from data.build_corpus import hf_parquet
 
     allowed = set(licences)
-    dedup = Dedup(os.path.join(out, "hf", "hashes.list"))
     os.makedirs(os.path.join(out, "hf"), exist_ok=True)
+    dedup = Dedup(os.path.join(out, "hf", "hashes.list"))
 
     def make(code, row):
         kind = L.detect(row.get("path") or "")

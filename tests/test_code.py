@@ -229,6 +229,30 @@ def test_github_keeps_only_permissive_licensed_repos(fake_github, tmp_path):
     assert r.returncode == 0 and "already downloaded" in r.stdout and len(read_docs(out)) == 2
 
 
+def test_github_bigger_total_continues_on_the_same_search_page(fake_github, tmp_path):
+    import subprocess, sys
+
+    out = tmp_path / "code"
+    env = {**os.environ, "GITHUB_API": fake_github, "GITHUB_CODELOAD": fake_github}
+    for n in ("1", "2"):
+        if n == "2":  # stopped partway through page 1: the next run reads page 1 again
+            assert json.load(open(out / "github" / "progress.json"))["pages"].get("python|mit|50", 1) == 1
+        r = subprocess.run([sys.executable, "data/build_code.py", "--github-repos", n, "--langs", "python", "--licenses", "mit,apache-2.0",
+                            "--out", str(out), "--retries", "1"], cwd=ROOT, env=env, capture_output=True, text=True, timeout=120)
+        assert r.returncode == 0, r.stdout + r.stderr
+    # the fake search returns every repo on page 1 only; the second run must still find alice/good
+    assert json.load(open(out / "github" / "progress.json"))["done"] == ["alice/good"]
+
+
+def test_hf_source_creates_its_folder(tmp_path, monkeypatch):
+    from data import build_code, build_corpus
+
+    seen = {}
+    monkeypatch.setattr(build_corpus, "hf_parquet", lambda outdir, *a, **kw: seen.setdefault("out", outdir))
+    build_code.hf_code(str(tmp_path / "code"), 0.1, set(), ["mit"], 256, "stream", 1, "cache", False)
+    assert os.path.isdir(seen["out"]) and os.path.exists(os.path.join(seen["out"], "hashes.list"))
+
+
 def test_only_permissive_licences_can_be_chosen(tmp_path):
     import subprocess, sys
 

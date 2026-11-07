@@ -25,6 +25,8 @@ import argparse, json, os, shutil, sys, tempfile, time, zipfile
 
 ROOT = os.path.dirname(os.path.abspath(__file__))
 RUNS = os.path.join(ROOT, "runs")
+sys.path.insert(0, ROOT)
+from core import commands, paths as core_paths  # noqa: E402
 FORMAT = 1
 STORED = (".pt", ".bin", ".gguf", ".safetensors", ".zip")  # already dense; zipping them only costs time
 
@@ -55,7 +57,7 @@ def export(run_dir, out=None, with_data=False, log=print):
         files.append((tokenizer_path(run_dir, meta), "run/tokenizer.json"))
     if with_data and meta["type"] == "scratch":
         d = _data_dir(run_dir)
-        if os.path.commonpath([d, run_dir]) != run_dir:  # data inside the run folder is already packed
+        if not core_paths.inside(run_dir, d):  # data inside the run folder is already packed
             for f in ("train.bin", "val.bin"):
                 if os.path.exists(os.path.join(d, f)):
                     files.append((os.path.join(d, f), "data/bin/" + f))
@@ -91,8 +93,7 @@ def _safe_target(base, parts):
     (.., absolute paths, drive letters, backslash tricks on Windows)."""
     if not parts or any(p in ("", ".", "..") or "\\" in p or ":" in p for p in parts):
         return None
-    target = os.path.abspath(os.path.join(base, *parts))
-    return target if os.path.commonpath([target, os.path.abspath(base)]) == os.path.abspath(base) else None
+    return core_paths.under(base, *parts)
 
 
 def import_bundle(zip_path, name=None, force=False, log=print):
@@ -138,6 +139,13 @@ def import_bundle(zip_path, name=None, force=False, log=print):
                 json.dump(meta, open(meta_p, "w"))
             cmd = _saved_cmd(stage)
             if cmd is not None:
+                try:
+                    commands.check(cmd)
+                except commands.BadCommand as e:
+                    log(f"Note: the bundle's saved training command was dropped ({e}); Resume will use defaults.")
+                    cmd = None
+                    os.remove(os.path.join(stage, "train_cmd.json"))
+            if cmd is not None:
                 if "--out" in cmd:
                     cmd[cmd.index("--out") + 1] = f"runs/{name}"
                 if has_data:
@@ -171,7 +179,7 @@ def resume_cmd(run_dir):
     rel = os.path.relpath(run_dir, ROOT).replace(os.sep, "/")
     p = os.path.join(run_dir, "train_cmd.json")
     if os.path.exists(p):
-        cmd = json.load(open(p))
+        cmd = commands.check(json.load(open(p)))
         cmd = [rel if i > 0 and cmd[i - 1] == "--out" else c for i, c in enumerate(cmd)]
     else:
         meta = _meta(run_dir)

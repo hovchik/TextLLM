@@ -36,6 +36,7 @@ ROOT = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, ROOT)
 
 import graceful  # noqa: E402
+from core import safeload  # noqa: E402
 import netreach  # noqa: E402
 
 DEFAULT_PORT = 7861
@@ -53,9 +54,7 @@ def pack(obj):
 
 
 def unpack(data):
-    import torch
-
-    return torch.load(io.BytesIO(data), map_location="cpu", weights_only=True)
+    return safeload.load_bytes(data)
 
 
 def inner_lr_at(r, a):
@@ -86,7 +85,7 @@ class Coordinator:
         cfg = GPTConfig(vocab_size=a.vocab, **PRESETS[a.preset])
         ck = None
         if a.resume and os.path.exists(self.ckpt_path):
-            ck = torch.load(self.ckpt_path, map_location="cpu", weights_only=True)
+            ck = safeload.load(self.ckpt_path)
             cfg = GPTConfig(**ck["config"])
         self.cfg = cfg
         self.model = GPT(cfg)
@@ -100,7 +99,7 @@ class Coordinator:
         self.momentum = {k: torch.zeros_like(p) for k, p in self.params.items()}
         self.cluster_id = secrets.token_hex(4)
         if ck is not None and os.path.exists(self.state_path):
-            st = torch.load(self.state_path, map_location="cpu", weights_only=True)
+            st = safeload.load(self.state_path)
             self.momentum.update(st.get("momentum", {}))
             self.tokens_total = int(st.get("tokens", 0))
             self.cluster_id = st.get("cluster_id", self.cluster_id)
@@ -733,12 +732,10 @@ class Worker:
         torch.manual_seed(int.from_bytes(os.urandom(4), "little"))
         loader = Loader(path, a.batch, cfg.block_size, self.dev, rank=int(info["worker"], 16) % 100000, world=1)
         model = GPT(cfg).to(self.dev)
+        from train import make_optimizer
+
         params = dict(model.named_parameters())
-        decay = [p for p in params.values() if p.dim() >= 2]
-        no_decay = [p for p in params.values() if p.dim() < 2]
-        opt = torch.optim.AdamW([{"params": decay, "weight_decay": tr["weight_decay"]},
-                                 {"params": no_decay, "weight_decay": 0.0}],
-                                lr=1e-4, betas=(0.9, 0.95), fused=kind == "cuda")
+        opt = make_optimizer(model, 1e-4, tr["weight_decay"], self.dev)
         glob, version, local_step = None, -1, 0  # glob: the global weights, fp32 on the CPU
         self.status.update(state="ready", tokens_per_round=a.batch * a.grad_accum * cfg.block_size)
         self.say(f"[worker] joined as {self.wid}; {model.num_params() / 1e6:.1f}M params, "

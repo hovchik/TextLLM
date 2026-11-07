@@ -175,7 +175,9 @@ class Writer:
 
 # ---------------------------------------------------------------- local projects
 def slug(folder):
-    name = re.sub(r"[^\w.-]+", "-", os.path.basename(os.path.normpath(folder)) or "project").strip("-")[:40]
+    from core import paths
+
+    name = paths.safe_name(os.path.basename(os.path.normpath(folder)), "project").strip("-")[:40]
     return f"{name or 'project'}-{hashlib.sha1(os.path.abspath(folder).encode()).hexdigest()[:6]}"
 
 

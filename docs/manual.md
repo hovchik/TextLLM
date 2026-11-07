@@ -462,6 +462,10 @@ Each row shows the person, their role (change it in the drop-down; you can't cha
 - **Chat defaults:** the model Chat opens with, creativity and maximum length.
 - **Password:** current password and a new one twice. Other devices get signed out.
 - **Hardware** (admins only): **Train and chat on** automatic, CPU, or a specific GPU. It applies to the next training job and reloads chat models. If you have an NVIDIA card but only the CPU build of PyTorch is installed, the hint tells you to close the Studio and run `run.bat --gpu`.
+- **Links** (admins only): **Allow links to the local network**. Off by default: links you give in Your texts, news sources and style imports are only read from public internet addresses, never from this PC, the router or other PCs on your network (this matters when the Studio is reachable from the internet). Turn it on to read from a NAS or an intranet site.
+- **Fast engines** (admins only): which compiled libraries are installed (llama.cpp for fast GGUF chat, the Rust tokenizer, faiss, ctranslate2, onnxruntime) and the pip command for each missing one. Everything works without them; they make parts faster.
+
+**Safety when the Studio faces the internet.** Every `/api` call needs a signed-in account; eight wrong passwords in a row lock that username for a minute; cross-site requests are refused; model files are only ever loaded as plain tensors (never as code), so an imported model bundle from someone else can't run anything on your PC; and a bundle's saved training command is checked before Resume uses it.
 
 # 18. Command-line equivalents
 

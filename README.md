@@ -409,6 +409,29 @@ about 1.7× faster; set `TEXTLLM_BF16=0` to turn it off.
 
 They run offline on a CPU in well under a minute, using tiny models made on the spot (no downloads).
 
+## The core (`core/`) and the fast engines
+
+`core/` holds the small pieces every path shares (the Studio, the scripts, the cluster, the copilot):
+
+| module | job |
+|---|---|
+| `core.safeload` | loads checkpoints and example caches as plain tensors and numbers (`weights_only`), never as code, so a model bundle from another PC can't run anything here |
+| `core.net` | fetches links without reaching into the local network: public addresses only (checked on the link, on every redirect and on the connection itself), size caps. Turn local links on under Settings → Links or with `TEXTLLM_ALLOW_PRIVATE_URLS=1` |
+| `core.paths` | keeps names and paths from the browser inside the folder they belong to |
+| `core.commands` | checks a run's saved training command before Resume replays it |
+| `core.backends` | which compiled engines are installed (Settings → Fast engines, `python stack_check.py`) |
+| `core.bench` | micro-benchmarks for the hot paths: `python -m core.bench` |
+
+Everything runs on PyTorch and pure Python. These compiled libraries make parts faster when present:
+**tokenizers** (Rust, required) trains and runs the BPE; **llama.cpp** (`llama-cpp-python`) runs the 4-bit GGUF
+copies of fine-tuned models 5-10x faster on a CPU; **faiss** indexes texts for near-duplicate search;
+**ctranslate2** and **onnxruntime** are detected and listed for exported models. The Studio shows what is
+installed and the pip command for anything missing.
+
+Measured on a 4-core CPU with `python -m core.bench` (before → after this core work): token sampling for a
+32k vocabulary 1.48 → 0.15 ms/token, fine-tune example encoding 1.6k → 5.0k examples/s, training batch loading
+8.4k → 23k batches/s, one CPU training step of the `cpu` preset 609 → 517 ms (fused AdamW).
+
 ## Phase 2: a writing model for posts, stories and essays (LoRA)
 The recommended path on CPU: fine-tune a small Apache 2.0 instruct model on writing instructions, run it as a
 4-bit GGUF, write with per-format templates, and only promote a new model when it measurably wins.

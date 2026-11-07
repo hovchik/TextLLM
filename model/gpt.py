@@ -190,13 +190,17 @@ class KVCache:
 
 def sample(logits, temperature=0.8, top_k=50, top_p=0.95):
     """Pick the next token from (B, vocab) logits with temperature, top-k and nucleus sampling."""
-    logits = logits / max(temperature, 1e-5)
-    if top_k:
-        v, _ = torch.topk(logits, min(top_k, logits.size(-1)))
-        logits = logits.masked_fill(logits < v[:, [-1]], -float("inf"))
-    if top_p < 1.0:
+    logits = logits.float() / max(temperature, 1e-5)
+    V = logits.size(-1)
+    k = min(top_k, V) if top_k else V
+    if k >= V and top_p >= 1.0:  # nothing to prune
+        return torch.multinomial(torch.softmax(logits, -1), 1)
+    if k >= V:  # top-p only: needs the full order
         sl, si = torch.sort(logits, descending=True)
+    else:  # topk is already sorted, so nucleus sampling only touches k values instead of the whole
+        sl, si = torch.topk(logits, k)  # vocabulary (sorting 50 numbers instead of 32,000 per token)
+    if top_p < 1.0:
         p = torch.softmax(sl, -1)
         sl = sl.masked_fill(p.cumsum(-1) - p > top_p, -float("inf"))  # keep the smallest set over top_p
-        logits = torch.full_like(logits, -float("inf")).scatter(1, si, sl)
-    return torch.multinomial(torch.softmax(logits, -1), 1)
+    pick = torch.multinomial(torch.softmax(sl, -1), 1)
+    return si.gather(1, pick)

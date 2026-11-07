@@ -142,6 +142,9 @@ def check_source(s):
         raise ValueError(why)
     if s.get("license") not in LICENSES:
         raise ValueError("Choose a license: " + ", ".join(LICENSES))
+    from core import net
+
+    net.check_url(url, dns=False)  # no local addresses (core/net.py); the crawl checks the resolved address too
     if kind in social.KINDS:
         social.parse_target(kind, url)   # raises a helpful ValueError for a link it can't read
         if s["license"] not in SOCIAL_LICENSES:
@@ -337,10 +340,13 @@ class Fetcher:
         """GET with backoff: 2, 4, 8, 16 s on dropped connections, timeouts, 429 and 5xx."""
         import requests
 
+        from core import net
+
         for attempt in range(self.retries + 1):
             self._wait(host)
             try:
-                r = self.s.get(url, headers=headers or {}, timeout=self.timeout, stream=stream, allow_redirects=True)
+                # address check on the link, every redirect and the connection itself (core/net.py)
+                r = net.get(url, headers=headers, timeout=self.timeout, stream=True, session=self.s)
                 if r.status_code in (429, 500, 502, 503, 504) and attempt < self.retries:
                     ra = r.headers.get("Retry-After", "")
                     time.sleep(min(300, int(ra)) if ra.isdigit() else 2 ** (attempt + 1))

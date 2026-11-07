@@ -14,7 +14,7 @@ Create accounts from the command line:
     python -m studio.auth passwd bob
 or open the app: if there are no accounts yet, the first screen creates the admin.
 """
-import hashlib, hmac, json, secrets, time
+import hashlib, hmac, json, secrets, threading, time
 
 from studio import db
 
@@ -161,11 +161,45 @@ def _th(token):
     return hashlib.sha256(token.encode()).hexdigest()
 
 
-def login(username, password):
+# Wrong passwords per (username, client address): after MAX_FAILS in a row the pair is locked for
+# LOCK_SECONDS. Kept in memory: a restart clears it, which is fine for a brute-force brake.
+MAX_FAILS, LOCK_SECONDS = 8, 60
+_fails = {}
+_fails_lock = threading.Lock()
+
+
+def _key(username, client):
+    return ((username or "").strip().lower(), client or "")
+
+
+def locked_out(username, client=""):
+    k = _key(username, client)
+    with _fails_lock:
+        n, last = _fails.get(k, (0, 0))
+        if n >= MAX_FAILS and time.time() - last < LOCK_SECONDS:
+            return True
+        if n >= MAX_FAILS:
+            _fails.pop(k, None)  # the lock has run out
+        return False
+
+
+def _failed(username, client):
+    k, now = _key(username, client), time.time()
+    with _fails_lock:
+        _fails[k] = (_fails.get(k, (0, 0))[0] + 1, now)
+        if len(_fails) > 10000:  # keep memory bounded if someone sprays usernames
+            for old in [kk for kk, (_, t) in _fails.items() if now - t > LOCK_SECONDS]:
+                _fails.pop(old, None)
+
+
+def login(username, password, client=""):
     u = db.q("SELECT * FROM users WHERE username=?", ((username or "").strip(),), one=True)
     if not u or not check_password(password or "", u["pw_hash"]):
+        _failed(username, client)
         time.sleep(0.5)  # slow down guessing
         return None, None
+    with _fails_lock:
+        _fails.pop(_key(username, client), None)
     token = secrets.token_urlsafe(32)
     now = time.time()
     db.ex("DELETE FROM sessions WHERE expires<?", (now,))

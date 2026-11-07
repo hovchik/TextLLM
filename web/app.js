@@ -1558,7 +1558,14 @@ pages.settings = async () => {
         <div class="row end"><button class="btn primary sm" id="s-save-chat">Save</button></div></div>
       ${isAdmin() ? `<div class="card"><h2>Hardware <span class="pill">admin</span></h2>
         <label class="field">Train and chat on<select class="input" id="s-device"></select><span class="hint" id="s-devhint"></span></label>
-        <div class="row end"><button class="btn primary sm" id="s-save-dev">Save</button></div></div>` : ""}
+        <div class="row end"><button class="btn primary sm" id="s-save-dev">Save</button></div></div>
+      <div class="card"><h2>Links <span class="pill">admin</span></h2>
+        <label class="row" style="flex-wrap:nowrap"><span class="switch"><input type="checkbox" id="s-private"><span></span></span> Allow links to the local network</label>
+        <span class="hint">Off (recommended when the Studio is reachable from the internet): links given in Your texts, news sources and style imports are only read from public addresses, never from this PC, the router or other PCs on the network. Turn it on to read from a NAS or an intranet site.</span>
+        <div class="row end"><button class="btn primary sm" id="s-save-links">Save</button></div></div>
+      <div class="card" style="grid-column:1/-1"><h2>Fast engines <span class="pill">admin</span></h2>
+        <p class="muted" style="margin:0 0 8px">Everything runs on PyTorch; these compiled libraries make parts of it faster when installed.</p>
+        <div id="s-engines" class="hint">Loading…</div></div>` : ""}
       <div class="card"><h2>Password</h2>
         <label class="field">Current password<input class="input" type="password" id="s-cur" autocomplete="current-password"></label>
         <label class="field">New password<input class="input" type="password" id="s-new" autocomplete="new-password"><span class="hint">At least 6 characters. Other devices get signed out.</span></label>
@@ -1572,10 +1579,14 @@ pages.settings = async () => {
       const ch = dv.choices || [{ id: "auto", name: "Automatic" }, { id: "cpu", name: "CPU" }];
       if (dv.choice && !ch.some((c) => c.id === dv.choice)) ch.push({ id: dv.choice, name: `${dv.choice} (not found on this PC)` });
       $("#s-device").innerHTML = ch.map((c) => `<option value="${esc(c.id)}" ${c.id === (dv.choice || "auto") ? "selected" : ""}>${esc(c.name)}</option>`).join("");
+      $("#s-private").checked = !!S.status.settings?.allow_private_urls;
+      const eng = dv.engines || [];
+      $("#s-engines").innerHTML = eng.length ? `<div class="table-scroll"><table><thead><tr><th>Library</th><th>Speeds up</th><th>Status</th></tr></thead><tbody>${eng.map((e) => `<tr><td class="mono">${esc(e.name)}</td><td>${esc(e.speeds_up)}</td><td>${e.installed ? `<span class="pill good">installed ${esc(e.version || "")}</span>` : `<span class="pill">not installed</span> <span class="hint mono">${esc(e.install)}</span>`}</td></tr>`).join("")}</tbody></table></div>` : "No information.";
       $("#s-devhint").innerHTML = `Now: <b>${esc(dv.name || "?")}</b>. Applies to the next training job and reloads chat models.${dv.hint ? "<br>" + esc(dv.hint) : ""}${!dv.cuda_build ? "<br>For an NVIDIA GPU this PyTorch has to be the CUDA build: close the Studio and run <span class=\"mono\">run.bat --gpu</span> (or <span class=\"mono\">./run.sh --gpu</span>)." : ""}`;
     };
     drawDev();
     $("#s-save-dev").onclick = async () => { try { await api("/api/settings", { json: { device: $("#s-device").value } }); toast("Saved", "ok"); drawDev(); } catch (e) { fail(e); } };
+    $("#s-save-links").onclick = async () => { try { S.status.settings = await api("/api/settings", { json: { allow_private_urls: $("#s-private").checked } }); toast("Saved", "ok"); } catch (e) { fail(e); } };
   }
   $("#s-temp").oninput = (e) => ($("#s-tv").textContent = e.target.value);
   $("#s-max").oninput = (e) => ($("#s-mv").textContent = e.target.value);

@@ -16,6 +16,7 @@ from torch.nn.parallel import DistributedDataParallel as DDP
 
 import devices
 import graceful
+from core import safeload
 from model.gpt import GPT, GPTConfig, PRESETS
 from writing import hf
 
@@ -49,11 +50,25 @@ class Loader:
 
     def next(self):
         ix = self.rng.integers(0, len(self.data) - self.block - 1, self.batch)
-        x = torch.from_numpy(np.stack([self.data[i : i + self.block].astype(np.int64) for i in ix]))
-        y = torch.from_numpy(np.stack([self.data[i + 1 : i + 1 + self.block].astype(np.int64) for i in ix]))
+        # one gather per tensor for the whole batch (no per-row Python loop)
+        pos = ix[:, None] + np.arange(self.block)[None, :]
+        x = torch.from_numpy(self.data[pos].astype(np.int64))
+        y = torch.from_numpy(self.data[pos + 1].astype(np.int64))
         if devices.kind(self.device) == "cuda":
             return x.pin_memory().to(self.device, non_blocking=True), y.pin_memory().to(self.device, non_blocking=True)
         return x.to(self.device), y.to(self.device)
+
+
+def make_optimizer(model, lr, weight_decay, device, betas=(0.9, 0.95)):
+    """AdamW with weight decay only on matrices. The fused kernel updates all parameters in one
+    pass; PyTorch has it for CUDA and (since 2.4) for the CPU, so it is used wherever it works."""
+    decay = [p for p in model.parameters() if p.dim() >= 2]
+    no_decay = [p for p in model.parameters() if p.dim() < 2]
+    groups = [{"params": decay, "weight_decay": weight_decay}, {"params": no_decay, "weight_decay": 0.0}]
+    try:
+        return torch.optim.AdamW(groups, lr=lr, betas=betas, fused=devices.kind(device) in ("cuda", "cpu"))
+    except (RuntimeError, ValueError):  # an older PyTorch without fused CPU AdamW
+        return torch.optim.AdamW(groups, lr=lr, betas=betas)
 
 
 def lr_at(step, a):
@@ -80,7 +95,6 @@ def main():
     torch.backends.cuda.matmul.allow_tf32 = True
 
     kind = devices.kind(a.device)
-    cuda = kind == "cuda"
     dtype = devices.train_dtype(a.device)
     autocast = devices.autocast(a.device, dtype)
     prec = str(dtype).split(".")[-1]
@@ -99,18 +113,13 @@ def main():
     if a.resume and os.path.exists(ckpt_path):
         # Load on the CPU first: a checkpoint saved on a GPU machine loads on a CPU one and the other
         # way round, and the GPU doesn't hold two copies of the weights while loading.
-        ck = torch.load(ckpt_path, map_location="cpu", weights_only=False)
+        ck = safeload.load(ckpt_path)
         cfg = GPTConfig(**ck["config"])  # the saved size wins over --preset/--vocab
     elif a.resume and master:
         print(f"no checkpoint at {ckpt_path}; starting from step 0")
     model = GPT(cfg).to(a.device)
 
-    decay = [p for p in model.parameters() if p.dim() >= 2]
-    no_decay = [p for p in model.parameters() if p.dim() < 2]
-    opt = torch.optim.AdamW(
-        [{"params": decay, "weight_decay": a.weight_decay}, {"params": no_decay, "weight_decay": 0.0}],
-        lr=a.lr, betas=(0.9, 0.95), fused=cuda,
-    )
+    opt = make_optimizer(model, a.lr, a.weight_decay, a.device)
     if ck is not None:
         model.load_state_dict(ck["model"])
         if ck.get("opt"):  # a cluster-trained checkpoint (cluster.py) has no optimizer state

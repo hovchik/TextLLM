@@ -15,6 +15,7 @@ ROOT = os.path.dirname(os.path.abspath(__file__))
 RUNS = os.path.join(ROOT, "runs")
 
 import devices  # noqa: E402
+from core import safeload  # noqa: E402
 from writing import formats as F  # noqa: E402
 from writing import hf  # noqa: E402
 
@@ -114,7 +115,7 @@ class Engine:
             from model.gpt import GPT, GPTConfig
 
             self.tok = Tokenizer.from_file(tokenizer_path(run_dir, self.meta))
-            ck = torch.load(os.path.join(run_dir, "ckpt.pt"), map_location="cpu")
+            ck = safeload.load(os.path.join(run_dir, "ckpt.pt"))
             self.model = GPT(GPTConfig(**ck["config"])).to(self.device).eval()
             self.model.load_state_dict(ck["model"])
             self.step = ck.get("step")

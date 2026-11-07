@@ -34,6 +34,7 @@ ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, ROOT)
 import devices  # noqa: E402
 import graceful  # noqa: E402
+from core import safeload  # noqa: E402
 from coding import fim, langs as L  # noqa: E402
 from writing import formats as F  # noqa: E402
 from writing import hf  # noqa: E402
@@ -197,7 +198,7 @@ def code_pairs(tok, code_dir, n, seq, rng, fim_rate=0.5, chat_share=0.2, langs=N
 def encode(tok, pairs, seq):
     """pairs: (prompt, response[, system[, raw]]). raw=True examples (code completion) skip the chat
     template: the prompt is given as it is and the response ends with the end-of-text token."""
-    out, end = [], None
+    prompts, fulls, end = [], [], None
     for pr in pairs:
         prompt, resp, system, raw = (tuple(pr) + (None, None))[:4]
         if raw:
@@ -205,8 +206,16 @@ def encode(tok, pairs, seq):
             p, full = prompt, prompt + resp + end
         else:
             p, full = fmt(tok, prompt, resp, system)
-        pi = tok(p, add_special_tokens=False)["input_ids"]
-        fi = tok(full, add_special_tokens=False)["input_ids"][:seq]
+        prompts.append(p)
+        fulls.append(full)
+    out = []
+    if not fulls:
+        return out
+    # one batched call per list: the Rust tokenizer encodes on all cores instead of one text at a time
+    pis = tok(prompts, add_special_tokens=False)["input_ids"]
+    fis = tok(fulls, add_special_tokens=False)["input_ids"]
+    for pi, fi in zip(pis, fis):
+        fi = fi[:seq]
         labels = [-100] * min(len(pi), len(fi)) + fi[len(pi):]  # loss only on the response
         if any(l != -100 for l in labels):
             out.append((fi, labels))
@@ -253,7 +262,7 @@ def main():
     ex_p = os.path.join(a.out, "examples.pt")
     if a.resume and os.path.exists(ex_p):
         # The exact examples this run was trained on (kept in the run folder, so it moves with it).
-        data = torch.load(ex_p, weights_only=False)
+        data = safeload.load(ex_p)
         print(f"using this run's saved examples ({len(data)})")
     else:
         data = load_or_encode(a, tok, rng, cache=not a.private_texts)
@@ -292,7 +301,7 @@ def main():
     state_p = os.path.join(a.out, "train_state.pt")
     state = None
     if a.resume and os.path.exists(state_p) and os.path.isdir(os.path.join(a.out, "adapter")):
-        state = torch.load(state_p, map_location="cpu", weights_only=False)
+        state = safeload.load(state_p)
         a.init_adapter = os.path.join(a.out, "adapter")
     elif a.resume and os.path.isdir(os.path.join(a.out, "adapter")):
         print("no train_state.pt (made by an older version): continuing from the saved adapter weights "
@@ -438,7 +447,7 @@ def load_or_encode(a, tok, rng, cache=True):
     path = os.path.join(ROOT, "data", "cache", hashlib.sha1(key.encode()).hexdigest()[:16] + ".pt")
     if cache and os.path.exists(path):
         print(f"using cached tokenized examples ({os.path.relpath(path, ROOT)})")
-        return torch.load(path)
+        return safeload.load(path)
     pairs = []
     if a.instructions:
         rows = [json.loads(l) for l in open(a.instructions, encoding="utf-8") if l.strip()]

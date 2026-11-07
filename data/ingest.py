@@ -100,9 +100,9 @@ def from_file(path):
 
 def from_url(url, tmpdir):
     """Download to a temp file, extract, and leave deletion to the caller (tmpdir is removed)."""
-    import requests
+    from core import net
 
-    r = requests.get(url, headers=UA, timeout=60)
+    r = net.get(url, timeout=60)  # refuses local-network addresses, caps the size
     r.raise_for_status()
     ctype = r.headers.get("content-type", "").lower()
     name = os.path.basename(url.split("?")[0]) or "page"

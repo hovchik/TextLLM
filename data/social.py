@@ -108,7 +108,7 @@ def stated_license(text):
         found.append("0" if m.group(1) else m.group(2))
     best = None
     for code in found:
-        bits = code.lower().replace(" ", "-").split("-")
+        bits = re.split(r"[\s-]+", code.lower())   # any whitespace the regex accepted (NBSP, newline)
         if "nc" in bits or "nd" in bits:
             return None   # a restrictive license anywhere in the profile: stay out
         lic = "cc0" if code == "0" else "cc-by-sa" if "sa" in bits else "cc-by"
@@ -148,6 +148,8 @@ def html_text(h):
     """Mastodon post/profile HTML → plain text with paragraph breaks."""
     h = re.sub(r"<br\s*/?>", "\n", h or "", flags=re.I)
     h = re.sub(r"</p>\s*<p[^>]*>", "\n\n", h, flags=re.I)
+    # plain links go entirely (before their hidden "https://" span is dropped); mentions and hashtags stay
+    h = re.sub(r"<a\b(?![^>]*class=\"[^\"]*\b(?:mention|hashtag)\b)[^>]*>.*?</a>", "", h, flags=re.I | re.S)
     h = re.sub(r"<span class=\"invisible\">[^<]*</span>", "", h)   # Mastodon hides parts of long links
     return htmlmod.unescape(re.sub(r"<[^>]+>", "", h)).strip()
 

@@ -155,4 +155,23 @@ assert errs["3k2"] == "author opted out" and errs["3k3"] == "reply" and errs["3k
 n0 = len(calls)
 assert crawl.crawl() == 0
 print("second run added 0, API calls", len(calls) - n0)
+
+# review fixes: NC/ND split by any whitespace, Mastodon link HTML, retrying a post whose save failed
+assert social.stated_license("CC BY\u00a0NC 4.0") is None and social.stated_license("CC BY\nND") is None
+h = ('<p>Read <a href="https://example.com/private"><span class="invisible">https://</span><span>example.com/private</span></a> '
+     'hi <span class="h-card"><a href="https://m.ex/@bob" class="u-url mention">@<span>bob</span></a></span> '
+     '<a href="https://m.ex/tags/poem" class="mention hashtag" rel="tag">#<span>poem</span></a></p>')
+assert social.scrub(social.html_text(h)) == "Read hi @someone #poem", social.scrub(social.html_text(h))
+
+MASTO[:] = [status(20, cc, LONG + " retry me")]
+real_append, boom = crawl._append, {"n": 1}
+def flaky(path, doc):
+    if boom["n"]:
+        boom["n"] -= 1
+        raise OSError("disk full")
+    real_append(path, doc)
+crawl._append = flaky
+assert crawl.crawl() == 0          # the save fails: the post stays retryable
+crawl._append = real_append
+assert crawl.crawl() == 1          # ...and is added on the next run
 print("ALL OK")

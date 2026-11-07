@@ -583,13 +583,15 @@ def save_text(c, s, url, title, text, published, languages=(), lang=None, extra=
 def fetch_social(f, c, s, languages=()):
     """Read a Mastodon or Bluesky source: posts come with their text, so there is no second download.
     Returns (added, skipped)."""
-    added = skipped = 0
+    added = skipped = failed = 0
     for p in social.posts(f, s):
         url = p["url"]
-        if c.execute("SELECT 1 FROM items WHERE url=?", (url,)).fetchone():
-            continue   # seen in an earlier run (kept, skipped or failed)
-        c.execute("INSERT INTO items(url, source, title, published, found) VALUES(?,?,?,?,?)",
-                  (url, s["id"], "", p["published"], time.time()))
+        old = c.execute("SELECT status, attempts FROM items WHERE url=?", (url,)).fetchone()
+        if old and (old["status"] in ("done", "skipped") or old["attempts"] >= 3):
+            continue   # decided in an earlier run; queued/failed ones (a save that broke) are retried
+        if not old:
+            c.execute("INSERT INTO items(url, source, title, published, found) VALUES(?,?,?,?,?)",
+                      (url, s["id"], "", p["published"], time.time()))
         reason = p["skip"] or (f"only {len(p['text'])} characters" if len(p["text"]) < s.get("min_chars", 120) else None)
         if reason:
             c.execute("UPDATE items SET status='skipped', error=?, fetched=? WHERE url=?", (reason, time.time(), url))
@@ -598,14 +600,23 @@ def fetch_social(f, c, s, languages=()):
             continue
         lang = p["lang"] if p["lang"] and len(p["text"]) < 400 else None   # short posts: trust the author's tag
         extra = {"author": p["author"], "license": p["license"]} if p["license"] != s["license"] else {"author": p["author"]}
-        if save_text(c, s, url, "", p["text"], p["published"], languages, lang, extra) is False:
+        try:
+            saved = save_text(c, s, url, "", p["text"], p["published"], languages, lang, extra)
+        except OSError as e:   # e.g. disk full: keep the post retryable instead of losing it
+            c.execute("UPDATE items SET status='failed', attempts=attempts+1, error=?, fetched=? WHERE url=?",
+                      (f"{type(e).__name__}: {e}"[:300], time.time(), url))
+            c.commit()
+            failed += 1
+            say(f"  ✗ {url}: {type(e).__name__}: {str(e)[:120]}")
+            continue
+        if saved is False:
             skipped += 1
             continue
         added += 1
         say(f"  ✓ {p['text'][:70].replace(chr(10), ' ')} ({len(p['text']):,} chars, {p['license']})")
     if skipped:
         say(f"  {skipped} post(s) skipped (replies, boosts, opt-outs, no open license, too short, duplicates)")
-    return added, 0
+    return added, failed
 
 
 def fetch_items(f, c, s, min_chars, limit, languages=()):

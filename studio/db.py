@@ -40,7 +40,7 @@ CREATE TABLE IF NOT EXISTS pairs (          -- blind A/B comparisons (evaluate.p
 );
 """
 
-DEFAULT_SETTINGS = {"device": "auto",  # where training and chat run: auto | cpu | cuda | cuda:1 | mps | xpu
+DEFAULT_SETTINGS = {"allow_private_urls": False, "device": "auto",  # where training and chat run: auto | cpu | cuda | cuda:1 | mps | xpu
                     "auto_train": True, "auto_threshold": 10, "default_model": None, "gate_on_feedback": True,
                     "feedback_epochs": 3, "feedback_lr": 5e-5, "feedback_beta": 0.1,  # feedback_train.py
                     # news & web crawler (data/crawl.py), run by the scheduler in app.py

@@ -14,6 +14,7 @@ import numpy as np
 ROOT = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, ROOT)
 import graceful  # noqa: E402
+from core import safeload  # noqa: E402
 from data.ingest import EOT, ingest  # noqa: E402
 from graceful import run_child  # noqa: E402
 
@@ -37,7 +38,7 @@ def learn_scratch(a, meta, text_dir, tmp):
 
     from chat_engine import tokenizer_path
 
-    ck = torch.load(os.path.join(a.run, "ckpt.pt"), map_location="cpu")
+    ck = safeload.load(os.path.join(a.run, "ckpt.pt"))
     cfg, step = ck["config"], ck["step"]
     tok = Tokenizer.from_file(tokenizer_path(a.run, meta))
     eot = tok.token_to_id(EOT)

@@ -195,10 +195,21 @@ def from_mastodon_archive(path):
 
 
 # ---------------------------------------------------------------- APIs
+_api = {}  # one requests.Session for the paginated API calls
+
+
 def _get_json(url, params=None):
+    from urllib.parse import urlencode
+
     import requests
 
-    r = requests.get(url, params=params, timeout=30, headers={"User-Agent": "textllm-style-import/1.0"})
+    from core import net
+
+    if params:
+        url = url + ("&" if "?" in url else "?") + urlencode(params)
+    if "s" not in _api:
+        _api["s"] = requests.Session()
+    r = net.get(url, timeout=30, max_bytes=50 << 20, session=_api["s"])
     try:
         data = r.json()
     except ValueError:

@@ -10,6 +10,8 @@ so the tokenizer, train.py and finetune_lora.py all pick it up from data/raw/.
 """
 import argparse, hashlib, os, re, shutil, subprocess, sys, tempfile, time
 
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))  # the repo root, for core/
+
 EOT = "<|endoftext|>"
 TEXT_EXT = {".txt", ".md", ".markdown", ".text"}
 UA = {"User-Agent": "text-llm-ingest/1.0"}
@@ -100,9 +102,9 @@ def from_file(path):
 
 def from_url(url, tmpdir):
     """Download to a temp file, extract, and leave deletion to the caller (tmpdir is removed)."""
-    import requests
+    from core import net
 
-    r = requests.get(url, headers=UA, timeout=60)
+    r = net.get(url, timeout=60)  # refuses local-network addresses, caps the size
     r.raise_for_status()
     ctype = r.headers.get("content-type", "").lower()
     name = os.path.basename(url.split("?")[0]) or "page"

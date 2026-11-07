@@ -14,6 +14,7 @@ from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel
 
 from chat_engine import ROOT, RUNS
+from core import paths as core_paths
 from studio import jobs
 
 router = APIRouter()
@@ -226,15 +227,15 @@ def code_prepare(r: PrepareReq):
 
 @router.delete("/api/code/sources/{sid:path}")
 def code_delete(sid: str):
-    rel = os.path.normpath(sid.strip().replace("\\", "/"))
-    d = os.path.normpath(os.path.join(CODE, rel))
-    ok = rel in ("github", "hf") or (rel.startswith("local" + os.sep) and rel.count(os.sep) == 1)
-    if not ok or not d.startswith(CODE + os.sep) or not os.path.isdir(d):
+    parts = sid.strip().replace("\\", "/").split("/")
+    d = core_paths.under(CODE, *parts)
+    ok = parts in (["github"], ["hf"]) or (len(parts) == 2 and parts[0] == "local")
+    if not ok or d is None or not os.path.isdir(d):
         err(f"no code source named {sid}", 404)
     if jobs.running() and jobs.JOB["kind"] == "data":
         err("Stop the running data job first.", 409)
     shutil.rmtree(d)
-    if rel == "github" and os.path.exists(os.path.join(CODE, "ATTRIBUTION.md")):
+    if parts == ["github"] and os.path.exists(os.path.join(CODE, "ATTRIBUTION.md")):
         os.remove(os.path.join(CODE, "ATTRIBUTION.md"))
     return code_state()
 

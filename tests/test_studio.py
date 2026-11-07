@@ -1,5 +1,5 @@
 """Studio internals: the database, job stopping, the status poll and the feedback gate."""
-import json, os, subprocess, sys, time
+import importlib, json, os, subprocess, sys, time
 
 import pytest
 
@@ -171,3 +171,40 @@ def test_api_requires_sign_in():
     c = TestClient(app.app)
     assert c.get("/api/auth/state").status_code == 200
     assert c.get("/api/status").status_code == 401
+
+
+def test_login_lockout_origin_check_and_headers(tmp_path, monkeypatch):
+    from fastapi.testclient import TestClient
+
+    import app
+    from studio import auth, db
+
+    monkeypatch.setattr(db, "DB_PATH", str(tmp_path / "studio.db"))
+    db.init()
+    importlib.reload(auth)  # the users/sessions tables are created when studio.auth is imported
+    c = TestClient(app.app)
+    r = c.post("/api/auth/setup", json={"username": "admin", "password": "secret123"})
+    assert r.status_code == 200 and r.headers["x-content-type-options"] == "nosniff"
+    assert "secure" not in r.headers["set-cookie"].lower()  # plain http: the cookie must still work
+    # a cross-site POST is refused even with the cookie; same-origin and non-browser calls pass
+    assert c.post("/api/settings", json={"auto_train": False}, headers={"Origin": "https://evil.example"}).status_code == 403
+    assert c.post("/api/settings", json={"auto_train": False}, headers={"Origin": "null"}).status_code == 403
+    assert c.post("/api/settings", json={"auto_train": False}, headers={"Origin": "http://testserver"}).status_code == 200
+    assert c.post("/api/settings", json={"auto_train": False}).status_code == 200
+    # the local-network link setting reaches core.net and the jobs' environment
+    assert c.post("/api/settings", json={"allow_private_urls": True}).status_code == 200
+    assert os.environ.get("TEXTLLM_ALLOW_PRIVATE_URLS") == "1"
+    c.post("/api/settings", json={"allow_private_urls": False})
+    assert "TEXTLLM_ALLOW_PRIVATE_URLS" not in os.environ
+    # run names from the browser never leave runs/
+    for bad in ("..", "_uploads", ".hidden", "_data", "%2e%2e"):
+        assert c.get(f"/api/runs/{bad}").status_code == 404, bad
+        assert c.delete(f"/api/runs/{bad}").status_code == 404, bad
+    assert c.post("/api/texts", data={"urls": "http://127.0.0.1:7860/api/users", "action": "ingest"}).status_code == 400
+    # eight wrong passwords lock the username for a minute
+    monkeypatch.setattr(auth.time, "sleep", lambda s: None)
+    for _ in range(auth.MAX_FAILS):
+        assert c.post("/api/auth/login", json={"username": "admin", "password": "nope"}).status_code == 401
+    assert c.post("/api/auth/login", json={"username": "admin", "password": "secret123"}).status_code == 429
+    auth._fails.clear()
+    assert c.post("/api/auth/login", json={"username": "admin", "password": "secret123"}).status_code == 200

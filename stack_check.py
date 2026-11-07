@@ -7,7 +7,10 @@
 Each package also gets a tiny offline smoke test (no downloads), so "OK" means it really works
 here, not just that pip installed it. Exit code is 0 when every core package works.
 """
-import argparse, importlib, importlib.metadata as md, sys, time
+import argparse, importlib, os, sys, time
+
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+from core import backends  # noqa: E402
 
 # (pip name, import name, group, what it unlocks)
 PACKAGES = [
@@ -26,7 +29,7 @@ PACKAGES = [
     ("rapidfuzz", "rapidfuzz", "ai", "Fast fuzzy string matching"),
     ("gguf", "gguf", "ai", "Read/write GGUF files for llama.cpp"),
     ("tensorboard", "tensorboard", "ai", "Loss curves in the browser: tensorboard --logdir runs"),
-    ("llama-cpp-python", "llama_cpp", "fast", "Fast 4-bit GGUF chat on CPU"),
+] + [(pip, imp, grp, what) for imp, pip, grp, what, _ in backends.ENGINES if grp == "fast"] + [
     ("bitsandbytes", "bitsandbytes", "gpu", "4/8-bit loading (QLoRA) and 8-bit optimizers"),
     ("liger-kernel", "liger_kernel", "gpu", "Fused Triton kernels: faster, leaner training (Linux)"),
 ]
@@ -88,10 +91,7 @@ def main():
     print("-" * 100)
     core_ok, missing = True, []
     for pip_name, mod, group, unlocks in PACKAGES:
-        try:
-            ver = md.version(pip_name)
-        except md.PackageNotFoundError:
-            ver = None
+        ver = backends.version(pip_name)
         status, note = "missing", ""
         if ver:
             try:

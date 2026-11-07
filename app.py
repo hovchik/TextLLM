@@ -8,6 +8,7 @@ Sign-in is required. The first visit creates the admin account; admins add more 
 Users page (or with `python -m studio.auth add NAME`). Regular users only see Chat and Settings.
 """
 import argparse, glob, json, os, re, shutil, threading, time
+from urllib.parse import urlsplit
 
 from fastapi import FastAPI, File, Form, HTTPException, Request, Response, UploadFile
 from fastapi.responses import FileResponse, JSONResponse, StreamingResponse
@@ -21,6 +22,7 @@ from studio import auth, db, feedback, gate, jobs
 from writing import formats as F
 from studio import styles
 from studio import copilot
+from core import backends as core_backends, commands as core_commands, net as core_net, paths as core_paths
 
 PY = jobs.PY
 WEB = os.path.join(ROOT, "web")
@@ -39,9 +41,17 @@ def _launch(*a, **kw):
         err(str(e), 409)
 
 
+def run_name(raw, default="my-model"):
+    """A run name from the browser: letters, digits, - _ . only, and never one of the Studio's own
+    _folders (runs/_uploads, runs/_cluster, ...)."""
+    name = core_paths.safe_name(raw, default)
+    return default if name.startswith("_") else name
+
+
 def run_dir(name):
-    d = os.path.join(RUNS, os.path.basename(name))
-    if not os.path.isdir(d):
+    """The run folder for an existing model named by the browser; 404 for anything else."""
+    d = os.path.join(RUNS, run_name(name or "", default=""))
+    if not name or run_name(name, default="") != name or not os.path.isdir(d):
         err(f"no run named {name}", 404)
     return d
 
@@ -59,11 +69,35 @@ USER_ROUTES = [(m, re.compile(p)) for m, p in [
 ]]
 
 
+def _same_origin(request):
+    """A browser sends Origin on cross-site requests; a different host means another site is trying
+    to use this person's cookie (CSRF). Same-site requests and non-browser clients pass."""
+    origin = request.headers.get("origin")
+    if not origin:
+        return True
+    if origin == "null":  # a sandboxed frame or a file:// page: never one of our own
+        return False
+    # behind a reverse proxy the browser's host arrives in X-Forwarded-Host
+    host = request.headers.get("x-forwarded-host") or request.headers.get("host") or ""
+    return urlsplit(origin).netloc.lower() == host.split(",")[0].strip().lower()
+
+
 @app.middleware("http")
 async def require_login(request: Request, call_next):
     path, method = request.url.path, request.method
     if not path.startswith("/api/") or (method, path) in PUBLIC_ROUTES:
-        return await call_next(request)
+        resp = await call_next(request)
+    else:
+        resp = await _api_request(request, call_next, path, method)
+    resp.headers.setdefault("X-Content-Type-Options", "nosniff")
+    resp.headers.setdefault("X-Frame-Options", "DENY")
+    resp.headers.setdefault("Referrer-Policy", "same-origin")
+    return resp
+
+
+async def _api_request(request, call_next, path, method):
+    if method not in ("GET", "HEAD", "OPTIONS") and not _same_origin(request):
+        return JSONResponse({"detail": "Cross-site requests are not allowed."}, status_code=403)
     user = auth.user_for_token(request.cookies.get(auth.COOKIE))
     if not user:
         return JSONResponse({"detail": "Please sign in."}, status_code=401)
@@ -89,8 +123,10 @@ def own_conversation(request, cid):
     return c
 
 
-def _set_cookie(resp, token):
-    resp.set_cookie(auth.COOKIE, token, max_age=auth.SESSION_DAYS * 86400, httponly=True, samesite="lax")
+def _set_cookie(resp, token, request=None):
+    https = bool(request) and (request.url.scheme == "https" or request.headers.get("x-forwarded-proto") == "https")
+    resp.set_cookie(auth.COOKIE, token, max_age=auth.SESSION_DAYS * 86400, httponly=True, samesite="lax",
+                    secure=https)
 
 
 class LoginReq(BaseModel):
@@ -106,7 +142,7 @@ def auth_state(request: Request):
 
 
 @app.post("/api/auth/setup")
-def auth_setup(r: LoginReq, response: Response):
+def auth_setup(r: LoginReq, request: Request, response: Response):
     """First run only: create the admin account."""
     if auth.count_users():  # quick answer; create_user re-checks atomically
         err("Accounts already exist. Sign in instead.", 409)
@@ -117,16 +153,19 @@ def auth_setup(r: LoginReq, response: Response):
     except ValueError as e:
         err(str(e))
     token, user = auth.login(r.username, r.password)
-    _set_cookie(response, token)
+    _set_cookie(response, token, request)
     return user
 
 
 @app.post("/api/auth/login")
-def auth_login(r: LoginReq, response: Response):
-    token, user = auth.login(r.username, r.password)
+def auth_login(r: LoginReq, request: Request, response: Response):
+    client = (request.headers.get("x-forwarded-for") or "").split(",")[0].strip() or (request.client.host if request.client else "")
+    if auth.locked_out(r.username, client):
+        err("Too many wrong passwords. Wait a minute and try again.", 429)
+    token, user = auth.login(r.username, r.password, client=client)
     if not token:
         err("Wrong username or password.", 401)
-    _set_cookie(response, token)
+    _set_cookie(response, token, request)
     return user
 
 
@@ -172,7 +211,7 @@ def update_me(r: MeReq, request: Request, response: Response):
         err(str(e))
     if r.new_password is not None:  # changing the password signs out other sessions; keep this one
         token, _ = auth.login(u["username"], r.new_password)
-        _set_cookie(response, token)
+        _set_cookie(response, token, request)
     return out
 
 
@@ -230,11 +269,21 @@ def device_info():
     if _DEVICE is None:
         # doesn't change while the app runs, except when the device setting changes (apply_device)
         _DEVICE = {**devices.info(), "choice": db.get_settings().get("device", "auto"),
-                   "choices": devices.available()}
+                   "choices": devices.available(), "engines": core_backends.report()}
     return _DEVICE
 
 
 _ENV_DEVICE = os.environ.get("TEXTLLM_DEVICE")  # set outside the Studio: wins while the setting is "auto"
+_ENV_PRIVATE_URLS = os.environ.get("TEXTLLM_ALLOW_PRIVATE_URLS")  # same for local-network links
+
+
+def apply_private_urls(allow):
+    """Links into the local network (core/net.py reads TEXTLLM_ALLOW_PRIVATE_URLS; jobs inherit it).
+    Like the device: the environment set before starting the Studio wins while the setting is off."""
+    if allow or _ENV_PRIVATE_URLS:
+        os.environ["TEXTLLM_ALLOW_PRIVATE_URLS"] = "1" if allow else _ENV_PRIVATE_URLS
+    else:
+        os.environ.pop("TEXTLLM_ALLOW_PRIVATE_URLS", None)
 
 
 def apply_device(dev):
@@ -376,7 +425,7 @@ async def my_posts_add(files: list[UploadFile] = File(default=[])):
         name = os.path.basename(f.filename or "")
         if not name.lower().endswith((".txt", ".jsonl")):
             err(f"{name or 'file'}: use a .txt file (posts separated by --- lines) or .jsonl")
-        with open(os.path.join(MY_POSTS, re.sub(r"[^\w.-]", "_", name)), "wb") as o:
+        with open(os.path.join(MY_POSTS, core_paths.safe_name(name, "posts.txt")), "wb") as o:
             shutil.copyfileobj(f.file, o)
     return my_posts_list()
 
@@ -433,7 +482,7 @@ class TrainReq(BaseModel):
 
 @app.post("/api/train")
 def train(r: TrainReq):
-    name = "".join(c if c.isalnum() or c in "-_." else "-" for c in r.name.strip()) or "my-model"
+    name = run_name(r.name)
     out = os.path.join(RUNS, name)
     code = r.task == "code"
     resuming_saved = r.resume and os.path.exists(os.path.join(out, "train_cmd.json"))
@@ -511,7 +560,10 @@ def train(r: TrainReq):
     saved_cmd = os.path.join(out, "train_cmd.json")
     if r.resume and os.path.exists(saved_cmd):
         # Continue with the run's own settings (LR schedule, batch, data), not today's form values.
-        cmd = [PY] + json.load(open(saved_cmd))
+        try:
+            cmd = [PY] + core_commands.check(json.load(open(saved_cmd)))
+        except (ValueError, OSError) as e:  # a bundle from elsewhere with an odd command: don't run it
+            err(f"This run's saved training command can't be used: {e}")
         cmd = [out if i > 0 and cmd[i - 1] == "--out" else c for i, c in enumerate(cmd)]
         if "--resume" not in cmd:
             cmd.append("--resume")
@@ -582,7 +634,7 @@ def _read_json(p):
 def cluster_start(r: ClusterReq):
     import secrets as _secrets
 
-    name = "".join(c if c.isalnum() or c in "-_." else "-" for c in r.name.strip()) or "cluster-writer"
+    name = run_name(r.name, "cluster-writer")
     out = os.path.join(RUNS, name)
     resuming = r.resume and os.path.exists(os.path.join(out, "ckpt.pt"))
     code = r.task == "code"
@@ -797,6 +849,11 @@ async def texts(files: list[UploadFile] = File(default=[]), urls: str = Form("")
     path_list = [p.strip().strip('"') for p in paths.splitlines() if p.strip()]
     if not (saved or url_list or path_list):
         err("Add files, links or a folder path.")
+    for u in url_list:
+        try:
+            core_net.check_url(u)
+        except ValueError as e:
+            err(str(e))
     if action == "learn":
         if not model:
             err("Choose a trained model to teach.")
@@ -1118,6 +1175,7 @@ def feedback_train(r: FeedbackTrainReq):
 
 class SettingsReq(BaseModel):
     device: str | None = None
+    allow_private_urls: bool | None = None   # read links that point into the local network (NAS, intranet)
     auto_train: bool | None = None
     auto_threshold: int | None = None
     gate_on_feedback: bool | None = None
@@ -1139,6 +1197,8 @@ def settings(r: SettingsReq):
     out = db.set_settings(**kw)
     if "device" in kw:
         apply_device(kw["device"])
+    if "allow_private_urls" in kw:
+        apply_private_urls(kw["allow_private_urls"])
     return out
 
 
@@ -1156,9 +1216,8 @@ SOURCE_NOTES = {
 
 def corpus_dir(source):
     """data/raw/<source> (one folder level, or news/<id>); refuses anything outside data/raw."""
-    rel = os.path.normpath(source.strip().replace("\\", "/"))
-    d = os.path.normpath(os.path.join(RAW, rel))
-    if not rel or rel.startswith("..") or os.path.isabs(rel) or not d.startswith(RAW + os.sep) or not os.path.isdir(d):
+    d = core_paths.under(RAW, *source.strip().replace("\\", "/").split("/"))
+    if d is None or not os.path.isdir(d):
         err(f"no corpus folder named {source}", 404)
     return d
 
@@ -1296,6 +1355,7 @@ def crawl_scheduler():
 
 @app.on_event("startup")
 def _start_scheduler():
+    apply_private_urls(db.get_settings().get("allow_private_urls", False))
     apply_device(db.get_settings().get("device", "auto"))
     threading.Thread(target=crawl_scheduler, daemon=True, name="crawl-scheduler").start()
     # The server answers at once; PyTorch (seconds to import) loads meanwhile for the device info.

@@ -8,6 +8,7 @@ import torch
 from tokenizers import Tokenizer
 
 import devices
+from core import safeload
 from model.gpt import GPT, GPTConfig
 
 ap = argparse.ArgumentParser()
@@ -24,7 +25,7 @@ a = ap.parse_args()
 a.device = devices.pick(a.device)
 
 tok = Tokenizer.from_file(a.tok)
-ck = torch.load(a.ckpt, map_location="cpu")
+ck = safeload.load(a.ckpt)
 model = GPT(GPTConfig(**ck["config"])).to(a.device).eval()
 model.load_state_dict(ck["model"])
 

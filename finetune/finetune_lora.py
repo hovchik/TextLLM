@@ -50,7 +50,8 @@ PROMPTS = [
 def args():
     ap = argparse.ArgumentParser()
     ap.add_argument("--base", default="Qwen/Qwen3-0.6B", help="HF model id or local folder")
-    ap.add_argument("--raw", default="data/raw", help="folder of .txt shards (books + your own texts)")
+    ap.add_argument("--raw", default="data/raw",
+                    help="folder of .txt shards (books + your own texts); several folders separated by commas")
     ap.add_argument("--extra", default=None, help="optional JSONL with prompt/response pairs")
     ap.add_argument("--instructions", default=None,
                     help="JSONL from data/build_instructions.py (format, system, prompt, response)")
@@ -97,8 +98,16 @@ def fmt(tok, prompt, response=None, system=None):
     return p if response is None else (p, p + response + (tok.eos_token or ""))
 
 
+def txt_files(spec):
+    """The .txt shards under one folder or several separated by commas (retrain.py: data/raw/a,data/raw/b)."""
+    out = []
+    for d in [x.strip() for x in (spec or "").split(",") if x.strip()]:
+        out += sorted(glob.glob(os.path.join(d, "**", "*.txt"), recursive=True))
+    return out
+
+
 def book_pairs(tok, raw, n, seq, rng, per_doc=8, min_chars=5000):
-    files = sorted(glob.glob(os.path.join(raw, "**", "*.txt"), recursive=True))
+    files = txt_files(raw)
     if not files:
         raise SystemExit(f"no .txt shards under {raw} (run data/build_corpus.py first)")
     rng.shuffle(files)
@@ -125,7 +134,7 @@ def book_pairs(tok, raw, n, seq, rng, per_doc=8, min_chars=5000):
 
 def code_docs(code_dir, rng, langs):
     """Yield code documents (one source file each) from the shards under code_dir, in random order."""
-    files = sorted(glob.glob(os.path.join(code_dir, "**", "*.txt"), recursive=True))
+    files = txt_files(code_dir)
     if not files:
         raise SystemExit(f"no code under {code_dir} (collect some first: Training → Copilot, or data/build_code.py)")
     rng.shuffle(files)
@@ -429,6 +438,12 @@ def write_meta(a):
             old = json.load(open(p))
         except ValueError:
             pass
+    elif a.init_adapter:  # a new run that starts from another run's adapter (retrain.py): same writing style
+        try:
+            parent = json.load(open(os.path.join(os.path.dirname(os.path.abspath(a.init_adapter)), "meta.json")))
+            old = {k: parent[k] for k in ("style",) if k in parent}
+        except (OSError, ValueError):
+            pass
     meta = {**fresh, **old, "type": "lora", "base": a.base, **(json.loads(a.meta_extra) if a.meta_extra else {})}
     with open(p + ".tmp", "w") as f:
         json.dump(meta, f)
@@ -438,9 +453,9 @@ def write_meta(a):
 def load_or_encode(a, tok, rng, cache=True):
     """Build the example mix and tokenize it, cached on disk (re-tokenizing takes minutes).
     cache=False (private, temporary texts) never writes the tokenized examples to disk."""
-    srcs = [a.instructions, a.extra] + sorted(glob.glob(os.path.join(a.raw, "**", "*.txt"), recursive=True))
+    srcs = [a.instructions, a.extra] + txt_files(a.raw)
     if getattr(a, "code", None):
-        srcs += sorted(glob.glob(os.path.join(a.code, "**", "*.txt"), recursive=True))
+        srcs += txt_files(a.code)
     key = json.dumps([a.base, a.examples, a.seq, a.book_share, a.pairs_per_doc, a.min_doc_chars,
                       [(p, os.path.getmtime(p)) for p in srcs if p and os.path.exists(p)]]
                      + ([a.code, a.code_examples, a.fim_rate, a.code_chat_share, a.code_langs]
@@ -456,7 +471,7 @@ def load_or_encode(a, tok, rng, cache=True):
         print(f"{len(rows)} writing instructions from {a.instructions}")
     n_books = a.examples if not a.instructions else \
         min(a.examples, int(round(len(pairs) * a.book_share / max(1e-6, 1 - a.book_share))))
-    if n_books > 0 and glob.glob(os.path.join(a.raw, "**", "*.txt"), recursive=True):
+    if n_books > 0 and txt_files(a.raw):
         print(f"building {n_books} book-continuation examples...")
         pairs += book_pairs(tok, a.raw, n_books, a.seq, rng, a.pairs_per_doc, a.min_doc_chars)
     if a.extra:

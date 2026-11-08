@@ -123,6 +123,34 @@ Passwords are stored as salted PBKDF2 hashes in `runs/studio.db`; the server che
 - **No double training:** feedback that has been used is marked "learned" and isn't trained on again.
 - **Storage:** chats and ratings are stored in `runs/studio.db` (SQLite).
 
+## Retrain a model on new data (keeps the original)
+
+`retrain.py` makes a **new** model that starts from one you already trained and continues on other data.
+The original run is never changed, so you can compare both in Chat. Studio: **Training → Retrain**, or
+**Retrain on new data** in a model's window.
+
+```bash
+# from-scratch GPT: continue its weights on the news folder (encoded with the model's own tokenizer)
+python retrain.py --from runs/my-writer --out runs/my-writer-news --source data/raw/news --steps 2000
+# several corpus folders + your own files/links (those are read, trained on, then deleted)
+python retrain.py --from runs/my-writer --out runs/my-writer-v2 --source data/raw/gutenberg,data/raw/custom \
+    --files book.pdf --urls https://example.com/story
+# the whole re-encoded corpus (only if data/bin was encoded with the model's tokenizer)
+python retrain.py --from runs/my-writer --out runs/my-writer-big --data-bin data/bin --steps 5000
+# fine-tuned (LoRA) model or copilot: continue its adapter on the same base model
+python retrain.py --from runs/qwen-writer --out runs/qwen-writer-v2 --source data/raw/custom --steps 300 --gguf
+# stopped half way? (or press Resume on the new model's page)
+python retrain.py --resume --out runs/my-writer-news
+```
+- **From scratch:** the new run gets the old weights and a copy of the old tokenizer, a fresh LR schedule
+  (`--lr`, default 3e-4, warm-up then cosine to `--min-lr`) and `--mix` old training tokens per new token
+  (default 0.5) so it doesn't forget. Old data is mixed in only if it was encoded with the same tokenizer;
+  `--data-bin` is refused when its tokenizer differs (use `--source` folders, which are re-encoded).
+  The encoded new data stays in `runs/<new>/retrain-data/` so the run can be resumed.
+- **LoRA:** `--init-adapter` from the old run, same base and rank; continuation examples from the new
+  text (`--min-doc-chars 500`, so news and posts count), code examples for a copilot. The style profile carries over.
+- `learn.py` (below) teaches a model *in place*; `retrain.py` always writes a new run.
+
 ## Train on your own files and links
 ```bash
 # Teach an existing model: extract → train → delete the extracted/downloaded text

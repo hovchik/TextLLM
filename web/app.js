@@ -267,7 +267,7 @@ pages.training = async (sub = "new") => {
   if (sub === "live") sub = "runs";
   main.innerHTML = `<div class="page">
     <div class="page-head"><div><h1>Training</h1><p>Prepare data, train new models, and teach existing models from your own files and links.</p></div>
-      <div class="tabs" id="ttabs">${[["new", "New model"], ["data", "Data"], ["texts", "Your texts"], ["news", "News & web"], ["style", "Your style"], ["copilot", "Copilot"], ["corpus", "Corpus"], ["cluster", "Cluster"], ["runs", "Runs"]].map(([k, l]) => `<button data-k="${k}" class="${k === sub ? "on" : ""}">${l}</button>`).join("")}</div></div>
+      <div class="tabs" id="ttabs">${[["new", "New model"], ["data", "Data"], ["texts", "Your texts"], ["retrain", "Retrain"], ["news", "News & web"], ["style", "Your style"], ["copilot", "Copilot"], ["corpus", "Corpus"], ["cluster", "Cluster"], ["runs", "Runs"]].map(([k, l]) => `<button data-k="${k}" class="${k === sub ? "on" : ""}">${l}</button>`).join("")}</div></div>
     <div id="tlive"></div><div id="tbody"></div></div>`;
   $$("#ttabs button").forEach((b) => (b.onclick = () => (location.hash = `#/training/${b.dataset.k}`)));
   await poll();
@@ -275,7 +275,7 @@ pages.training = async (sub = "new") => {
   const renderLive = (rs) => { $("#tlive").innerHTML = liveCard(rs.find((r) => r.running)); bindLive(); };
   renderLive(runsList);
   S.onStatus = async () => { const rs = await api("/api/runs").catch(() => []); renderLive(rs); if (sub === "runs") drawRuns(rs); if (sub === "cluster") drawClusterLive(); };
-  ({ new: trainNew, data: trainData, texts: trainTexts, news: trainNews, style: trainStyle, copilot: trainCopilot, corpus: trainCorpus, cluster: trainCluster, runs: () => drawRuns(runsList) }[sub] || trainNew)();
+  ({ new: trainNew, data: trainData, texts: trainTexts, retrain: trainRetrain, news: trainNews, style: trainStyle, copilot: trainCopilot, corpus: trainCorpus, cluster: trainCluster, runs: () => drawRuns(runsList) }[sub] || trainNew)();
 };
 
 function trainNew() {
@@ -949,6 +949,93 @@ async function trainTexts() {
   };
 }
 
+// ---------------------------------------------------------------- retrain (retrain.py)
+// A new model that starts from a trained one and learns other data; the original is never changed.
+async function trainRetrain() {
+  const [models, corpus, ocr] = await Promise.all([api("/api/models").catch(() => []), api("/api/corpus").catch(() => ({ sources: [] })), api("/api/texts/ocr").catch(() => null)]);
+  const files = [];
+  const pre = localStorage.getItem("retrainModel");
+  const ready = models.filter((m) => m.ready !== false);
+  $("#tbody").innerHTML = `<div class="grid g3"><div class="card span2" style="display:flex;flex-direction:column;gap:18px">
+    <div><h2>Retrain a model on new data</h2><p class="muted" style="margin:4px 0 0">Makes a <b>new</b> model that starts from one you trained and continues on other text. The original stays exactly as it is, so you can compare the two in Chat.</p></div>
+    <div class="grid g2">
+      <label class="field">1 · Model to start from<select class="input" id="rt-model">${ready.map((m) => `<option value="${esc(m.name)}" ${m.name === pre ? "selected" : ""}>${esc(m.label)}</option>`).join("") || "<option value=''>No trained models yet</option>"}</select><span class="hint" id="rt-kind"></span></label>
+      <label class="field">2 · Name of the new model<input class="input" id="rt-name" placeholder="my-model-v2"><span class="hint">Letters, digits, - _ . only. Must be a new name.</span></label>
+    </div>
+    <div><h3>3 · New data</h3><p class="hint" style="margin:2px 0 8px">Pick any mix. Folders come from the <a href="#/training/corpus"><u>Corpus</u></a> tab (books, news, your texts you added to training data).</p>
+      <div class="files" id="rt-sources">${(corpus.sources || []).map((c) => `<label class="file" style="cursor:pointer"><input type="checkbox" value="${esc(c.source)}"> ${esc(c.source)} <span class="faint">${num(c.mb, 1)} MB</span></label>`).join("") || '<span class="hint">No corpus folders yet. Download books under Data or collect articles under News & web.</span>'}</div>
+      <label class="row hint" id="rt-binrow" style="margin-top:8px;flex-wrap:nowrap"><span class="switch"><input type="checkbox" id="rt-bin"><span></span></span> The whole encoded corpus (Data, step 3). Only works when it was encoded with this model's tokenizer; otherwise pick folders above.</label></div>
+    <details><summary>Your own files and links (read, trained on, then deleted)</summary><div style="display:flex;flex-direction:column;gap:12px;margin-top:8px">
+      <div class="drop" id="rt-drop">${I.upload}<div><b>Drop files here</b> or click to browse</div><div class="hint">.pdf · .docx · .doc · .txt · .md · .html</div><input type="file" id="rt-file" multiple accept=".pdf,.doc,.docx,.txt,.md,.markdown,.html,.htm" hidden></div>
+      <div class="files" id="rt-filelist"></div>
+      <div class="grid g2">
+        <label class="field">Links, one per line<textarea class="input" id="rt-urls" placeholder="https://example.com/article"></textarea></label>
+        <label class="field">Files or folders on this computer<textarea class="input" id="rt-paths" placeholder="C:\\Books&#10;/home/me/articles"></textarea>
+          <span class="row hint"><span class="switch"><input type="checkbox" id="rt-del"><span></span></span> Delete these local files after reading</span></label></div>
+      <label class="field" style="max-width:320px">Scanned PDFs<select class="input" id="rt-ocr"><option value="auto">Read with OCR when a page has no text${ocr && ocr.available ? "" : " (Tesseract not installed)"}</option><option value="off">Skip scanned pages</option></select></label>
+      <span class="hint">A model trained on these can't be resumed if you stop it, because the texts are deleted.</span></div></details>
+    <div><h3>4 · How long</h3><div class="grid g2" style="margin-top:8px">
+      <label class="field">Steps<input class="input" id="rt-steps" type="number" min="0" step="100" value="2000"><span class="hint" id="rt-steps-hint"></span></label>
+      <label class="field">Learning rate<input class="input" id="rt-lr" type="number" min="0" step="any" value="0"><span class="hint">0 = automatic (0.0003 from scratch, 0.0001 fine-tuned). Lower keeps more of the old model.</span></label></div></div>
+    <details><summary>Advanced</summary><div class="grid g2" style="margin-top:8px">
+      <label class="field" id="rt-mixf">Old data mixed in, per new token<input class="input" id="rt-mix" type="number" min="0" max="10" step="0.25" value="0.5"><span class="hint">From-scratch models: keeps them from forgetting what they knew. 0 = only the new data.</span></label>
+      <label class="field">Batch<input class="input" id="rt-batch" type="number" min="0" value="0"><span class="hint">0 = 16 from scratch, 2 fine-tuned</span></label>
+      <label class="field">Gradient accumulation<input class="input" id="rt-accum" type="number" min="0" value="0"><span class="hint">0 = 4 from scratch, 8 fine-tuned</span></label>
+      <label class="row hint" id="rt-ggufrow" style="flex-wrap:nowrap"><span class="switch"><input type="checkbox" id="rt-gguf" checked><span></span></span> Make the fast CPU copy afterwards (fine-tuned models)</label></div></details>
+    <div class="row end"><button class="btn primary" id="rt-start">${I.play} Start retraining</button></div>
+  </div>
+  <div class="card"><h2>Good to know</h2><ul class="muted" style="padding-left:18px">
+    <li><b>From scratch:</b> the new model keeps the old one's tokenizer. New text is encoded with it, so words always map to the same tokens, and some of the old training data is mixed in.</li>
+    <li><b>Fine-tuned (LoRA):</b> the new adapter starts from the old one on the same base model.</li>
+    <li>Stopped half way? Open the new model on the Runs tab and press <b>Resume</b>.</li>
+    <li><b>Your texts</b> teaches a model <i>in place</i>; Retrain always makes a copy.</li>
+    <li>Use texts you have the right to use.</li></ul></div></div>`;
+  const byName = Object.fromEntries(models.map((m) => [m.name, m]));
+  const sync = () => {
+    const m = byName[$("#rt-model").value] || {};
+    const lora = m.type === "lora";
+    $("#rt-kind").textContent = m.name ? (lora ? `Fine-tuned on ${m.base || "a base model"}: continues its adapter.` : `From scratch (${m.preset || "?"} size): continues its weights.`) + (m.task === "code" ? " Copilot: the new data is read as code." : "") : "";
+    $("#rt-binrow").hidden = lora; $("#rt-mixf").hidden = lora; $("#rt-ggufrow").hidden = !lora;
+    const st = $("#rt-steps");
+    if (!st.dataset.touched) st.value = lora ? 200 : 2000;
+    $("#rt-steps-hint").textContent = lora ? "Each step reads 16 examples (batch × accumulation). 0 = 200." : "0 = read the new data once.";
+    if (!$("#rt-name").dataset.touched && m.name) $("#rt-name").value = `${m.name}-v2`;
+  };
+  $("#rt-model").onchange = sync;
+  $("#rt-steps").oninput = (e) => (e.target.dataset.touched = "1");
+  $("#rt-name").oninput = (e) => (e.target.dataset.touched = "1");
+  sync();
+  localStorage.removeItem("retrainModel");
+  const drawFiles = () => {
+    $("#rt-filelist").innerHTML = files.map((f, i) => `<span class="file">📄 ${esc(f.name)} <span class="faint">${num(f.size / 1024)} KB</span><button data-i="${i}">✕</button></span>`).join("");
+    $$("#rt-filelist button").forEach((b) => (b.onclick = () => { files.splice(+b.dataset.i, 1); drawFiles(); }));
+  };
+  const drop = $("#rt-drop"), input = $("#rt-file");
+  drop.onclick = () => input.click();
+  input.onchange = () => { files.push(...input.files); input.value = ""; drawFiles(); };
+  drop.ondragover = (e) => { e.preventDefault(); drop.classList.add("over"); };
+  drop.ondragleave = () => drop.classList.remove("over");
+  drop.ondrop = (e) => { e.preventDefault(); drop.classList.remove("over"); files.push(...e.dataTransfer.files); drawFiles(); };
+  $("#rt-start").onclick = async () => {
+    const name = $("#rt-name").value.trim();
+    const fd = new FormData();
+    files.forEach((f) => fd.append("files", f));
+    fd.append("model", $("#rt-model").value); fd.append("name", name);
+    fd.append("sources", $$("#rt-sources input:checked").map((c) => c.value).join(","));
+    fd.append("data_bin", !$("#rt-binrow").hidden && $("#rt-bin").checked);
+    fd.append("urls", $("#rt-urls").value); fd.append("paths", $("#rt-paths").value); fd.append("delete_local", $("#rt-del").checked);
+    fd.append("steps", $("#rt-steps").value || "0"); fd.append("lr", $("#rt-lr").value || "0");
+    fd.append("mix", $("#rt-mix").value || "0.5"); fd.append("batch", $("#rt-batch").value || "0"); fd.append("accum", $("#rt-accum").value || "0");
+    fd.append("gguf", $("#rt-gguf").checked); fd.append("ocr", $("#rt-ocr").value);
+    try {
+      await api("/api/retrain", { method: "POST", body: fd });
+      toast(`Retraining into ${esc(name)}. ${esc($("#rt-model").value)} stays as it is.`, "ok");
+      files.length = 0; drawFiles(); poll();
+      setTimeout(() => openRun(name), 800);
+    } catch (e) { fail(e); }
+  };
+}
+
 // ---------------------------------------------------------------- news & web crawler
 const KIND_LABEL = { feed: "RSS / Atom feed", page: "Single page", links: "Page of links", mastodon: "Mastodon", bluesky: "Bluesky" };
 const SOCIAL = { mastodon: "https://example.social/tags/poetry", bluesky: "https://bsky.app/profile/alice.bsky.social" };
@@ -1250,8 +1337,8 @@ async function openRun(name) {
       const s = d.summary;
       if (!optsDrawn && s.ready) drawOpts(s);
       $("#r-title", m).textContent = s.name;
-      $("#r-sub", m).innerHTML = `${typePill(s.type)} ${s.base ? esc(s.base) : s.preset ? esc(s.preset) + " size" : ""} ${s.running ? '<span class="pill good">● training</span>' : ""}`;
-      $("#r-btns", m).innerHTML = `${s.ready ? `<button class="btn sm primary" id="r-chat">${I.chat} Chat</button>` : ""}${s.ready && !s.running ? `<button class="btn sm" id="r-eval" title="Score it on the 60 fixed prompts">Evaluate</button><button class="btn sm ghost" id="r-quick" title="8 prompts, a few minutes">Quick check</button>` : ""}${s.type === "lora" && s.ready && !s.running ? `<button class="btn sm ${s.fast ? "ghost" : ""}" id="r-gguf" title="Merge, convert to GGUF and quantize (quality under Fast CPU copy options)">${s.fast ? "⚡ Fast copy ✓ (redo)" : "⚡ Make fast CPU copy"}</button>` : ""}${s.ready && !s.running ? `<button class="btn sm" id="r-resume" title="Continue training from the last checkpoint">${I.play} Resume</button><button class="btn sm ghost" id="r-export" title="Download as one .zip to continue on another PC">${I.download} Export</button>` : ""}${s.running ? `<button class="btn sm danger" id="r-stop">${I.stop} Stop</button>` : `<button class="btn sm ghost" id="r-del">${I.trash}</button>`}`;
+      $("#r-sub", m).innerHTML = `${typePill(s.type)} ${s.base ? esc(s.base) : s.preset ? esc(s.preset) + " size" : ""} ${s.retrained_from ? `<span class="hint">retrained from <b>${esc(s.retrained_from)}</b></span>` : ""} ${s.running ? '<span class="pill good">● training</span>' : ""}`;
+      $("#r-btns", m).innerHTML = `${s.ready ? `<button class="btn sm primary" id="r-chat">${I.chat} Chat</button>` : ""}${s.ready && !s.running ? `<button class="btn sm" id="r-eval" title="Score it on the 60 fixed prompts">Evaluate</button><button class="btn sm ghost" id="r-quick" title="8 prompts, a few minutes">Quick check</button>` : ""}${s.type === "lora" && s.ready && !s.running ? `<button class="btn sm ${s.fast ? "ghost" : ""}" id="r-gguf" title="Merge, convert to GGUF and quantize (quality under Fast CPU copy options)">${s.fast ? "⚡ Fast copy ✓ (redo)" : "⚡ Make fast CPU copy"}</button>` : ""}${s.ready && !s.running ? `<button class="btn sm" id="r-resume" title="Continue training from the last checkpoint">${I.play} Resume</button><button class="btn sm ghost" id="r-export" title="Download as one .zip to continue on another PC">${I.download} Export</button><button class="btn sm ghost" id="r-retrain" title="Make a new model from this one that learns other data (this one stays as it is)">Retrain on new data</button>` : ""}${s.running ? `<button class="btn sm danger" id="r-stop">${I.stop} Stop</button>` : `<button class="btn sm ghost" id="r-del">${I.trash}</button>`}`;
       $("#r-stats", m).innerHTML = [
         ["Progress", `${(s.progress * 100).toFixed(0)}%`], ["Step", `${num(s.step)} / ${num(s.max_steps)}`], ["ETA", s.running ? dur(s.eta_sec) : "—"],
         ["Train loss", num(s.train_loss, 3)], ["Val loss", num(s.val_loss, 3)], ["Perplexity", num(s.perplexity, 1)],
@@ -1271,6 +1358,7 @@ async function openRun(name) {
       on("#r-resume", async () => {
         try { await api("/api/train", { json: { mode: s.type, name: s.name, resume: true, preset: s.preset || "cpu", base: s.base || undefined, steps: s.max_steps, vocab: S.status?.data?.vocab || 8192 } }); toast("Resumed", "ok"); load(); } catch (e) { fail(e); }
       });
+      on("#r-retrain", () => { close(); localStorage.setItem("retrainModel", s.name); location.hash = "#/training/retrain"; });
       on("#r-export", () => {
         const data = s.type === "scratch" && confirm(`Export ${s.name}.\n\nOK = also include the training data (bigger file; the other PC continues on exactly the same text).\nCancel = model only.`);
         const link = document.createElement("a");

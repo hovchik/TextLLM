@@ -24,3 +24,4 @@ fastapi>=0.110,<1
 uvicorn>=0.29,<1
 python-multipart>=0.0.18,<1   # <0.0.18 had a denial-of-service bug in form parsing
 langdetect>=1.0.9,<2
+segno>=1.6,<2                 # QR code for adding a phone to a training cluster

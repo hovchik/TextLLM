@@ -733,6 +733,33 @@ def cluster_state():
     return {"coordinator": coord, "worker": worker, "data": jobs.data_status()}
 
 
+@app.get("/api/cluster/phone")
+def cluster_phone(addr: str):
+    """The join page for phones, as a QR code (SVG) plus the Termux command."""
+    import cluster as cl
+
+    last = _read_json(CLUSTER_LAST)
+    if not last:
+        err("Start a cluster first.")
+    if not re.fullmatch(r"https?://[\w.\-\[\]:]+", addr):
+        err("bad address")
+    from urllib.parse import quote
+
+    url = f"{addr}/phone?secret={quote(last['secret'], safe='')}"
+    svg = None
+    try:
+        import io as _io
+
+        import segno
+
+        buf = _io.BytesIO()
+        segno.make(url, error="m").save(buf, kind="svg", scale=5, border=2, dark="#111", light="#fff")
+        svg = buf.getvalue().decode()
+    except ImportError:
+        pass
+    return {"url": url, "svg": svg, "command": cl.phone_command(addr, last["secret"])}
+
+
 # ---------------------------------------------------------------- style profiles (write like an account)
 @app.get("/api/styles")
 def styles_list():

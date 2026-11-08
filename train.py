@@ -11,8 +11,6 @@ from dataclasses import asdict
 
 import numpy as np
 import torch
-import torch.distributed as dist
-from torch.nn.parallel import DistributedDataParallel as DDP
 
 import devices
 import graceful
@@ -83,6 +81,9 @@ def main():
     a = get_args()
     ddp = int(os.environ.get("RANK", -1)) != -1
     if ddp:
+        import torch.distributed as dist  # only for multi-GPU runs (torchrun); phones' PyTorch may lack it
+        from torch.nn.parallel import DistributedDataParallel as DDP
+
         dist.init_process_group("nccl")
         rank, world = dist.get_rank(), dist.get_world_size()
         a.device = f"cuda:{int(os.environ['LOCAL_RANK'])}"

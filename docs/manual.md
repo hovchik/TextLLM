@@ -361,6 +361,21 @@ The long secret keeps strangers out, but the traffic itself is not encrypted, so
 
 **Kind of model:** *Writer* uses the Data tab's prepared text; *Copilot (code)* uses the code prepared on the Copilot tab (section 9). A worker that uses its own prepared data picks the same kind under *Own data is for*.
 
+## Android phones
+
+Android phones can join too, through the free **Termux** app. A phone trains only while it is **charging**, above 30% and below 42 °C; otherwise it shows as *paused* in the table and the others carry on without waiting for it. iPhones can't run training.
+
+![Adding a phone: QR code and command](manual/12p-cluster-phone.png)
+
+1. On the phone, install **Termux** and **Termux:API** from F-Droid (the Play Store versions are outdated; Termux:API lets the worker read the battery).
+2. While the cluster runs, open **Add an Android phone** on the Cluster card and pick the address the phone can reach (on mobile data: Internet or Tailscale). Scan the QR code with the phone's camera.
+3. The page that opens has a **Copy command** button. Open Termux, paste and press Enter. The first time it installs Python and PyTorch (a few hundred MB, use Wi-Fi). It downloads the worker code from your PC, so the phone needs no GitHub access and always runs the same version.
+4. Leave the phone on the charger with Termux open or in the background. Run the same command again to rejoin later.
+
+![The page the QR code opens on the phone](manual/12q-phone-page.png)
+
+**What a phone adds:** a recent phone is roughly a third to half of a laptop CPU on the CPU-size model, an older one much less, and phones slow down when warm. The Small size and up are too heavy for phones. Think of phones as a bonus overnight on the charger, not a replacement for PCs.
+
 The result is an ordinary from-scratch run under Runs: chat with it, export it, or keep training it alone with Resume. Cluster mode is for from-scratch models; fine-tuning (LoRA) still runs on one PC.
 
 # 12. Training: Runs
@@ -513,6 +528,7 @@ python transfer.py export --run runs/my-model --with-data
 python transfer.py import my-model.textllm.zip
 python cluster.py coordinator --out runs/cluster-writer --preset cpu --vocab 8192 --local-worker
 python cluster.py worker --join http://ADDRESS:7861 --secret SECRET    # or: run.bat --join ... --secret ...
+curl -fsSL "http://ADDRESS:7861/phone.sh?secret=SECRET" | sh             # in Termux on an Android phone
 python data/build_code.py --local C:/projects/app --github-repos 200 --langs python,typescript
 python tokenizer/train_tokenizer.py --code --raw data/code --vocab 16384 --out tokenizer/bpe-code.json
 python tokenizer/train_tokenizer.py --encode --raw data/code --tok tokenizer/bpe-code.json --bin data/bin-code --fim-rate 0.5

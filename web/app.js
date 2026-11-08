@@ -633,7 +633,7 @@ function trainCluster() {
   drawClusterLive();
 }
 
-const WSTATE = { training: "good", sent: "good", waiting: "", joined: "", "downloading data": "accent", "downloading weights": "accent", uploading: "accent", left: "warn", done: "good" };
+const WSTATE = { training: "good", sent: "good", waiting: "", joined: "", "downloading data": "accent", "downloading weights": "accent", uploading: "accent", left: "warn", done: "good", paused: "warn", resuming: "accent" };
 async function drawClusterLive() {
   const box = $("#cl-live");
   if (!box) return;
@@ -665,7 +665,16 @@ async function drawClusterLive() {
       </div>
       ${c.running ? `<div style="margin-top:12px"><b>Other PCs join with</b> <div style="margin-top:6px">${reachNote}</div>
         <div class="grid g2" style="margin-top:8px"><label class="field">Address<select class="input mono" id="cl-addr">${opts.map((o) => `<option value="${esc(o.url)}">${esc(KIND[o.kind] || o.kind)}: ${esc(o.url)}</option>`).join("")}</select><span class="hint" id="cl-addr-note">${esc(opts[0]?.note || "")}</span></label><label class="field">Secret<input class="input mono" readonly value="${esc(c.secret)}" id="cl-secret"></label></div>
-        <div class="row" style="margin-top:8px"><code class="mono" id="cl-cmd" style="flex:1;overflow:auto;white-space:nowrap">run.bat --join ${esc(addrs[0] || "")} --secret ${esc(c.secret)}</code><button class="btn sm" id="cl-copy">${I.copy} Copy</button></div></div>` : ""}
+        <div class="row" style="margin-top:8px"><code class="mono" id="cl-cmd" style="flex:1;overflow:auto;white-space:nowrap">run.bat --join ${esc(addrs[0] || "")} --secret ${esc(c.secret)}</code><button class="btn sm" id="cl-copy">${I.copy} Copy</button></div>
+        <details id="cl-phone-box" style="margin-top:12px"><summary><b>Add an Android phone</b> <span class="hint">trains only while charging and cool</span></summary>
+          <div class="row" style="margin-top:10px;gap:18px;align-items:flex-start;flex-wrap:wrap"><div id="cl-qr" style="width:200px;min-height:200px;background:#fff;border-radius:12px;padding:6px"></div>
+          <div style="flex:1;min-width:260px" class="muted"><ol style="margin:0;padding-left:18px">
+            <li>On the phone, install <b>Termux</b> and <b>Termux:API</b> from F-Droid (the Play Store versions are outdated).</li>
+            <li>Scan the code with the phone's camera. The page that opens has a <b>Copy command</b> button. Or send yourself this command:</li></ol>
+            <code class="mono" id="cl-phone-cmd" style="display:block;margin:8px 0;word-break:break-all"></code>
+            <ol start="3" style="margin:0;padding-left:18px"><li>Open Termux, paste, press Enter. The first time it installs Python and PyTorch (a few hundred MB: use Wi-Fi). The phone downloads the worker code from this PC, so it needs no GitHub access.</li>
+            <li>Keep it on the charger. It pauses when unplugged, below 30% or above 42 °C, and shows as <i>paused</i> below.</li></ol>
+            <p class="hint" style="margin-top:8px">A recent phone adds roughly a third to half of a laptop CPU on the CPU-size model; older phones less. iPhones can't train. Phones on mobile data need the Internet or Tailscale address.</p></div></div></details></div>` : ""}
       <div class="table-scroll" style="margin-top:14px"><table><thead><tr><th>PC</th><th>Device</th><th>State</th><th>Rounds</th><th>Speed</th><th>Loss</th><th>Last seen</th></tr></thead><tbody>
         ${(c.workers || []).map((x) => `<tr><td><b>${esc(x.name)}</b><div class="hint mono">${esc(x.address || "")}${x.note ? " · " + esc(x.note) : ""}</div></td><td>${esc(x.device_name || x.device)}</td>
           <td><span class="pill ${WSTATE[x.state] ?? ""}">${esc(x.state)}</span></td><td>${num(x.rounds)}</td><td>${x.tokens_per_sec ? num(x.tokens_per_sec) + " tok/s" : "—"}</td><td>${num(x.loss, 3)}</td><td class="muted">${ago(x.last_seen)}</td></tr>`).join("") || '<tr><td colspan="7" class="muted">No PCs connected yet.</td></tr>'}
@@ -694,6 +703,16 @@ async function drawClusterLive() {
     const upd = () => { $("#cl-cmd").textContent = cmd(); const o = (S.clusterOpts || []).find((x) => x.url === $("#cl-addr").value); $("#cl-addr-note").textContent = o ? o.note : ""; };
     upd(); $("#cl-addr").onchange = upd;
   }
+  const phone = async () => {
+    const box = $("#cl-phone-box"), a = $("#cl-addr")?.value;
+    if (!box || !box.open || !a) return;
+    S.phoneQR = S.phoneQR || {};
+    if (!S.phoneQR[a]) S.phoneQR[a] = await api(`/api/cluster/phone?addr=${encodeURIComponent(a)}`).catch((e) => ({ error: e.message }));
+    const q = S.phoneQR[a];
+    $("#cl-qr").innerHTML = q.svg ? `<img alt="QR code" style="width:100%;display:block" src="data:image/svg+xml;charset=utf-8,${encodeURIComponent(q.svg)}">` : `<div class="hint" style="padding:10px">${esc(q.error || "QR codes need the segno package (run.bat installs it).")}</div>`;
+    $("#cl-phone-cmd").textContent = q.command || "";
+  };
+  if ($("#cl-phone-box")) { $("#cl-phone-box").ontoggle = phone; $("#cl-addr").addEventListener("change", phone); phone(); }
   if ($("#cl-copy")) $("#cl-copy").onclick = () => navigator.clipboard.writeText(cmd()).then(() => toast("Copied", "ok"), () => toast("Copy failed; select the text instead", "err"));
   for (const id of ["#cl-stop", "#wk-stop"]) {
     const b = $(id);

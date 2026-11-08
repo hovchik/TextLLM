@@ -38,6 +38,7 @@ sys.path.insert(0, ROOT)
 import graceful  # noqa: E402
 from core import safeload  # noqa: E402
 import netreach  # noqa: E402
+import power  # noqa: E402
 
 DEFAULT_PORT = 7861
 GONE_AFTER = 90        # seconds without a heartbeat: the worker left
@@ -61,6 +62,87 @@ def inner_lr_at(r, a):
     """Inner learning rate for round r: cosine from --lr to --min-lr over all rounds."""
     p = min(1.0, r / max(1, a.rounds - 1))
     return a.min_lr + 0.5 * (1 + math.cos(math.pi * p)) * (a.lr - a.min_lr)
+
+
+# ================================================================ phones (and any PC without a copy)
+# Everything `cluster.py worker` imports. The coordinator hands these out, so a phone needs neither
+# git nor GitHub access, and always runs the same version as the coordinator.
+WORKER_FILES = ["cluster.py", "graceful.py", "netreach.py", "power.py", "devices.py", "train.py",
+                "model/__init__.py", "model/gpt.py", "writing/__init__.py", "writing/hf.py",
+                "core/__init__.py", "core/safeload.py"]
+_code_zip = {}
+
+
+def worker_code_zip():
+    import zipfile
+
+    stamp = tuple(os.path.getmtime(os.path.join(ROOT, f)) for f in WORKER_FILES)
+    if _code_zip.get("stamp") != stamp:
+        buf = io.BytesIO()
+        with zipfile.ZipFile(buf, "w", zipfile.ZIP_DEFLATED) as z:
+            for f in WORKER_FILES:
+                z.write(os.path.join(ROOT, f), f)
+        _code_zip.update(stamp=stamp, data=buf.getvalue())
+    return _code_zip["data"]
+
+
+def phone_script(url, secret):
+    """Shell script for Termux on Android: install Python + PyTorch, fetch the worker code from the
+    coordinator, keep the phone awake, and join. Run again to update or rejoin."""
+    return f"""#!/data/data/com.termux/files/usr/bin/sh
+# Text LLM: lend this phone to a training cluster. Trains only while charging and cool.
+set -e
+URL='{url}'
+export TEXTLLM_CLUSTER_SECRET='{secret}'
+echo "== Text LLM phone worker =="
+if ! python -c "import torch, numpy" 2>/dev/null; then
+  echo "Installing Python and PyTorch (once, a few hundred MB)..."
+  pkg update -y
+  pkg install -y python python-numpy python-torch termux-api unzip
+fi
+command -v termux-battery-status >/dev/null 2>&1 || pkg install -y termux-api || true
+DIR="$HOME/textllm-worker"
+mkdir -p "$DIR" && cd "$DIR"
+curl -fsS -H "X-Secret: $TEXTLLM_CLUSTER_SECRET" "$URL/worker-code.zip" -o code.zip
+unzip -oq code.zip && rm -f code.zip
+NAME="$(getprop ro.product.model 2>/dev/null || echo phone)"
+echo "Joining $URL as $NAME. Keep the phone on the charger; Ctrl+C (Volume Down + C) stops."
+exec python cluster.py worker --join "$URL" --name "$NAME" --data-mb 50 "$@"
+"""
+
+
+def phone_command(url, secret):
+    return f'curl -fsSL "{url}/phone.sh?secret={secret}" | sh'
+
+
+def phone_page(url, secret):
+    """What a phone sees after scanning the QR code on the Studio's Cluster page."""
+    import html
+
+    cmd = html.escape(phone_command(url, secret))
+    return f"""<!doctype html><html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Join the Text LLM cluster</title><style>
+body{{font:16px/1.5 system-ui,sans-serif;margin:0;padding:20px;background:#f6f6fb;color:#1b1b2b}}
+h1{{font-size:22px}} ol{{padding-left:20px}} li{{margin:10px 0}} a{{color:#5b3fe0}}
+code{{display:block;background:#11131a;color:#d6dcf0;padding:12px;border-radius:10px;word-break:break-all;font-size:13px}}
+button{{margin-top:10px;width:100%;padding:14px;border:0;border-radius:12px;background:#7c5cff;color:#fff;font-size:17px}}
+.hint{{color:#666;font-size:14px}}</style></head><body>
+<h1>Lend this phone to the training</h1>
+<p class="hint">Android only. The phone trains only while it is charging and cool, and pauses otherwise.</p>
+<ol>
+<li>Install <b>Termux</b> and <b>Termux:API</b> from <a href="https://f-droid.org/packages/com.termux/">F-Droid</a>
+(<a href="https://f-droid.org/packages/com.termux.api/">Termux:API</a>). The Play Store versions are outdated.</li>
+<li>Copy this command:<code id="c">{cmd}</code><button onclick="copyCmd(this)">Copy command</button></li>
+<li>Open Termux, long-press, <b>Paste</b>, and press Enter. The first time it installs Python and PyTorch (a few hundred MB, use Wi-Fi).</li>
+<li>Leave Termux open (or in the background) with the phone on the charger. Run the same command again to rejoin.</li>
+</ol><script>
+function copyCmd(b) {{  // the page is plain http, where navigator.clipboard may be missing
+  var c = document.getElementById('c'), t = c.textContent, done = function () {{ b.textContent = 'Copied ✓'; }};
+  if (navigator.clipboard && window.isSecureContext) {{ navigator.clipboard.writeText(t).then(done); return; }}
+  var a = document.createElement('textarea'); a.value = t; document.body.appendChild(a); a.select();
+  try {{ document.execCommand('copy'); done(); }} catch (e) {{ b.textContent = 'Long-press the command to copy it'; }}
+  a.remove();
+}}</script></body></html>"""
 
 
 # ================================================================ coordinator
@@ -226,12 +308,13 @@ class Coordinator:
         with self.lock:
             c = self.cur
             act = self.active()
-            waiting = [w for w in c["participants"] if w in act and w not in c["deltas"]]
+            waiting = [w for w in c["participants"] if w in act and w not in c["deltas"]
+                       and act[w].get("state") != "paused"]  # a phone off its charger is not waited for
             if c["deltas"] and not waiting and time.time() >= c["started"] + 5:
                 return True
             if time.time() > c["deadline"]:
                 return True
-            if not c["deltas"] and not any(w in act for w in c["participants"]) and time.time() > c["train_until"]:
+            if not c["deltas"] and not waiting and time.time() > c["train_until"]:  # everyone left or paused
                 return True
         return False
 
@@ -453,7 +536,8 @@ class Coordinator:
                 self.wfile.write(data)
 
             def authed(self):
-                if hmac.compare_digest(self.headers.get("X-Secret", ""), coord.a.secret):
+                given = self.headers.get("X-Secret") or getattr(self, "q_secret", None) or ""
+                if hmac.compare_digest(given.encode(), coord.a.secret.encode()):
                     return True
                 time.sleep(0.5)  # slow down guessing
                 self.reply(403, {"error": "wrong secret"})
@@ -477,8 +561,18 @@ class Coordinator:
                 q = {k: v[0] for k, v in urllib.parse.parse_qs(u.query).items()}
                 if u.path == "/ping":
                     return self.reply(200, {"textllm_cluster": PROTOCOL})
+                # a curl one-liner on a phone passes the secret in the URL
+                self.q_secret = q.get("secret") if u.path in ("/phone", "/phone.sh", "/worker-code.zip") else None
                 if not self.authed():
                     return
+                if method == "GET" and u.path == "/worker-code.zip":
+                    return self.reply(200, worker_code_zip(), "application/zip")
+                if method == "GET" and u.path == "/phone":
+                    host = self.headers.get("Host") or f"127.0.0.1:{coord.a.port}"
+                    return self.reply(200, phone_page(f"http://{host}", coord.a.secret).encode(), "text/html; charset=utf-8")
+                if method == "GET" and u.path == "/phone.sh":
+                    host = self.headers.get("Host") or f"127.0.0.1:{coord.a.port}"
+                    return self.reply(200, phone_script(f"http://{host}", coord.a.secret).encode(), "text/plain; charset=utf-8")
                 try:
                     wid = q.get("worker", "")
                     if method == "POST" and u.path == "/join":
@@ -645,17 +739,22 @@ class Worker:
         except OSError:
             pass
 
+    def beat(self):
+        """Tell the coordinator this worker's state now (it stops waiting for a paused phone)."""
+        if not self.wid:
+            return
+        try:
+            self.client.call("POST", f"/heartbeat?worker={self.wid}",
+                             {"state": self.status["state"], "tps": self.status.get("tokens_per_sec"),
+                              "loss": self.status.get("loss"), "local_step": self.status.get("local_step"),
+                              "note": self.status.get("note")},
+                             retries=0, say=lambda *_: None)
+        except Exception:
+            pass
+
     def heartbeat_loop(self):
         while not self.stop.wait(15):
-            if not self.wid:
-                continue
-            try:
-                self.client.call("POST", f"/heartbeat?worker={self.wid}",
-                                 {"state": self.status["state"], "tps": self.status.get("tokens_per_sec"),
-                                  "loss": self.status.get("loss"), "local_step": self.status.get("local_step")},
-                                 retries=0, say=lambda *_: None)
-            except Exception:
-                pass
+            self.beat()
 
     def do_join(self, devname):
         import torch
@@ -711,8 +810,16 @@ class Worker:
         dtype = devices.train_dtype(self.dev)
         autocast = devices.autocast(self.dev, dtype)
         if kind == "cpu":
+            if power.is_android() and not os.environ.get("TEXTLLM_THREADS"):
+                # phones: the big cores only; the small ones slow every step down
+                os.environ["TEXTLLM_THREADS"] = str(min(4, os.cpu_count() or 4))
             hf.set_threads()
             autocast = devices.cpu_autocast(self.dev) or autocast
+            phone = power.device_model()
+            if phone:
+                devname = f"{phone} (Android phone, {os.environ['TEXTLLM_THREADS']} cores)"
+        if a.only_charging:
+            power.keep_awake(True)
         scaler = devices.grad_scaler(self.dev, dtype)
         self.status.update(device=self.dev, device_name=devname)
         self.local_data = a.data and os.path.exists(os.path.join(a.data, "train.bin"))
@@ -756,6 +863,19 @@ class Worker:
                             self.write_status()
                         time.sleep(t.get("retry", 3))
                         continue
+                    if a.only_charging:
+                        ok, why = power.ok_to_train(power.battery(), a.min_battery, a.max_temp)
+                        if not ok:
+                            self.status["state"] = "paused"
+                            if self.status.get("note") != why:
+                                self.say(f"[worker] {why}")
+                                self.beat()
+                            time.sleep(a.power_every)
+                            continue
+                        if self.status["state"] == "paused":
+                            self.status["state"] = "resuming"
+                            self.say(f"[worker] {why}: training again")
+                            self.beat()
                     if version != t["version"]:
                         self.status["state"] = "downloading weights"
                         self.write_status()
@@ -779,8 +899,15 @@ class Worker:
                     self.write_status()
                     end = time.time() + max(5.0, t["seconds"] - a.reserve)
                     steps, tokens, loss_sum, t0 = 0, 0, 0.0, time.time()
+                    next_check = time.time() + a.power_every
                     model.train()
                     while steps == 0 or time.time() < end:
+                        if a.only_charging and time.time() >= next_check:
+                            next_check = time.time() + a.power_every
+                            ok, why = power.ok_to_train(power.battery(), a.min_battery, a.max_temp)
+                            if not ok:  # send what this round has done so far, then pause
+                                self.say(f"[worker] {why}; sending this round's work early")
+                                break
                         lr = t["lr"] * min(1.0, (local_step + 1) / max(1, tr["warmup"]))
                         for g in opt.param_groups:
                             g["lr"] = lr
@@ -842,6 +969,8 @@ class Worker:
                     pass
             if self.status["state"] not in ("done", "stopped"):
                 self.status["state"] = "stopped"
+            if a.only_charging:
+                power.keep_awake(False)
             self.write_status()
 
 
@@ -894,6 +1023,11 @@ def main():
     w.add_argument("--data-mb", type=float, default=200, help="size of the share of training text to download")
     w.add_argument("--reserve", type=float, default=0, help="stop training this many seconds early (slow upload)")
     w.add_argument("--status-file", default="", help="write live state here (used by the Studio)")
+    w.add_argument("--only-charging", action=argparse.BooleanOptionalAction, default=None,
+                   help="train only while charging, not too hot and not too empty (default: on for phones)")
+    w.add_argument("--min-battery", type=int, default=30, help="with --only-charging: pause below this charge (%%)")
+    w.add_argument("--max-temp", type=float, default=42.0, help="with --only-charging: pause above this battery °C")
+    w.add_argument("--power-every", type=float, default=60, help="seconds between battery checks")
     a = ap.parse_args()
 
     if a.role == "coordinator":
@@ -909,10 +1043,13 @@ def main():
             a.join = "http://" + a.join
         if urllib.parse.urlparse(a.join).port is None and a.join.count(":") < 2:
             a.join = a.join.rstrip("/") + f":{DEFAULT_PORT}"
+        phone = power.is_android()
+        if a.only_charging is None:
+            a.only_charging = phone
         if not a.batch:
             import devices
 
-            a.batch = 8 if devices.kind(devices.pick(a.device)) == "cpu" else 16
+            a.batch = 4 if phone else 8 if devices.kind(devices.pick(a.device)) == "cpu" else 16
         try:
             Worker(a).run()
         except KeyboardInterrupt:

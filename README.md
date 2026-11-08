@@ -331,6 +331,15 @@ latency would make synchronous training crawl:
 
 Every PC uses its own clone of this repository (`git clone`, then `run.bat --join ...`); nothing has to be published or shared except the address and secret. Keep the clones on the same version (`git pull` on all of them): a worker from a different version is refused with a clear message.
 
+**Android phones** join through Termux: Cluster tab → *Add an Android phone* shows a QR code that opens a
+page on the phone with a one-line command (`curl -fsSL "http://ADDRESS:7861/phone.sh?secret=…" | sh`). It
+installs Python and PyTorch with `pkg`, downloads the worker code from the coordinator
+(`/worker-code.zip`, so no GitHub access and always the same version), holds a wake lock and joins.
+Phones train only while charging, above 30% and below 42 °C (`power.py`, via Termux:API or
+/sys/class/power_supply; `--only-charging`, `--min-battery`, `--max-temp`, also usable on laptops) and
+report *paused* otherwise, so rounds don't wait for them. Expect a recent phone to add about a third to
+half of a laptop CPU on the CPU-size model; iPhones can't train.
+
 The result is a normal run (`runs/<name>/ckpt.pt`): chat, export or keep training it with `train.py --resume`.
 From the command line: `python cluster.py coordinator --out runs/cluster-writer --preset cpu --vocab 8192 --local-worker`
 and `python cluster.py worker --join http://ADDRESS:7861 --secret SECRET` (see `python cluster.py worker -h`).

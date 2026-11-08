@@ -20,19 +20,20 @@ This manual walks through every page of the Studio in the order you would normal
 4. Training: New model
 5. Training: Data
 6. Training: Your texts
-7. Training: News & web
-8. Training: Your style
-9. Training: Copilot (a model that writes code)
-10. Training: Corpus
-11. Training: Cluster (several PCs train one model)
-12. Training: Runs, run details, Resume, Export and Import
-13. Chat
-14. Analytics
-15. Feedback
-16. Users
-17. Settings and hardware
-18. Command-line equivalents
-19. Troubleshooting
+7. Training: Retrain (a new model from one you trained)
+8. Training: News & web
+9. Training: Your style
+10. Training: Copilot (a model that writes code)
+11. Training: Corpus
+12. Training: Cluster (several PCs train one model)
+13. Training: Runs, run details, Resume, Export and Import
+14. Chat
+15. Analytics
+16. Feedback
+17. Users
+18. Settings and hardware
+19. Command-line equivalents
+20. Troubleshooting
 
 # 1. Installing and starting the Studio
 
@@ -58,7 +59,7 @@ Useful options for `run.bat` / `run.sh` / `run.py`:
 | `--reinstall` | reinstall all packages |
 | `--no-venv` | use your current Python instead of `.venv` |
 
-**GPU.** With an NVIDIA graphics card, `run.bat` finds it with `nvidia-smi` and installs the CUDA build of PyTorch automatically. Apple Silicon Macs use the Apple GPU. Everything else trains on the CPU. Which device is used is shown on the Dashboard and can be changed under Settings → Hardware (section 17).
+**GPU.** With an NVIDIA graphics card, `run.bat` finds it with `nvidia-smi` and installs the CUDA build of PyTorch automatically. Apple Silicon Macs use the Apple GPU. Everything else trains on the CPU. Which device is used is shown on the Dashboard and can be changed under Settings → Hardware (section 18).
 
 These installer flags are the only options that are not in the Studio itself, because they run before the Studio starts. Every other script option has a control in the web app.
 
@@ -195,7 +196,31 @@ Teach a model your own books, articles and notes, or add them to the corpus.
 
 Good to know: scanned PDFs (pictures of pages) are read with OCR when Tesseract is installed; the *Scanned PDFs (OCR)* section shows whether it is and lets you pick the languages (e.g. `eng+hye`). A file that can't be read (password-protected, not really a PDF, empty) is skipped with a message saying why, and the others still go ahead. Old `.doc` files need LibreOffice; only use texts you have the right to use.
 
-# 7. Training: News & web
+# 7. Training: Retrain (a new model from one you trained)
+
+Continue a model you already trained on **other data**, as a **new model**. The original is never changed, so you can compare the two in Chat and keep whichever writes better. Use it when you have collected new books or news, built a new corpus, or want a version of your writer that leans towards one kind of text.
+
+![Retrain](manual/07b-retrain.png)
+
+1. **Model to start from:** any trained model, from scratch or fine-tuned (LoRA), writer or copilot. The hint under it says which kind it is. You can also open a model on the Runs tab and press **Retrain on new data**, which opens this tab with that model chosen.
+2. **Name of the new model:** a new name (it suggests `<name>-v2`). An existing model's name is refused, so nothing is ever overwritten.
+3. **New data**, any mix of:
+   - **Corpus folders:** tick the folders to learn from (the same list as the Corpus tab: `gutenberg`, `fineweb`, `custom`, each news source, ...). The text is encoded with the **model's own tokenizer**, so word-to-token mapping always matches the model, even if you rebuilt `tokenizer/bpe.json` since.
+   - **The whole encoded corpus** (from-scratch models only): uses `data/bin` from Data step 3 as it is. This only works when it was encoded with the same tokenizer as the model; otherwise the Studio refuses and tells you to pick folders instead (they get re-encoded with the model's tokenizer).
+   - **Your own files and links:** like the Your texts tab. They are read, trained on and then deleted; because of that, such a retrain can't be resumed after a stop.
+4. **How long:** **Steps** (default 2000 from scratch, 200 fine-tuned; 0 = read the new data once) and the **learning rate** (0 = automatic: 0.0003 from scratch, 0.0001 fine-tuned; lower keeps more of the original model).
+5. Under **Advanced:** **old data mixed in per new token** (from scratch, default 0.5: some of what the model was trained on is mixed into the new data so it does not forget everything else; 0 = only the new data), batch and gradient accumulation, and for fine-tuned models whether to make the fast CPU copy afterwards.
+6. Press **Start retraining**. The new model's window opens with its own loss curve. Its run details say *retrained from &lt;name&gt;*.
+
+What happens underneath:
+
+- **From scratch:** the new model starts from the original's weights and tokenizer, with a fresh learning-rate schedule (short warm-up, then down to a tenth). The old training data is mixed in only when it was encoded with the same tokenizer. The encoded new data is kept in `runs/<new>/retrain-data/`, so **Resume** works after a stop.
+- **Fine-tuned (LoRA):** the new adapter starts from the original's adapter on the same base model and rank, and learns continuation examples cut from the new text (code examples for a copilot). The writing style profile (Your style) carries over.
+- **Your texts → Teach a model now** changes a model *in place*; **Retrain** always makes a copy.
+
+From a terminal: `python retrain.py --from runs/my-writer --out runs/my-writer-news --source data/raw/news --steps 2000` (section 19).
+
+# 8. Training: News & web
 
 Reads RSS/Atom feeds, web pages and public social posts on a schedule, saves new articles to `data/raw/news/<source>/`, and can teach a model the new articles once enough have arrived.
 
@@ -226,7 +251,7 @@ Below the sources you see the **latest articles** (with language), **past runs**
 
 The crawler obeys robots.txt, waits at least 3 seconds between requests to a site, skips duplicates and near-empty pages, and resumes after a dropped connection. Every article's link, title and license is written to `data/raw/news/attribution.jsonl`. In Chat, the format **About today's news** answers from the latest collected articles.
 
-# 8. Training: Your style
+# 9. Training: Your style
 
 Teach a model to write like one account (yours, or someone who gave permission or uses an open license).
 
@@ -245,13 +270,13 @@ Teach a model to write like one account (yours, or someone who gave permission o
 
 **Examples** shows a few imported posts; the trash button deletes the profile (and, if you agree, its model). Other people's Facebook, Instagram, Threads or X accounts can't be imported: there is no API for them and their terms forbid scraping.
 
-# 9. Training: Copilot (a model that writes code)
+# 10. Training: Copilot (a model that writes code)
 
 A **copilot** is a model that completes code where your cursor is and answers programming questions. The **Copilot** tab collects code from your own projects and from permissively licensed public code, and trains either a fine-tuned code model or a from-scratch one.
 
 ![Training → Copilot: code sources, collected code and training options](manual/12f-copilot.png)
 
-## 9.1 Collect code
+## 10.1 Collect code
 
 **Your projects on this PC.** Type a folder, or press **Browse…** to pick one, then **Add**. Add each project's top folder (the one with `package.json`, `pyproject.toml` or `.git`). Press **Read my projects** to read them all. Reading a folder again replaces its earlier copy, so press it again after you have changed your code.
 
@@ -273,7 +298,7 @@ This is careful but not perfect: a model can remember what it trains on, so add 
 
 The **Collected code** card lists each source with files, size, languages, the licences found and how many secrets were redacted. The trash button deletes that collected copy (your project folders are never touched).
 
-## 9.2 Train
+## 10.2 Train
 
 **Fine-tune a code model** (best quality). Pick a base model: **Qwen2.5-Coder 0.5B Instruct** (default, Apache 2.0, fine on a CPU), 1.5B Instruct (better, overnight on a CPU), or a *base* Qwen2.5-Coder for completion only. The 3B model has a non-commercial licence, as its hint says. The examples are cut from your collected code:
 
@@ -290,13 +315,13 @@ Set **Code examples**, the name, steps and learning rate, and press **Start trai
 a. **Build the code tokenizer** (`tokenizer/bpe-code.json`), with the fill-in-the-middle tokens. *Also learn English from the book corpus* mixes in `data/raw` so comments and docstrings read better.
 b. **Encode the code** (`data/bin-code/`). The fill-in-the-middle share of files is rearranged as before / after / missing part.
 
-Then pick a model size and press **Start training**. To train it on several PCs, use the **Cluster** tab and choose **Kind of model: Copilot (code)** (section 11).
+Then pick a model size and press **Start training**. To train it on several PCs, use the **Cluster** tab and choose **Kind of model: Copilot (code)** (section 12).
 
 Copilots appear under Runs and in Chat as "copilot". They can be rated, improved, exported and resumed like any other model. (Evaluate on Analytics scores writing formats, so it says little about a copilot.)
 
-## 9.3 Using the copilot
+## 10.3 Using the copilot
 
-- **Chat → Complete code at &lt;cursor&gt;:** paste code and type `<cursor>` where the missing part goes; without it the model continues the end. The answer is the code for that spot (section 13).
+- **Chat → Complete code at &lt;cursor&gt;:** paste code and type `<cursor>` where the missing part goes; without it the model continues the end. The answer is the code for that spot (section 14).
 - **Chat → Code assistant:** ask for a function, a fix or an explanation (fine-tuned copilots).
 - **From an editor or a script:** send the code around the cursor to the Studio. Any signed-in user may call it with their session cookie:
 
@@ -306,7 +331,7 @@ POST http://127.0.0.1:7860/api/code/complete
 → {"completion": "a + b", "model": "my-copilot"}      (an example answer)
 ```
 
-## 9.4 Automatic updates
+## 10.4 Automatic updates
 
 The **Automatic updates** card, under the training options, keeps the copilot up to date with new public code without you pressing anything.
 
@@ -331,7 +356,7 @@ Choose *No, only collect the code* to only grow the collection, for a bigger tra
 
 From the command line: `python data/code_update.py` (one run with the saved settings), `--install-schedule 24` and `--uninstall-schedule`. The building blocks are also in `data/build_code.py`: `--github-new N`, `--topics cli,web`, `--refresh` and `--refresh-limit N`.
 
-# 10. Training: Corpus
+# 11. Training: Corpus
 
 Shows what the models learn from: one row per folder under `data/raw/`.
 
@@ -341,7 +366,7 @@ Each row shows files, size, documents, estimated tokens and when it was updated.
 
 After deleting a source, run Data step 3 (Encode) again so from-scratch training sees the change. Rebuild the tokenizer (step 2) only before training a new model, never for a model you will resume (see section 5). Fine-tuning reads the folders directly. Models already trained keep what they learned.
 
-# 11. Training: Cluster (several PCs train one model)
+# 12. Training: Cluster (several PCs train one model)
 
 Several computers, at home or anywhere on the internet, can train **one** from-scratch model together. Every PC uses what it has: an NVIDIA GPU, an Apple GPU or just the CPU. One PC is the **coordinator**: it holds the prepared data and the model. The others are **workers**.
 
@@ -370,7 +395,7 @@ The long secret keeps strangers out, but the traffic itself is not encrypted, so
 
 **Advanced:** secret (made up for you), workers needed before the first round, final learning rate, warmup, weight decay, outer learning rate (0.7) and momentum (0.9), how often to check quality, this PC's batch size, and **Resume** (continue a stopped cluster model from its last round; workers reconnect by themselves). Workers' advanced options: batch size, gradient accumulation, "stop early" seconds for a slow upload, and using the PC's own prepared data instead of downloading (only with the same tokenizer).
 
-**Kind of model:** *Writer* uses the Data tab's prepared text; *Copilot (code)* uses the code prepared on the Copilot tab (section 9). A worker that uses its own prepared data picks the same kind under *Own data is for*.
+**Kind of model:** *Writer* uses the Data tab's prepared text; *Copilot (code)* uses the code prepared on the Copilot tab (section 10). A worker that uses its own prepared data picks the same kind under *Own data is for*.
 
 ## Android phones
 
@@ -389,7 +414,7 @@ Android phones can join too, through the free **Termux** app. A phone trains onl
 
 The result is an ordinary from-scratch run under Runs: chat with it, export it, or keep training it alone with Resume. Cluster mode is for from-scratch models; fine-tuning (LoRA) still runs on one PC.
 
-# 12. Training: Runs
+# 13. Training: Runs
 
 Every model you train is a **run** in `runs/<name>/`.
 
@@ -420,6 +445,7 @@ Buttons (which ones appear depends on the run's state):
 | **Stop** | stop the running job; the last checkpoint is kept |
 | **Resume** | continue training from the last checkpoint with the run's own settings |
 | **Export** | download the run as a `.zip` (from-scratch: OK = include the training data) |
+| **Retrain on new data** | open the Retrain tab with this model chosen: a new model that continues it on other data (section 7) |
 | 🗑 | delete the run and its weights |
 
 **Evaluation options:** only some formats, at most N prompts, maximum answer length. Partial evaluations are saved but not used when deciding the default model. **Fast CPU copy options:** quality Q4_K_M (smallest, fastest, default), Q5_K_M, Q6_K or Q8_0 (bigger, closer to the original).
@@ -432,7 +458,7 @@ Buttons (which ones appear depends on the run's state):
 
 This works between Windows and Linux, and between GPU and CPU computers. A fine-tuned model's base model (for example Qwen3 0.6B) is not inside the zip; the new PC downloads it once.
 
-# 13. Chat
+# 14. Chat
 
 Chat is where you (and regular users) write with the models.
 
@@ -479,11 +505,11 @@ Rough budgets: the **cpu** size (~14M weights) with the README's settings (16 ×
 
 With **About today's news**, the answer lists the articles it is based on, with links.
 
-**Code formats** (for copilots, section 9): **Code assistant** answers programming requests with code blocks; **Complete code at &lt;cursor&gt;** fills in the spot marked `<cursor>` in the code you paste. Choosing a copilot model switches to a code format by itself. Code answers are shown in a code box and checked for balanced brackets and repeated lines.
+**Code formats** (for copilots, section 10): **Code assistant** answers programming requests with code blocks; **Complete code at &lt;cursor&gt;** fills in the spot marked `<cursor>` in the code you paste. Choosing a copilot model switches to a code format by itself. Code answers are shown in a code box and checked for balanced brackets and repeated lines.
 
 ![Complete code with a (tiny demo) copilot](manual/14d-chat-code.png)
 
-# 14. Analytics
+# 15. Analytics
 
 Admins see how the models learn and how people rate them.
 
@@ -498,7 +524,7 @@ Admins see how the models learn and how people rate them.
 
 Further down: **ratings by format**, **validation loss** for all models, **ratings per day**, **rating distribution**, **Did feedback training help?** (average rating per training round), the **model leaderboard** (click a model to open its details) and **recent jobs** with their result.
 
-# 15. Feedback
+# 16. Feedback
 
 Every rating and correction becomes training data. Liked answers and corrections teach the model what to write; disliked answers teach it what to avoid.
 
@@ -511,7 +537,7 @@ Every rating and correction becomes training data. Liked answers and corrections
 
 How the learning works: fine-tuned models train on liked and corrected answers directly and use a DPO preference loss when a liked or corrected answer can be paired with a disliked one. From-scratch models re-read the prompts with their liked answers. Feedback that was used is marked *learned* and is not trained on again.
 
-# 16. Users
+# 17. Users
 
 Admins add people and set their role.
 
@@ -523,7 +549,7 @@ Each row shows the person, their role (change it in the drop-down; you can't cha
 
 **Add user** asks for a username, an optional display name, a password (at least 6 characters; they can change it later) and the role: **User** (Chat and Settings only) or **Admin** (everything).
 
-# 17. Settings and hardware
+# 18. Settings and hardware
 
 ![Settings (admin view with Hardware)](manual/17-settings.png)
 
@@ -536,7 +562,7 @@ Each row shows the person, their role (change it in the drop-down; you can't cha
 
 **Safety when the Studio faces the internet.** Every `/api` call needs a signed-in account; eight wrong passwords in a row lock that username for a minute; cross-site requests are refused; model files are only ever loaded as plain tensors (never as code), so an imported model bundle from someone else can't run anything on your PC; and a bundle's saved training command is checked before Resume uses it.
 
-# 18. Command-line equivalents
+# 19. Command-line equivalents
 
 Everything in this manual can also be done from a terminal in the project folder (activate `.venv` first). The most useful commands:
 
@@ -550,6 +576,8 @@ python tokenizer/train_tokenizer.py --encode --raw data/raw --tok tokenizer/bpe.
 python train.py --preset cpu --vocab 8192 --max-steps 20000 [--resume]
 python finetune/finetune_lora.py --base Qwen/Qwen3-0.6B --out runs/my-social-writer --gguf
 python learn.py --run runs/my-writer --files book.pdf --urls https://example.com/article
+python retrain.py --from runs/my-writer --out runs/my-writer-v2 --source data/raw/news,data/raw/custom --steps 2000
+python retrain.py --resume --out runs/my-writer-v2   # continue a stopped retrain
 python data/crawl.py --learn runs/my-model
 python data/own_posts.py --profile me --name "Me" --x-archive twitter.zip --i-own-these
 python generate.py --ckpt runs/my-model/ckpt.pt --tok runs/my-model/tokenizer.json --prompt "Once upon a time" --repetition-penalty 1.2 --no-repeat-ngram 4
@@ -569,7 +597,7 @@ python data/code_update.py --install-schedule 24   # every 24 h, also when the S
 
 See README.md for every option.
 
-# 19. Troubleshooting
+# 20. Troubleshooting
 
 | Problem | What to do |
 |---|---|
@@ -577,7 +605,8 @@ See README.md for every option.
 | Forgot the admin password | Stop the Studio and run `python -m studio.auth passwd <name>`. |
 | Download keeps disconnecting (`WinError 10054`) | Press **Run** again; every source resumes. Under *Downloading* choose "Download whole files first" and more retries. |
 | "Prepare the training data first" | Run Data steps 1–3 before training from scratch. |
-| Resumed model writes nonsense after a corpus change | The tokenizer was rebuilt. Restore the old one (each run keeps a copy as `runs/<name>/tokenizer.json`; copy it to `tokenizer/bpe.json`) and run Data step 3 again. |
+| Resumed model writes nonsense after a corpus change | The tokenizer was rebuilt. Restore the old one (each run keeps a copy as `runs/<name>/tokenizer.json`; copy it to `tokenizer/bpe.json`) and run Data step 3 again. Or use **Retrain** with corpus folders: it encodes them with the model's own tokenizer. |
+| Retrain: "not this model's tokenizer" | The encoded corpus was made with a different tokenizer than the model. Untick *The whole encoded corpus* and tick the corpus folders instead. |
 | The GPU isn't used | Update the NVIDIA driver, then `run.bat --reinstall` (or `--gpu`). Check Settings → Hardware. On laptops, plug in the charger and set Windows Graphics to "High performance" for Python. |
 | "CUDA out of memory" | Halve the batch size and double the gradient accumulation. |
 | A PDF gives no text | It's a scan: install Tesseract OCR (see the README) or run `ocrmypdf` first. Password-protected: save it again without the password. The ✗ line in the log says which. |
@@ -586,7 +615,7 @@ See README.md for every option.
 | Chat is slow with a fine-tuned model | Open the run and press **Make fast CPU copy**. |
 | A worker keeps saying "coordinator not reachable" | Check the address and port, and that the coordinator's firewall allows port 7861 (Windows asks once; allow it on private and public networks). From another network use the Internet address only when the card says "Reachable from other networks"; otherwise use Tailscale. The worker retries by itself. |
 | "403 wrong secret" when joining | Copy the secret again from the coordinator's Cluster page; a new secret is made each time a cluster starts unless you set one. |
-| A GitHub repository was "skipped, licence …" | Only permissive licences are used (section 9). Pick another repository. |
+| A GitHub repository was "skipped, licence …" | Only permissive licences are used (section 10). Pick another repository. |
 | "GitHub rate limit reached; waiting" | Add a GitHub token on the Copilot tab, or let it wait; it continues by itself. |
 | A project file is missing from the collected code | It is in a `.gitignore`, a skipped folder (`build`, `vendor`, …), too big, minified, generated, or not a known language. The log lists how many files each reason skipped. |
 | Learning from news or ratings was "undone" | The quality gate saw the quick-check score drop; the previous model was kept. |

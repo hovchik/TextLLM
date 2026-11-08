@@ -215,12 +215,15 @@ class Engine:
             pass
         return out
 
-    def _stream_scratch(self, prompt, n, temperature, top_p, top_k=50, penalties=None):
+    def _stream_scratch(self, prompt, n, temperature, top_p, top_k=50, penalties=None, doc_start=False):
         # The from-scratch model only continues text, so the message is used as the opening.
+        # doc_start: put the end-of-text token first, as between documents in training, so the
+        # model knows a new text begins here (and doesn't carry on some web page it imagines).
         import torch
 
-        ids = torch.tensor([self.tok.encode(prompt).ids], device=self.device)
         stop, new = self.tok.token_to_id("<|endoftext|>"), []
+        ids = ([stop] if doc_start and stop is not None else []) + self.tok.encode(prompt).ids
+        ids = torch.tensor([ids], device=self.device)
         # key/value cache: one token per step
         for nxt in self.model.stream(ids, n, temperature, top_k, top_p, penalties=penalties):
             t = nxt.item()
@@ -400,9 +403,16 @@ class Engine:
             yield {"type": "final", "text": text, "check": F.check(fmt, text, fields)}
             return
         if self.backend == "scratch":  # continues text; templates don't apply
+            prompt, shown = F.scratch_opening(fmt, message, fields)
             text = ""
-            for text in self.stream_messages([{"role": "user", "content": message}], s):
-                yield {"type": "text", "text": text}
+            with self.lock:
+                for full in self._stream_scratch(prompt, s["max_tokens"], s["temperature"], s.get("top_p", 0.95),
+                                                 s.get("top_k") or 50, scratch_penalties(s), doc_start=shown is not None):
+                    if shown is None:  # free chat: the message is the opening, the answer goes on from it
+                        text = full[len(prompt):] if full.startswith(prompt) else full
+                    else:  # the title stays out of the answer, the opening words stay in
+                        text = shown + full[len(prompt):]
+                    yield {"type": "text", "text": text}
             yield {"type": "final", "text": text, "check": F.check(fmt, text, fields)}
             return
         msgs = F.messages(fmt, message, fields, history)

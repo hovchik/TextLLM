@@ -126,6 +126,23 @@ def _frequency_processor(f):
     return LogitsProcessorList([Frequency()])
 
 
+def _ngram_processor_gguf(n):
+    """llama.cpp has no no-repeat n-gram option; this logits processor adds it. llama-cpp-python
+    calls it with (input_ids, scores) as numpy arrays for one sequence and uses what it returns."""
+    import numpy as np
+    import torch
+    from model.gpt import Penalties
+
+    pen = Penalties(no_repeat_ngram=n, window=512)
+
+    def proc(input_ids, scores):
+        ids = torch.from_numpy(np.asarray(input_ids, dtype=np.int64))[None]
+        out = pen.apply(torch.from_numpy(np.asarray(scores, dtype=np.float32))[None], ids)[0]
+        return out.numpy().astype(scores.dtype, copy=False)
+
+    return proc
+
+
 def _Cancel(event):
     """A transformers stopping criterion that ends generate() once `event` is set."""
     import torch
@@ -217,7 +234,8 @@ class Engine:
         for ch in self.model.create_chat_completion(
                 messages=msgs, stream=True, max_tokens=s["max_tokens"], temperature=max(s["temperature"], 0.0),
                 top_p=s.get("top_p", 0.95), top_k=s.get("top_k", 40), presence_penalty=rep["presence_penalty"],
-                frequency_penalty=float(rep["frequency_penalty"] or 0.0), repeat_penalty=float(rep["repetition_penalty"] or 1.0)):
+                frequency_penalty=float(rep["frequency_penalty"] or 0.0), repeat_penalty=float(rep["repetition_penalty"] or 1.0),
+                **({"logits_processor": _ngram_processor_gguf(int(rep["no_repeat_ngram"]))} if rep["no_repeat_ngram"] else {})):
             piece = ch["choices"][0].get("delta", {}).get("content")
             if piece:
                 out += piece

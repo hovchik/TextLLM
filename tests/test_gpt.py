@@ -147,3 +147,14 @@ def test_no_repeat_ngram_bans_the_token_that_would_repeat():
     # a vocabulary where everything is banned falls back instead of failing
     out = Penalties(no_repeat_ngram=2).apply(torch.zeros(1, 2), torch.tensor([[0, 0, 1, 0]]))
     assert torch.isfinite(out).all()
+
+
+def test_penalty_history_outlives_the_window_rebuild():
+    """The cache keeps only part of the window after a rebuild; the n-gram ban must still see
+    everything inside its own window, so no 3 tokens repeat across a rebuild either."""
+    m = tiny(block=32)
+    x = torch.randint(0, 97, (1, 4))
+    toks = x[0].tolist() + [t.item() for t in m.stream(x, 60, top_k=1, keep=0.25,
+                                                         penalties={"no_repeat_ngram": 3, "window": 64})]
+    tail = toks[-64:]
+    assert len(set(ngrams(tail, 3))) == len(ngrams(tail, 3))

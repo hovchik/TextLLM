@@ -166,15 +166,20 @@ class GPT(nn.Module):
         pen = Penalties.of(penalties)
         cache, ctx = self.new_cache(), idx[:, -bs:]
         logits, _ = self(ctx, cache=cache)
+        # what the penalties look back on: kept apart from ctx, which is cut short when the cache is rebuilt
+        hist_len = (pen.window or bs) if pen else 0
+        hist = idx[:, -hist_len:] if pen else None
         for _ in range(max_new_tokens):
             last = logits[:, -1, :]
             if pen:
-                last = pen.apply(last, ctx)
+                last = pen.apply(last, hist)
             nxt = sample(last, temperature, top_k, top_p)
             yield nxt
             if stop_id is not None and (nxt == stop_id).all():
                 return
             ctx = torch.cat([ctx, nxt], 1)
+            if pen:
+                hist = torch.cat([hist, nxt], 1)[:, -hist_len:]
             if cache.pos >= bs:
                 ctx = ctx[:, -max(1, int(bs * keep)):]
                 cache.pos = 0  # reuse the buffers

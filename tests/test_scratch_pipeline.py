@@ -100,3 +100,11 @@ def test_scratch_chat_has_anti_repetition_defaults_and_code_turns_them_off():
     # the user's choice wins over the defaults
     assert repeat_settings({"no_repeat_ngram": 0, "repetition_penalty": 1.5}, "scratch")["no_repeat_ngram"] == 0
     assert scratch_penalties({"repetition_penalty": 1.5})["repetition"] == 1.5
+
+
+def test_gguf_ngram_processor_bans_the_repeating_token():
+    import numpy as np
+    from chat_engine import _ngram_processor_gguf
+
+    out = _ngram_processor_gguf(3)(np.array([1, 2, 3, 4, 1, 2]), np.zeros(5, dtype=np.float32))
+    assert out.dtype == np.float32 and np.isneginf(out[3]) and np.isfinite(out[[0, 1, 2, 4]]).all()

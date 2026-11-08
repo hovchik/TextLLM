@@ -23,10 +23,11 @@ def physical_cores():
     return max(1, n // 2) if n > 2 else n
 
 
-def set_threads():
+def set_threads(n=0):
+    """Use n CPU threads (0 = TEXTLLM_THREADS, else the physical cores). Returns the count."""
     import torch
 
-    n = int(os.environ.get("TEXTLLM_THREADS", 0)) or physical_cores()
+    n = int(n or 0) or int(os.environ.get("TEXTLLM_THREADS", 0) or 0) or physical_cores()
     torch.set_num_threads(n)
     return n
 

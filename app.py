@@ -22,7 +22,7 @@ from studio import auth, db, feedback, gate, jobs
 from writing import formats as F
 from studio import styles
 from studio import copilot
-from core import backends as core_backends, commands as core_commands, net as core_net, paths as core_paths
+from core import backends as core_backends, commands as core_commands, net as core_net, parallel as core_parallel, paths as core_paths
 
 PY = jobs.PY
 WEB = os.path.join(ROOT, "web")
@@ -468,6 +468,8 @@ class TrainReq(BaseModel):
     min_lr: float = 0
     weight_decay: float = 0.1
     compile: bool = False
+    procs: int = 0                # training processes on this PC (0 = auto: the speed test's pick, else 1)
+    threads: int = 0              # CPU threads for the run (0 = all physical cores); also for LoRA
     # LoRA, advanced
     init_from: str = ""           # continue from this fine-tuned run's adapter (same base model)
     pairs_per_doc: int = 8
@@ -519,6 +521,9 @@ def train(r: TrainReq):
             cmd += ["--min-lr", str(min(r.min_lr, r.lr))]
         if r.compile:
             cmd.append("--compile")
+        cmd += ["--procs", str(max(0, min(64, r.procs)))]
+        if r.threads > 0:
+            cmd += ["--threads", str(min(1024, r.threads))]
         if r.resume:
             cmd.append("--resume")
     else:
@@ -559,6 +564,8 @@ def train(r: TrainReq):
                 cmd += ["--code-langs", langs]
         if r.gguf:
             cmd += ["--gguf"]
+        if r.threads > 0:
+            cmd += ["--threads", str(min(1024, r.threads))]
         if r.resume:
             cmd.append("--resume")
     saved_cmd = os.path.join(out, "train_cmd.json")
@@ -571,6 +578,15 @@ def train(r: TrainReq):
         cmd = [out if i > 0 and cmd[i - 1] == "--out" else c for i, c in enumerate(cmd)]
         if "--resume" not in cmd:
             cmd.append("--resume")
+        # Threads and processes belong to this PC, not the run (it may have come from another one).
+        speed = {"--procs": str(max(0, min(64, r.procs))) if cmd[1] == "train.py" else None,
+                 "--threads": str(min(1024, r.threads)) if r.threads > 0 else None}
+        for flag, val in speed.items():
+            while flag in cmd:
+                i = cmd.index(flag)
+                del cmd[i:i + 2]
+            if val is not None:
+                cmd += [flag, val]
         if "--max-steps" in cmd:  # "train longer": a bigger step count in the form extends the run
             i = cmd.index("--max-steps") + 1
             if int(cmd[i]) > 0 and r.steps > int(cmd[i]):
@@ -582,6 +598,35 @@ def train(r: TrainReq):
     if not r.resume and os.path.exists(mp):
         os.rename(mp, os.path.join(out, f"metrics.{int(time.time())}.jsonl"))
     return _launch("training", name, cmd, os.path.join(out, "log.txt"), run=name)
+
+
+# ---------------------------------------------------------------- several processes on one PC
+class SpeedReq(BaseModel):
+    preset: str = "cpu"
+    vocab: int = 8192
+    batch: int = 16
+    threads: int = 0
+
+
+@app.get("/api/train/parallel")
+def train_parallel():
+    """The speed test results (fastest process count per model size) and this PC's cores."""
+    return {"bench": core_parallel.load_bench(), "cores": core_parallel.physical_cores(),
+            "logical": os.cpu_count() or 1}
+
+
+@app.post("/api/train/speedtest")
+def train_speedtest(r: SpeedReq):
+    """Train a few steps with 1, 2 and 4 processes on random tokens; Auto then uses the fastest."""
+    from model.gpt import PRESETS
+
+    if r.preset not in PRESETS:
+        err("unknown model size")
+    cmd = [PY, "-m", "core.parallel", "--preset", r.preset, "--vocab", str(max(256, min(65535, r.vocab))),
+           "--batch", str(max(1, min(512, r.batch))), "--steps", "30"]
+    if r.threads > 0:
+        cmd += ["--threads", str(min(1024, r.threads))]
+    return _launch("speedtest", f"speed test ({r.preset})", cmd, os.path.join(RUNS, "_parallel.log"))
 
 
 # ---------------------------------------------------------------- cluster (several PCs train one model)

@@ -128,6 +128,14 @@ Once you have models it shows:
 
 **Advanced** (click to open): batch size, gradient accumulation, vocabulary size (must match the tokenizer), tokens per example, warmup steps (0 = steps ÷ 40), final learning rate, weight decay, **torch.compile** (faster on a GPU, slow start) and **Resume from the last checkpoint**.
 
+**Speed on this PC** (also under Advanced):
+
+- **CPU threads**: how many CPU threads training uses. 0 (the default) means all physical cores, which is what training always did. Set a lower number to keep the PC usable for other work while it trains. LoRA fine-tuning uses this setting too.
+- **Training processes**: from-scratch models can train in several processes on one PC. Each process takes part of the batch and a share of the threads, and after every step they average their gradients, so the model learns the same thing as one process with the whole batch. **Auto** uses one process until you run the speed test, and then the count the test found fastest for that model size. On a PC with several NVIDIA GPUs, Auto starts one process per GPU.
+- **Find the fastest**: a speed test that takes 1 to 3 minutes. It trains a few steps of the chosen model size on random tokens with 1, 2 and 4 processes and remembers the fastest. A count only wins if it is at least 5% faster than one process. The result shows under Training processes, for example "Auto = 2 for this size (1 → 900 ms/step, 2 → 700 ms/step)".
+
+Whether several processes help depends on the CPU. PyTorch already spreads the big matrix multiplies of one process over every core, so on a 4-core test machine 1, 2 and 4 processes ran within 5% of each other (CPU size, about 1.25 s per step with batch 16 × 2). CPUs with many cores, or with hyper-threads, are more likely to gain, which is why the speed test measures your own PC instead of guessing. Threads and processes belong to the PC, not to the run: **Resume** uses the values in the form, so a run moved to another PC uses that PC's settings, and a run trained with 2 processes can continue with 1.
+
 Before training from scratch you must run Data steps 1–3 (section 5). The right-hand card "What to expect" explains the six quality levels: random letters → … → grammatical sentences → stays on topic.
 
 ## 4.2 Fine-tune an open model (LoRA)
@@ -574,6 +582,8 @@ python data/build_corpus.py --gutenberg-max 3000 --fineweb-gb 0.3
 python tokenizer/train_tokenizer.py --raw data/raw --vocab 8192 --out tokenizer/bpe.json
 python tokenizer/train_tokenizer.py --encode --raw data/raw --tok tokenizer/bpe.json --bin data/bin
 python train.py --preset cpu --vocab 8192 --max-steps 20000 [--resume]
+python train.py --preset cpu --vocab 8192 --procs 2 --threads 0   # 2 processes on this PC (0 = auto)
+python -m core.parallel --preset cpu --batch 16                  # speed test: which --procs is fastest here
 python finetune/finetune_lora.py --base Qwen/Qwen3-0.6B --out runs/my-social-writer --gguf
 python learn.py --run runs/my-writer --files book.pdf --urls https://example.com/article
 python retrain.py --from runs/my-writer --out runs/my-writer-v2 --source data/raw/news,data/raw/custom --steps 2000

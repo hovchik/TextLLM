@@ -69,7 +69,7 @@ def inner_lr_at(r, a):
 # git nor GitHub access, and always runs the same version as the coordinator.
 WORKER_FILES = ["cluster.py", "graceful.py", "netreach.py", "power.py", "devices.py", "train.py",
                 "model/__init__.py", "model/gpt.py", "writing/__init__.py", "writing/hf.py",
-                "core/__init__.py", "core/quiet.py", "core/safeload.py"]
+                "core/__init__.py", "core/parallel.py", "core/quiet.py", "core/safeload.py"]
 _code_zip = {}
 
 

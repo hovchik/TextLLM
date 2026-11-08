@@ -420,6 +420,8 @@ python tokenizer/train_tokenizer.py --encode --raw data/raw --tok tokenizer/bpe.
 python train.py --preset small --compile
 #    or multi-GPU
 torchrun --nproc_per_node=8 train.py --preset 1b --batch 8 --grad-accum 4 --compile
+#    or several processes on one PC (one per GPU, or sharing the CPU cores; --batch is the total)
+python train.py --preset cpu --procs 0          # 0 = auto; python -m core.parallel measures which count is fastest
 #    resume after a stop
 python train.py --preset small --resume
 

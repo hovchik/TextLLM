@@ -79,6 +79,7 @@ def args():
     ap.add_argument("--private-texts", action="store_true",
                     help="learn.py: the texts are temporary, so keep no tokenized copy (no data/cache, no "
                          "examples.pt) and leave the run's resume state (train_state.pt) as it was")
+    ap.add_argument("--threads", type=int, default=0, help="CPU threads (0 = all physical cores, or TEXTLLM_THREADS)")
     ap.add_argument("--device", default="auto", help="auto (GPU if there is one), cuda, mps, xpu or cpu")
     cg = ap.add_argument_group("copilot (code) examples")
     cg.add_argument("--code", default=None, help="folder of code shards from data/build_code.py (e.g. data/code)")
@@ -265,7 +266,7 @@ def main():
     os.makedirs(a.out, exist_ok=True)
     mlog = open(os.path.join(a.out, "metrics.jsonl"), "a")
 
-    threads = hf.set_threads()
+    threads = hf.set_threads(a.threads)
     tok = hf.load_tokenizer(a.base)
     pad = tok.pad_token_id if tok.pad_token_id is not None else tok.eos_token_id
     ex_p = os.path.join(a.out, "examples.pt")

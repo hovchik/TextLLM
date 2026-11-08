@@ -15,7 +15,7 @@ ROOT = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, ROOT)
 import graceful  # noqa: E402
 from core import safeload  # noqa: E402
-from data.ingest import EOT, ingest  # noqa: E402
+from data.ingest import EOT, PDF_OPTS, ingest, utf8_stdout  # noqa: E402
 from graceful import run_child  # noqa: E402
 
 
@@ -105,7 +105,11 @@ def main():
     ap.add_argument("--batch", type=int, default=16)
     ap.add_argument("--grad-accum", type=int, default=4)
     ap.add_argument("--delete-originals", action="store_true")
+    ap.add_argument("--ocr", choices=["auto", "off"], default="auto", help="OCR scanned PDF pages (Tesseract)")
+    ap.add_argument("--ocr-lang", default="auto", help="Tesseract languages, e.g. eng+hye")
     a = ap.parse_args()
+    utf8_stdout()
+    PDF_OPTS.update(ocr=a.ocr, ocr_lang=a.ocr_lang)
     a.run = os.path.abspath(a.run)
     meta = json.load(open(os.path.join(a.run, "meta.json")))
     urls = list(a.urls) + ([l.strip() for l in open(a.url_list) if l.strip()] if a.url_list else [])
@@ -124,7 +128,7 @@ def main():
             n += sum(1 for d in open(dst, encoding="utf-8").read().split(EOT) if d.strip())
             shard = shard or dst
         if not shard:
-            raise SystemExit("nothing could be extracted, so there is nothing to learn")
+            raise SystemExit("nothing could be extracted, so there is nothing to learn (the ✗ lines above say why)")
         say(f"== 2/3 training {os.path.basename(a.run)} on {n} new document(s)")
         cmd = learn_scratch(a, meta, text_dir, tmp) if meta["type"] == "scratch" else learn_lora(a, meta, text_dir)
         rc = run_child(cmd, ROOT)

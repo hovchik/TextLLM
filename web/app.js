@@ -815,7 +815,7 @@ function trainData() {
 }
 
 async function trainTexts() {
-  const models = await api("/api/models").catch(() => []);
+  const [models, ocr] = await Promise.all([api("/api/models").catch(() => []), api("/api/texts/ocr").catch(() => null)]);
   const files = [];
   $("#tbody").innerHTML = `<div class="grid g3"><div class="card span2" style="display:flex;flex-direction:column;gap:18px">
     <div><h2>Learn from your own texts</h2><p class="muted" style="margin:4px 0 0">PDF, Word (.doc/.docx), TXT, Markdown or HTML files, links to books and articles, or a whole folder.</p></div>
@@ -836,10 +836,15 @@ async function trainTexts() {
         <label class="field">Old text mixed in, per new token<input class="input" id="x-mix" type="number" min="0" max="10" step="0.5" value="1"><span class="hint">From-scratch models only: keeps them from forgetting. 0 = only the new texts.</span></label>
         <label class="field">Learning rate<input class="input" id="x-lr" type="number" min="0" step="any" value="0"><span class="hint">0 = automatic (0.0003 from scratch, 0.0001 fine-tuned)</span></label></div></details>
     </div>
+    <details><summary>Scanned PDFs (OCR)</summary><div class="grid g2" style="margin-top:8px">
+      <label class="field">Read scanned pages<select class="input" id="x-ocr"><option value="auto">Yes, with OCR when a page has no text</option><option value="off">No, skip scanned pages</option></select>
+        <span class="hint">${ocr && ocr.available ? `Tesseract OCR is installed (${esc((ocr.languages || []).join(", ") || "no languages")}).` : `Tesseract OCR is not installed, so scanned pages are skipped. ${esc(ocr ? ocr.hint : "")}`}</span></label>
+      <label class="field">OCR languages<input class="input" id="x-ocrlang" value="auto" placeholder="auto, or e.g. eng+hye"><span class="hint">auto = ${esc((ocr && ocr.auto) || "eng")}. Tesseract codes joined with +: eng, hye (Armenian), rus …</span></label></div></details>
     <div class="row end"><button class="btn primary" id="x-start">${I.play} Start</button></div>
   </div>
   <div class="card"><h2>Good to know</h2><ul class="muted" style="padding-left:18px">
-    <li>Scanned PDFs have no text layer; run OCR first (e.g. <span class="mono">ocrmypdf</span>).</li>
+    <li>Scanned PDFs (pictures of pages) are read with OCR when Tesseract is installed${ocr && ocr.available ? " (it is)" : ""}; password-protected PDFs must be saved without the password first.</li>
+    <li>Why a file was skipped is shown here and in the job log (lines starting with ✗).</li>
     <li>Old <b>.doc</b> files need LibreOffice installed.</li>
     <li>From-scratch models mix in old data while learning so they don't forget the rest.</li>
     <li>Use texts you have the right to use.</li></ul></div></div>`;
@@ -863,9 +868,11 @@ async function trainTexts() {
     fd.append("action", action); fd.append("model", $("#x-model").value);
     fd.append("passes", $("#x-passes").value); fd.append("delete_local", $("#x-del").checked);
     fd.append("mix", $("#x-mix").value || "1"); fd.append("lr", $("#x-lr").value || "0");
+    fd.append("ocr", $("#x-ocr").value); fd.append("ocr_lang", $("#x-ocrlang").value || "auto");
     try {
-      await api("/api/texts", { method: "POST", body: fd });
+      const r = await api("/api/texts", { method: "POST", body: fd });
       toast(action === "learn" ? "Reading your texts and training…" : "Adding texts to the corpus…", "ok");
+      (r.skipped || []).forEach((s) => toast(`<b>Skipped ${esc(s.file)}</b>: ${esc(s.reason)}`, "err"));
       files.length = 0; drawFiles(); poll();
       if (action === "learn") setTimeout(() => openRun($("#x-model").value), 500);
     } catch (e) { fail(e); }

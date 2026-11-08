@@ -133,7 +133,8 @@ python learn.py --run runs/scratch-cpu --files book.pdf essay.docx notes.md ~/My
 # Or just add them to the corpus (data/raw/custom/) for the next full training
 python data/ingest.py --files book.pdf ~/MyBooks --urls https://example.com/article
 ```
-- **Supported inputs:** .pdf (text-based PDFs only; scanned PDFs need OCR first, for example `ocrmypdf`), .docx, .doc (needs LibreOffice or antiword), .txt, .md, .html, and web links to articles, online PDFs or plain-text books. Folders are searched recursively.
+- **Supported inputs:** .pdf, .docx, .doc (needs LibreOffice or antiword), .txt, .md, .html, and web links to articles, online PDFs or plain-text books. Folders are searched recursively.
+- **PDFs** ([data/pdftext.py](data/pdftext.py)): read page by page with pypdf, so one broken page doesn't lose the book; if the text layer is poor, pdfminer.six (and PyMuPDF or poppler's `pdftotext` when installed) are tried and the best result kept. PDFs locked with an empty password (most "protected" e-books, AES included) open; ones with a real password are refused with a message. Page numbers and running headers are removed. **Scanned PDFs** are read with OCR when [Tesseract](https://github.com/tesseract-ocr/tesseract) is installed: `pip install pytesseract` (in requirements-ai.txt) plus the program (Windows: [UB Mannheim installer](https://github.com/UB-Mannheim/tesseract/wiki), tick the Armenian/Russian language packs; macOS `brew install tesseract tesseract-lang`; Linux `apt install tesseract-ocr tesseract-ocr-hye`). `--ocr off` skips scanned pages, `--ocr-lang eng+hye` picks languages (Studio: Your texts → Scanned PDFs). Test one file with `python data/pdftext.py book.pdf`.
 - **Forgetting:** for from-scratch models, learning mixes in an equal amount of the original corpus so the model doesn't forget the rest (`--mix`).
 - **Copyright:** only use texts you have the right to use.
 

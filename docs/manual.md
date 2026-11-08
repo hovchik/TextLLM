@@ -182,7 +182,7 @@ Teach a model your own books, articles and notes, or add them to the corpus.
    - **Add to training data:** keeps them in `data/raw/custom/` for the next full training. Then run Data step 3 (Encode); also step 2 only if you will train a new model from scratch (see section 5).
 3. Press **Start**.
 
-Good to know: scanned PDFs have no text layer, so run OCR first (e.g. `ocrmypdf`); old `.doc` files need LibreOffice; only use texts you have the right to use.
+Good to know: scanned PDFs (pictures of pages) are read with OCR when Tesseract is installed; the *Scanned PDFs (OCR)* section shows whether it is and lets you pick the languages (e.g. `eng+hye`). A file that can't be read (password-protected, not really a PDF, empty) is skipped with a message saying why, and the others still go ahead. Old `.doc` files need LibreOffice; only use texts you have the right to use.
 
 # 7. Training: News & web
 
@@ -550,7 +550,7 @@ See README.md for every option.
 | Resumed model writes nonsense after a corpus change | The tokenizer was rebuilt. Restore the old one (each run keeps a copy as `runs/<name>/tokenizer.json`; copy it to `tokenizer/bpe.json`) and run Data step 3 again. |
 | The GPU isn't used | Update the NVIDIA driver, then `run.bat --reinstall` (or `--gpu`). Check Settings → Hardware. On laptops, plug in the charger and set Windows Graphics to "High performance" for Python. |
 | "CUDA out of memory" | Halve the batch size and double the gradient accumulation. |
-| A PDF gives no text | It's a scan: run OCR (`ocrmypdf`) first. |
+| A PDF gives no text | It's a scan: install Tesseract OCR (see the README) or run `ocrmypdf` first. Password-protected: save it again without the password. The ✗ line in the log says which. |
 | A news source is "skipped until you confirm the rights" | Its license is copyrighted/unknown: tick that you have permission, or remove it. |
 | Chat is slow with a fine-tuned model | Open the run and press **Make fast CPU copy**. |
 | A worker keeps saying "coordinator not reachable" | Check the address and port, and that the coordinator's firewall allows port 7861 (Windows asks once; allow it on private and public networks). From another network use the Internet address only when the card says "Reachable from other networks"; otherwise use Tailscale. The worker retries by itself. |

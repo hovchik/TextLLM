@@ -1233,8 +1233,10 @@ const SUGGEST = [
   ["X post", "Our small bakery now opens at 7am on weekdays", "x_post"],
   ["Today's news", "What happened in space exploration this week?", "news"],
 ];
-// temp/max: null = use the chosen format's defaults (writing/formats.json)
-const C = { conv: null, models: [], busy: false, temp: null, max: null, prefsFor: null, formats: [], format: "free", fields: {} };
+// temp/max/rep/freq/ngram: null = use the chosen format's (and model type's) defaults
+const C = { conv: null, models: [], busy: false, temp: null, max: null, rep: null, freq: null, ngram: null, prefsFor: null, formats: [], format: "free", fields: {} };
+// what "auto" means when the format doesn't say (chat_engine.REPEAT_DEFAULTS)
+const REPEAT_AUTO = { scratch: { rep: 1.2, freq: 0.1, ngram: 4 }, lora: { rep: 1.05, freq: 0, ngram: 0 } };
 const fmtLabel = (id) => (C.formats.find((f) => f.id === id) || {}).label || id;
 
 pages.chat = async () => {
@@ -1245,6 +1247,10 @@ pages.chat = async () => {
         <div style="position:relative"><button class="iconbtn" id="settings-btn" title="Settings">${I.sliders}</button><div class="popover" id="settings" hidden>
           <label class="field"><span>Creativity <b id="tv">auto</b></span><input type="range" id="temp" min="0" max="1.5" step="0.05" value="0.8"><span class="hint">Low = focused and predictable · high = surprising</span></label>
           <label class="field"><span>Max length <b id="mv">auto</b> tokens</span><input type="range" id="max" min="32" max="1024" step="16" value="400"></label>
+          <div class="hint" style="margin:4px 0 2px"><b>Repetition</b> · raise these if answers repeat one sentence</div>
+          <label class="field"><span>Avoid repeats <b id="rv">auto</b></span><input type="range" id="rep" min="1" max="2" step="0.05" value="1.2"><span class="hint">1 = off · 1.1–1.3 usual · higher can garble words</span></label>
+          <label class="field"><span>Fewer repeated words <b id="fv">auto</b></span><input type="range" id="freq" min="0" max="2" step="0.05" value="0"><span class="hint">Each extra use of a word makes it less likely</span></label>
+          <label class="field"><span>Never repeat a phrase of <b id="nv">auto</b> tokens</span><input type="range" id="ngram" min="0" max="8" step="1" value="4"><span class="hint">0 = off · 3–5 stops loops for sure · keep 0 for code</span></label>
           <button class="btn sm ghost" id="samp-reset">Use the format's defaults</button></div></div></div>
       <div class="msgs" id="msgs"><div class="msgs-inner" id="inner"></div></div>
       <div class="composer"><div class="fmt-fields" id="fmt-fields"></div><div class="composer-box"><textarea id="input" rows="1" placeholder="Ask for a story, a post, an article…"></textarea><button class="send" id="send" title="Send">${I.send}</button></div>
@@ -1268,7 +1274,11 @@ pages.chat = async () => {
   document.addEventListener("click", (e) => { const p = $("#settings"); if (p && !p.contains(e.target)) p.hidden = true; }, { once: false });
   $("#temp").oninput = (e) => ($("#tv").textContent = C.temp = +e.target.value);
   $("#max").oninput = (e) => ($("#mv").textContent = C.max = +e.target.value);
-  $("#samp-reset").onclick = () => { C.temp = C.max = null; drawSampling(); };
+  $("#rep").oninput = (e) => ($("#rv").textContent = C.rep = +e.target.value);
+  $("#freq").oninput = (e) => ($("#fv").textContent = C.freq = +e.target.value);
+  $("#ngram").oninput = (e) => ($("#nv").textContent = C.ngram = +e.target.value);
+  $("#model").addEventListener("change", () => drawSampling());
+  $("#samp-reset").onclick = () => { C.temp = C.max = C.rep = C.freq = C.ngram = null; drawSampling(); };
   const groups = [...new Set(C.formats.map((f) => f.group))];
   $("#format").innerHTML = groups.map((g) => `<optgroup label="${esc(g)}">${C.formats.filter((f) => f.group === g).map((f) => `<option value="${f.id}">${esc(f.label)}</option>`).join("")}</optgroup>`).join("");
   try { C.format = localStorage.getItem("chatFormat") || C.format; } catch {}
@@ -1290,6 +1300,13 @@ function drawSampling() {
   const s = f ? f.sampling : { temperature: 0.8, max_tokens: 400 };
   $("#temp").value = C.temp ?? s.temperature; $("#tv").textContent = C.temp ?? `auto (${s.temperature})`;
   $("#max").value = C.max ?? s.max_tokens; $("#mv").textContent = C.max ?? `auto (${s.max_tokens})`;
+  const m = C.models.find((x) => x.name === ($("#model") || {}).value);
+  const a = REPEAT_AUTO[m && m.type === "lora" ? "lora" : "scratch"];
+  const auto = { rep: s.repetition_penalty ?? a.rep, freq: s.frequency_penalty ?? a.freq, ngram: s.no_repeat_ngram ?? a.ngram };
+  for (const [k, id, v] of [["rep", "#rv", "#rep"], ["freq", "#fv", "#freq"], ["ngram", "#nv", "#ngram"]]) {
+    if (!$(v)) continue;
+    $(v).value = C[k] ?? auto[k]; $(id).textContent = C[k] ?? `auto (${auto[k]})`;
+  }
 }
 function drawFields() {
   const f = C.formats.find((x) => x.id === C.format);
@@ -1428,7 +1445,7 @@ async function send(regenUid) {
   $("#msgs").scrollTop = 1e9;
   let full = "", done = null;
   try {
-    const r = await fetch("/api/chat", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ model, message: text, conversation_id: C.conv, regenerate: regenUid || null, format: C.format, fields: C.fields, temperature: C.temp, max_tokens: C.max }) });
+    const r = await fetch("/api/chat", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ model, message: text, conversation_id: C.conv, regenerate: regenUid || null, format: C.format, fields: C.fields, temperature: C.temp, max_tokens: C.max, repetition_penalty: C.rep, frequency_penalty: C.freq, no_repeat_ngram: C.ngram }) });
     if (!r.ok) throw new Error((await r.json()).detail || r.statusText);
     const rd = r.body.getReader(), dec = new TextDecoder();
     let buf = "";

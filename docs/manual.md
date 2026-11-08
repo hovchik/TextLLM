@@ -430,7 +430,12 @@ Chat is where you (and regular users) write with the models.
 - **Left:** your conversations. **New chat** starts a fresh one; the ✕ deletes one.
 - **Model picker:** every trained model with its type ("from scratch", "fine-tuned", "writes like …") and which one is the **default**. Next to it you see the model's level and average rating.
 - **Format picker:** Free chat; posts (X post, Threads post, LinkedIn post, Instagram caption, Facebook post); About today's news; Short story; Essay; Write like a style profile. Each format has its own instructions, length limit and a small form (tone, audience, takeaway, hashtags, length…) shown above the message box.
-- **Settings button** (sliders icon): **Creativity** (low = focused, high = surprising) and **Max length** in tokens. *Use the format's defaults* resets both.
+- **Settings button** (sliders icon): **Creativity** (low = focused, high = surprising) and **Max length** in tokens, plus three **Repetition** controls that stop a model from writing the same sentence over and over:
+    - **Avoid repeats** (repetition penalty): makes every word already in the text less likely. 1 = off, 1.1–1.3 is usual; much higher starts to garble words.
+    - **Fewer repeated words** (frequency penalty): each extra use of a word costs a little more. 0 = off.
+    - **Never repeat a phrase of N tokens** (no-repeat n-gram): the model may never write the same run of N tokens twice, which ends loops for sure. 0 = off; 3–5 for stories and posts; keep 0 for code.
+
+    Each control shows **auto (value)** until you move it. Auto is firmer for models trained from scratch (1.2 / 0.1 / 4) than for fine-tuned ones (light repetition penalty only), and off for the code formats. *Use the format's defaults* resets all of them.
 - The welcome screen has example prompts; click one to try it.
 
 Press **Enter** to send, **Shift+Enter** for a new line. The answer streams in. Stories and essays are planned first; the plan appears in a **Plan** box above the answer. Posts are checked automatically (length limit, hashtags, hook, closing question) and rewritten up to 3 times if they fail.
@@ -447,6 +452,19 @@ Under every answer:
 - A status: "Rated · will be learned", "✓ learned", or "held back by the quality gate".
 
 ![Improve: show the model a better answer](manual/14b-chat-improve.png)
+
+## How much training is enough
+
+A model trained from scratch only **continues text**: it has never seen an instruction, so "Write a little story" is read as the start of a sentence. Give it the opening instead ("The old fox looked at the river and"). How well it continues depends on its **level** (Dashboard and Runs, from the validation loss):
+
+| Level (val loss) | What chat looks like |
+|---|---|
+| 1–3 (above 4.0) | Words and short phrases; without the Repetition controls it often repeats one sentence. Keep training. |
+| 4 Grammatical sentences (3.4–4.0) | Correct sentences that drift from one topic to the next. |
+| 5 Fluent paragraphs (3.0–3.4) | Readable paragraphs; a story keeps its characters for a few sentences. |
+| 6 Stays on topic (below 3.0) | Short stories that mostly hold together. |
+
+Rough budgets: the **cpu** size (~14M weights) with the README's settings (16 × 4 × 256 ≈ 16k tokens per step) needs about **20,000 steps** (≈330M tokens, a few days on a laptop CPU) to reach level 4–5, and it stays a "book-flavoured continuer" at best. Coherent stories from scratch need the **small** size (~110M) trained on a few billion tokens on a GPU, ideally with simple story text mixed in (*More book sources → Cosmopedia, subset stories*). For stories, posts and following instructions on a normal PC, the practical route is a **fine-tuned open model** (section 4.2, e.g. Qwen3-0.6B) with the **Short story** format.
 
 With **About today's news**, the answer lists the articles it is based on, with links.
 
@@ -523,6 +541,7 @@ python finetune/finetune_lora.py --base Qwen/Qwen3-0.6B --out runs/my-social-wri
 python learn.py --run runs/my-writer --files book.pdf --urls https://example.com/article
 python data/crawl.py --learn runs/my-model
 python data/own_posts.py --profile me --name "Me" --x-archive twitter.zip --i-own-these
+python generate.py --ckpt runs/my-model/ckpt.pt --tok runs/my-model/tokenizer.json --prompt "Once upon a time" --repetition-penalty 1.2 --no-repeat-ngram 4
 python evaluate.py --run runs/my-social-writer --quick
 python transfer.py export --run runs/my-model --with-data
 python transfer.py import my-model.textllm.zip
@@ -552,6 +571,7 @@ See README.md for every option.
 | "CUDA out of memory" | Halve the batch size and double the gradient accumulation. |
 | A PDF gives no text | It's a scan: run OCR (`ocrmypdf`) first. |
 | A news source is "skipped until you confirm the rights" | Its license is copyrighted/unknown: tick that you have permission, or remove it. |
+| Chat writes one sentence again and again | The model is small or not trained enough yet (see *How much training is enough* below). Meanwhile open Chat's settings and raise **Avoid repeats** to 1.3 and set **Never repeat a phrase** to 3. From-scratch models only continue text: start with the opening of the story ("Once upon a time, a fox") instead of an instruction ("Write a little story"). |
 | Chat is slow with a fine-tuned model | Open the run and press **Make fast CPU copy**. |
 | A worker keeps saying "coordinator not reachable" | Check the address and port, and that the coordinator's firewall allows port 7861 (Windows asks once; allow it on private and public networks). From another network use the Internet address only when the card says "Reachable from other networks"; otherwise use Tailscale. The worker retries by itself. |
 | "403 wrong secret" when joining | Copy the secret again from the coordinator's Cluster page; a new secret is made each time a cluster starts unless you set one. |

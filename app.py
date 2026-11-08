@@ -1037,6 +1037,10 @@ class ChatReq(BaseModel):
     fields: dict | None = None        # the format's form (tone, audience, ...)
     temperature: float | None = None  # None = the format's default
     max_tokens: int | None = None
+    # anti-repetition; None = the format's / model type's default (chat_engine.REPEAT_DEFAULTS)
+    repetition_penalty: float | None = None
+    frequency_penalty: float | None = None
+    no_repeat_ngram: int | None = None
 
 
 @app.get("/api/formats")
@@ -1084,7 +1088,10 @@ def chat(r: ChatReq, request: Request):
         cid = r.conversation_id or db.new_conversation(text, r.model, me(request)["id"])
         uid = db.add_message(cid, "user", text, fmt=fmt, fields=fields)
     hist = db.history(cid, before_id=uid)
-    samp = {"temperature": r.temperature, "max_tokens": r.max_tokens}
+    samp = {"temperature": r.temperature, "max_tokens": r.max_tokens,
+            "repetition_penalty": None if r.repetition_penalty is None else max(1.0, min(2.0, r.repetition_penalty)),
+            "frequency_penalty": None if r.frequency_penalty is None else max(0.0, min(2.0, r.frequency_penalty)),
+            "no_repeat_ngram": None if r.no_repeat_ngram is None else max(0, min(10, r.no_repeat_ngram))}
     model_text, sources = text, None
     if F.get(fmt).get("context") == "news":  # "Write about today's news": recent articles go into the prompt
         model_text, sources = with_news(text, fields)

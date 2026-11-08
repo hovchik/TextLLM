@@ -109,6 +109,10 @@ def main():
             a.device = f"cuda:{int(os.environ.get('LOCAL_RANK', rank))}"
             torch.cuda.set_device(a.device)
         dist.init_process_group(parallel.backend(devices.kind(a.device)), rank=rank, world_size=world)
+        if devices.kind(a.device) == "cpu" and os.environ.get(parallel.ENV_SPLIT) != "1":
+            # started by torchrun: split --threads (or all cores) over this PC's processes
+            local = int(os.environ.get("LOCAL_WORLD_SIZE", world) or 1)
+            os.environ["TEXTLLM_THREADS"] = str(max(1, parallel.total_threads(a.threads) // max(1, local)))
         if os.environ.get(parallel.ENV_SPLIT) == "1":  # --procs: --batch is the total; torchrun: per GPU
             a.batch = parallel.split_batch(a.batch, world)
     master = rank == 0

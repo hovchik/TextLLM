@@ -354,10 +354,10 @@ def main(argv=None):
         saved = os.path.join(a.out, "train_cmd.json")
         if keep:  # Resume (here or on the Runs page) runs this again with --resume
             json.dump(cmd, open(saved, "w"))
-        if cmd[0] == "train.py":  # start from the copied weights in <out>/ckpt.pt (step 0, fresh optimizer)
-            cmd = cmd + ["--resume"]
         elif os.path.exists(saved):
             os.remove(saved)
+        if cmd[0] == "train.py":  # start from the copied weights in <out>/ckpt.pt (step 0, fresh optimizer)
+            cmd = cmd + ["--resume"]
         mp = os.path.join(a.out, "metrics.jsonl")
         if os.path.exists(mp):
             os.remove(mp)

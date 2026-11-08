@@ -707,8 +707,9 @@ async function drawClusterLive() {
     const box = $("#cl-phone-box"), a = $("#cl-addr")?.value;
     if (!box || !box.open || !a) return;
     S.phoneQR = S.phoneQR || {};
-    if (!S.phoneQR[a]) S.phoneQR[a] = await api(`/api/cluster/phone?addr=${encodeURIComponent(a)}`).catch((e) => ({ error: e.message }));
-    const q = S.phoneQR[a];
+    const key = `${a}|${$("#cl-secret")?.value || ""}`;  // a new cluster has a new secret
+    if (!S.phoneQR[key]) S.phoneQR[key] = await api(`/api/cluster/phone?addr=${encodeURIComponent(a)}`).catch((e) => ({ error: e.message }));
+    const q = S.phoneQR[key];
     $("#cl-qr").innerHTML = q.svg ? `<img alt="QR code" style="width:100%;display:block" src="data:image/svg+xml;charset=utf-8,${encodeURIComponent(q.svg)}">` : `<div class="hint" style="padding:10px">${esc(q.error || "QR codes need the segno package (run.bat installs it).")}</div>`;
     $("#cl-phone-cmd").textContent = q.command || "";
   };

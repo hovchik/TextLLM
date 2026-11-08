@@ -62,7 +62,7 @@ def test_phone_joins_from_the_served_bundle(bpe, tmp_path):
         with pytest.raises(urllib.error.HTTPError):
             get(url + "/phone.sh?secret=wrong")
         script = get(url + f"/phone.sh?secret={SECRET}").decode()
-        assert f"URL='{url}'" in script and "pkg install" in script and "cluster.py worker" in script
+        assert f"URL={url}" in script and "pkg install" in script and "cluster.py worker" in script
         assert "Copy command" in get(url + f"/phone?secret={SECRET}").decode()
         # the worker code bundle runs on its own, without the rest of the repository
         code = tmp_path / "phone"
@@ -97,3 +97,18 @@ def test_phone_joins_from_the_served_bundle(bpe, tmp_path):
         for p in (phone, coord):
             if p and p.poll() is None:
                 p.kill()
+
+
+def test_custom_secret_survives_the_phone_links():
+    import shlex
+    import urllib.parse
+
+    import cluster
+
+    secret = "phone+cluster&key#1 'x'"
+    cmd = cluster.phone_command("http://h:7861", secret)
+    url = shlex.split(cmd)[2]
+    assert urllib.parse.parse_qs(urllib.parse.urlparse(url).query)["secret"] == [secret]
+    script = cluster.phone_script("http://h:7861", secret)
+    line = next(l for l in script.splitlines() if l.startswith("export TEXTLLM_CLUSTER_SECRET="))
+    assert shlex.split(line.split("=", 1)[1]) == [secret]

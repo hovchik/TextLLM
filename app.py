@@ -743,7 +743,9 @@ def cluster_phone(addr: str):
         err("Start a cluster first.")
     if not re.fullmatch(r"https?://[\w.\-\[\]:]+", addr):
         err("bad address")
-    url = f"{addr}/phone?secret={last['secret']}"
+    from urllib.parse import quote
+
+    url = f"{addr}/phone?secret={quote(last['secret'], safe='')}"
     svg = None
     try:
         import io as _io

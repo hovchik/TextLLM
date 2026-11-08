@@ -28,7 +28,7 @@ for the Studio). Every request needs the shared secret (X-Secret header). Plain 
 open internet use a private network such as Tailscale/ZeroTier/WireGuard, or forward one port.
 Weights travel as tensors only (torch.load(weights_only=True)), never as pickled code.
 """
-import argparse, hmac, http.client, io, json, math, os, secrets, socket, subprocess, sys, threading, time
+import argparse, hmac, http.client, io, shlex, json, math, os, secrets, socket, subprocess, sys, threading, time
 import urllib.error, urllib.parse, urllib.request
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
@@ -92,8 +92,8 @@ def phone_script(url, secret):
     return f"""#!/data/data/com.termux/files/usr/bin/sh
 # Text LLM: lend this phone to a training cluster. Trains only while charging and cool.
 set -e
-URL='{url}'
-export TEXTLLM_CLUSTER_SECRET='{secret}'
+URL={shlex.quote(url)}
+export TEXTLLM_CLUSTER_SECRET={shlex.quote(secret)}
 echo "== Text LLM phone worker =="
 if ! python -c "import torch, numpy" 2>/dev/null; then
   echo "Installing Python and PyTorch (once, a few hundred MB)..."
@@ -112,7 +112,7 @@ exec python cluster.py worker --join "$URL" --name "$NAME" --data-mb 50 "$@"
 
 
 def phone_command(url, secret):
-    return f'curl -fsSL "{url}/phone.sh?secret={secret}" | sh'
+    return f'curl -fsSL "{url}/phone.sh?secret={urllib.parse.quote(secret, safe="")}" | sh'
 
 
 def phone_page(url, secret):

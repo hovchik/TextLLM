@@ -87,3 +87,24 @@ def test_learn_scratch_encodes_all_documents(run_dir, tmp_path, bpe):
         want += tok.encode(d.strip()).ids + [eot]
     assert got.tolist() == want
     assert "--resume" in cmd and cmd[cmd.index("--out") + 1] == run_dir.dir
+
+
+def test_scratch_chat_has_anti_repetition_defaults_and_code_turns_them_off():
+    from chat_engine import repeat_settings, scratch_penalties
+    from writing import formats as F
+
+    p = scratch_penalties(F.get("story")["sampling"])
+    assert p["repetition"] > 1.0 and p["no_repeat_ngram"] >= 3
+    code = scratch_penalties(F.get("code")["sampling"])
+    assert code["repetition"] == 1.0 and code["no_repeat_ngram"] == 0
+    # the user's choice wins over the defaults
+    assert repeat_settings({"no_repeat_ngram": 0, "repetition_penalty": 1.5}, "scratch")["no_repeat_ngram"] == 0
+    assert scratch_penalties({"repetition_penalty": 1.5})["repetition"] == 1.5
+
+
+def test_gguf_ngram_processor_bans_the_repeating_token():
+    import numpy as np
+    from chat_engine import _ngram_processor_gguf
+
+    out = _ngram_processor_gguf(3)(np.array([1, 2, 3, 4, 1, 2]), np.zeros(5, dtype=np.float32))
+    assert out.dtype == np.float32 and np.isneginf(out[3]) and np.isfinite(out[[0, 1, 2, 4]]).all()

@@ -116,7 +116,7 @@
       "fields": ["language"],
       "steps": "single",
       "check": "code",
-      "sampling": {"temperature": 0.2, "top_p": 0.95, "top_k": 40, "presence_penalty": 0.0, "max_tokens": 700}
+      "sampling": {"temperature": 0.2, "top_p": 0.95, "top_k": 40, "presence_penalty": 0.0, "repetition_penalty": 1.0, "no_repeat_ngram": 0, "max_tokens": 700}
     },
     "code_complete": {
       "label": "Complete code at <cursor>",
@@ -125,7 +125,7 @@
       "fields": [],
       "steps": "fim",
       "check": "code",
-      "sampling": {"temperature": 0.2, "top_p": 0.95, "top_k": 40, "presence_penalty": 0.0, "max_tokens": 160}
+      "sampling": {"temperature": 0.2, "top_p": 0.95, "top_k": 40, "presence_penalty": 0.0, "repetition_penalty": 1.0, "no_repeat_ngram": 0, "max_tokens": 160}
     }
   },
   "field_labels": {

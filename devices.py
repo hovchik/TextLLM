@@ -9,6 +9,8 @@ continues on a CPU and the other way round.
 import os
 from contextlib import nullcontext
 
+import core.quiet  # noqa: F401  mutes "triton not found" before torch is imported
+
 
 def _mps_ok(torch):
     b = getattr(torch.backends, "mps", None)

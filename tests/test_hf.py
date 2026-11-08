@@ -44,6 +44,21 @@ def test_hf_stream_produces_text(tiny_base):
     assert outs and all(len(a) <= len(b) for a, b in zip(outs, outs[1:]))
 
 
+def test_hf_stream_passes_anti_repetition_settings(tiny_base):
+    seen = {}
+    eng = hf_engine(tiny_base)
+    real = eng.model.generate
+
+    def spy(**kw):
+        seen.update(kw)
+        return real(**kw)
+
+    eng.model.generate = spy
+    s = {**SAMPLING, "repetition_penalty": 1.3, "frequency_penalty": 0.5, "no_repeat_ngram": 3}
+    assert list(eng.stream_messages(MSGS, s))
+    assert seen["repetition_penalty"] == 1.3 and seen["no_repeat_ngram_size"] == 3 and seen["logits_processor"]
+
+
 def test_hf_stream_reports_a_failing_generate_instead_of_hanging(tiny_base):
     class Broken:
         def generate(self, **kw):

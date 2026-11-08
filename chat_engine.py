@@ -84,6 +84,65 @@ def has_llama_cpp():
         return False
 
 
+# Anti-repetition defaults when neither the format nor the user set them. Models trained from
+# scratch here are small (a few million to ~100M weights) and, unlike Qwen, were never taught to
+# avoid loops, so they get firmer settings: without them a young model often writes one sentence
+# again and again. Fine-tuned models only get a light touch (strong penalties hurt fluent models).
+REPEAT_DEFAULTS = {
+    "scratch": {"repetition_penalty": 1.2, "frequency_penalty": 0.1, "no_repeat_ngram": 4},
+    "hf": {"repetition_penalty": None, "frequency_penalty": 0.0, "no_repeat_ngram": 0},
+    "gguf": {"repetition_penalty": 1.1, "frequency_penalty": 0.0, "no_repeat_ngram": 0},
+}
+
+
+def repeat_settings(s, backend):
+    """The anti-repetition part of a sampling dict, with the backend's defaults filled in."""
+    out = dict(REPEAT_DEFAULTS.get(backend, REPEAT_DEFAULTS["hf"]))
+    out.update({k: s[k] for k in out if s.get(k) is not None})
+    out["presence_penalty"] = float(s.get("presence_penalty") or 0.0)
+    return out
+
+
+def scratch_penalties(s):
+    """Sampling dict -> model.gpt.Penalties fields for the from-scratch model.
+    The formats' presence_penalty (0.5-1.5, OpenAI scale) is softened: tiny models have flat
+    scores, so the full value would push them into rare, broken words."""
+    r = repeat_settings(s, "scratch")
+    return {"repetition": float(r["repetition_penalty"] or 1.0), "presence": 0.3 * r["presence_penalty"],
+            "frequency": float(r["frequency_penalty"] or 0.0), "no_repeat_ngram": int(r["no_repeat_ngram"] or 0),
+            "window": 512}
+
+
+def _frequency_processor(f):
+    from transformers import LogitsProcessor, LogitsProcessorList
+    from model.gpt import Penalties
+
+    pen = Penalties(frequency=f, window=512)
+
+    class Frequency(LogitsProcessor):
+        def __call__(self, input_ids, scores):
+            return pen.apply(scores, input_ids).to(scores.dtype)
+
+    return LogitsProcessorList([Frequency()])
+
+
+def _ngram_processor_gguf(n):
+    """llama.cpp has no no-repeat n-gram option; this logits processor adds it. llama-cpp-python
+    calls it with (input_ids, scores) as numpy arrays for one sequence and uses what it returns."""
+    import numpy as np
+    import torch
+    from model.gpt import Penalties
+
+    pen = Penalties(no_repeat_ngram=n, window=512)
+
+    def proc(input_ids, scores):
+        ids = torch.from_numpy(np.asarray(input_ids, dtype=np.int64))[None]
+        out = pen.apply(torch.from_numpy(np.asarray(scores, dtype=np.float32))[None], ids)[0]
+        return out.numpy().astype(scores.dtype, copy=False)
+
+    return proc
+
+
 def _Cancel(event):
     """A transformers stopping criterion that ends generate() once `event` is set."""
     import torch
@@ -142,7 +201,8 @@ class Engine:
         """Yield the growing reply for chat messages. s = sampling dict (see formats.json)."""
         if self.backend == "scratch":
             prompt = msgs[-1]["content"]
-            for full in self._stream_scratch(prompt, s["max_tokens"], s["temperature"], s.get("top_p", 0.95)):
+            for full in self._stream_scratch(prompt, s["max_tokens"], s["temperature"], s.get("top_p", 0.95),
+                                             s.get("top_k") or 50, scratch_penalties(s)):
                 yield full[len(prompt):] if full.startswith(prompt) else full
         elif self.backend == "gguf":
             yield from self._stream_gguf(msgs, s)
@@ -155,13 +215,14 @@ class Engine:
             pass
         return out
 
-    def _stream_scratch(self, prompt, n, temperature, top_p):
+    def _stream_scratch(self, prompt, n, temperature, top_p, top_k=50, penalties=None):
         # The from-scratch model only continues text, so the message is used as the opening.
         import torch
 
         ids = torch.tensor([self.tok.encode(prompt).ids], device=self.device)
         stop, new = self.tok.token_to_id("<|endoftext|>"), []
-        for nxt in self.model.stream(ids, n, temperature, 50, top_p):  # key/value cache: one token per step
+        # key/value cache: one token per step
+        for nxt in self.model.stream(ids, n, temperature, top_k, top_p, penalties=penalties):
             t = nxt.item()
             if t == stop:
                 break
@@ -169,10 +230,12 @@ class Engine:
             yield prompt + self.tok.decode(new)
 
     def _stream_gguf(self, msgs, s):
-        out = ""
+        out, rep = "", repeat_settings(s, "gguf")
         for ch in self.model.create_chat_completion(
                 messages=msgs, stream=True, max_tokens=s["max_tokens"], temperature=max(s["temperature"], 0.0),
-                top_p=s.get("top_p", 0.95), top_k=s.get("top_k", 40), presence_penalty=s.get("presence_penalty", 0.0)):
+                top_p=s.get("top_p", 0.95), top_k=s.get("top_k", 40), presence_penalty=rep["presence_penalty"],
+                frequency_penalty=float(rep["frequency_penalty"] or 0.0), repeat_penalty=float(rep["repetition_penalty"] or 1.0),
+                **({"logits_processor": _ngram_processor_gguf(int(rep["no_repeat_ngram"]))} if rep["no_repeat_ngram"] else {})):
             piece = ch["choices"][0].get("delta", {}).get("content")
             if piece:
                 out += piece
@@ -184,11 +247,15 @@ class Engine:
         text = hf.chat_text(self.tok, msgs)
         inputs = self.tok(text, return_tensors="pt", add_special_tokens=False).to(self.device)
         streamer = TextIteratorStreamer(self.tok, skip_prompt=True, skip_special_tokens=True)
-        t = s["temperature"]
+        t, rep = s["temperature"], repeat_settings(s, "hf")
         kw = dict(**inputs, streamer=streamer, max_new_tokens=s["max_tokens"], do_sample=t > 0,
                   temperature=max(t, 1e-5), top_p=s.get("top_p", 0.95), top_k=s.get("top_k", 40),
-                  repetition_penalty=hf.repetition_from_presence(s.get("presence_penalty")),
+                  repetition_penalty=float(rep["repetition_penalty"] or hf.repetition_from_presence(rep["presence_penalty"])),
                   pad_token_id=self.tok.pad_token_id or self.tok.eos_token_id)
+        if rep["no_repeat_ngram"]:
+            kw["no_repeat_ngram_size"] = int(rep["no_repeat_ngram"])
+        if rep["frequency_penalty"]:  # transformers has no frequency penalty of its own
+            kw["logits_processor"] = _frequency_processor(float(rep["frequency_penalty"]))
         # generate() runs in a thread and feeds the streamer. If it fails (out of memory, ...) the
         # streamer is closed so this loop ends and the error is reported instead of hanging with
         # the model's lock held; if the reader goes away (browser stopped), generation is stopped
@@ -368,7 +435,8 @@ class Engine:
         """Yield the growing reply text (free chat, no format)."""
         s = {**F.get("free")["sampling"], "max_tokens": max_new_tokens, "temperature": temperature, "top_p": top_p}
         if self.backend == "scratch":
-            for out in self._stream_scratch(message, max_new_tokens, temperature, top_p):
+            for out in self._stream_scratch(message, max_new_tokens, temperature, top_p, s.get("top_k") or 50,
+                                            scratch_penalties(s)):
                 yield out
             return
         msgs = [{"role": m["role"], "content": m["content"]} for m in history if isinstance(m.get("content"), str)]

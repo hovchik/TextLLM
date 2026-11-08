@@ -2,7 +2,7 @@
 import pytest
 import torch
 
-from model.gpt import GPT, GPTConfig, sample
+from model.gpt import GPT, GPTConfig, Penalties, sample
 
 
 def tiny(block=32, vocab=97):
@@ -98,3 +98,63 @@ def test_prompt_at_window_edges(block):
     m = tiny(block=block)
     x = torch.randint(0, 97, (1, block))
     assert m.generate(x, 3).shape == (1, block + 3)
+
+
+# ---------------------------------------------------------------- anti-repetition
+
+
+def ngrams(seq, n):
+    return [tuple(seq[i:i + n]) for i in range(len(seq) - n + 1)]
+
+
+def test_penalties_off_change_nothing():
+    m = tiny(block=64)
+    x = torch.randint(0, 97, (1, 8))
+    assert not Penalties()
+    assert torch.equal(m.generate(x, 30, top_k=1), m.generate(x, 30, top_k=1, penalties=Penalties()))
+
+
+def test_greedy_tiny_model_loops_without_penalties_and_not_with_no_repeat_ngram():
+    m = tiny(block=128)
+    x = torch.randint(0, 97, (1, 4))
+    plain = m.generate(x, 100, top_k=1)[0].tolist()
+    assert len(set(ngrams(plain, 4))) < len(ngrams(plain, 4))  # an untrained model repeats itself
+    fixed = m.generate(x, 100, top_k=1, penalties={"no_repeat_ngram": 4})[0].tolist()
+    assert len(set(ngrams(fixed, 4))) == len(ngrams(fixed, 4))  # no 4 tokens ever twice
+
+
+def test_no_repeat_ngram_survives_the_window_rebuild():
+    m = tiny(block=32)
+    x = torch.randint(0, 97, (1, 4))
+    toks = [t.item() for t in m.stream(x, 80, top_k=1, keep=0.5, penalties={"no_repeat_ngram": 3})]
+    assert len(toks) == 80
+
+
+def test_repetition_presence_frequency_lower_used_tokens():
+    logits = torch.tensor([[2.0, -1.0, 1.0, 0.5]])
+    ctx = torch.tensor([[0, 1, 0]])
+    out = Penalties(repetition=2.0).apply(logits, ctx)
+    assert out.tolist() == [[1.0, -2.0, 1.0, 0.5]]  # positive halved, negative doubled, unused kept
+    out = Penalties(presence=0.5, frequency=0.25).apply(logits, ctx)
+    assert out.tolist() == [[2.0 - 0.5 - 0.5, -1.0 - 0.5 - 0.25, 1.0, 0.5]]
+
+
+def test_no_repeat_ngram_bans_the_token_that_would_repeat():
+    logits = torch.zeros(1, 5)
+    ctx = torch.tensor([[1, 2, 3, 4, 1, 2]])  # "1 2" was followed by 3 before
+    out = Penalties(no_repeat_ngram=3).apply(logits, ctx)
+    assert out[0, 3] == -float("inf") and torch.isfinite(out[0, [0, 1, 2, 4]]).all()
+    # a vocabulary where everything is banned falls back instead of failing
+    out = Penalties(no_repeat_ngram=2).apply(torch.zeros(1, 2), torch.tensor([[0, 0, 1, 0]]))
+    assert torch.isfinite(out).all()
+
+
+def test_penalty_history_outlives_the_window_rebuild():
+    """The cache keeps only part of the window after a rebuild; the n-gram ban must still see
+    everything inside its own window, so no 3 tokens repeat across a rebuild either."""
+    m = tiny(block=32)
+    x = torch.randint(0, 97, (1, 4))
+    toks = x[0].tolist() + [t.item() for t in m.stream(x, 60, top_k=1, keep=0.25,
+                                                         penalties={"no_repeat_ngram": 3, "window": 64})]
+    tail = toks[-64:]
+    assert len(set(ngrams(tail, 3))) == len(ngrams(tail, 3))

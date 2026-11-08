@@ -152,21 +152,34 @@ class GPT(nn.Module):
         return KVCache(len(self.blocks), self.config.block_size)
 
     @torch.no_grad()
-    def stream(self, idx, max_new_tokens, temperature=0.8, top_k=50, top_p=0.95, stop_id=None, keep=0.75):
+    def stream(self, idx, max_new_tokens, temperature=0.8, top_k=50, top_p=0.95, stop_id=None, keep=0.75,
+               penalties=None):
         """Yield one sampled token per step, shape (B, 1), using a key/value cache so each step
         only runs the new token through the model (instead of the whole context again).
 
         When the context fills the model's window, the cache is rebuilt from the last
-        `keep` share of the window, so long texts keep going at the same speed."""
+        `keep` share of the window, so long texts keep going at the same speed.
+
+        penalties: a Penalties (or a dict of its fields) that keeps the model from repeating
+        itself. Small or young models easily fall into writing one sentence over and over."""
         bs = self.config.block_size
+        pen = Penalties.of(penalties)
         cache, ctx = self.new_cache(), idx[:, -bs:]
         logits, _ = self(ctx, cache=cache)
+        # what the penalties look back on: kept apart from ctx, which is cut short when the cache is rebuilt
+        hist_len = (pen.window or bs) if pen else 0
+        hist = idx[:, -hist_len:] if pen else None
         for _ in range(max_new_tokens):
-            nxt = sample(logits[:, -1, :], temperature, top_k, top_p)
+            last = logits[:, -1, :]
+            if pen:
+                last = pen.apply(last, hist)
+            nxt = sample(last, temperature, top_k, top_p)
             yield nxt
             if stop_id is not None and (nxt == stop_id).all():
                 return
             ctx = torch.cat([ctx, nxt], 1)
+            if pen:
+                hist = torch.cat([hist, nxt], 1)[:, -hist_len:]
             if cache.pos >= bs:
                 ctx = ctx[:, -max(1, int(bs * keep)):]
                 cache.pos = 0  # reuse the buffers
@@ -174,8 +187,8 @@ class GPT(nn.Module):
             else:
                 logits, _ = self(nxt, cache=cache)
 
-    def generate(self, idx, max_new_tokens, temperature=0.8, top_k=50, top_p=0.95, stop_id=None):
-        out = [idx] + list(self.stream(idx, max_new_tokens, temperature, top_k, top_p, stop_id))
+    def generate(self, idx, max_new_tokens, temperature=0.8, top_k=50, top_p=0.95, stop_id=None, penalties=None):
+        out = [idx] + list(self.stream(idx, max_new_tokens, temperature, top_k, top_p, stop_id, penalties=penalties))
         return torch.cat(out, 1)
 
 
@@ -186,6 +199,61 @@ class KVCache:
     def __init__(self, n_layer, size):
         self.size, self.pos = size, 0
         self.k, self.v = [None] * n_layer, [None] * n_layer
+
+
+@dataclass
+class Penalties:
+    """Ways to stop a model from repeating itself (all off by default).
+
+    repetition: divides the score of every token already in the text (1.0 = off, 1.1-1.3 usual).
+    presence:   subtracted once from every token already used (0 = off).
+    frequency:  subtracted per earlier use, so words used often get rarer (0 = off).
+    no_repeat_ngram: never write the same run of this many tokens twice (0 = off, 3-6 usual).
+    window:     how many recent tokens count (the prompt included); 0 = the whole context.
+    These follow the meaning they have in Hugging Face transformers and OpenAI-style APIs."""
+    repetition: float = 1.0
+    presence: float = 0.0
+    frequency: float = 0.0
+    no_repeat_ngram: int = 0
+    window: int = 0
+
+    @classmethod
+    def of(cls, p):
+        if p is None or isinstance(p, cls):
+            return p
+        names = cls.__dataclass_fields__
+        return cls(**{k: v for k, v in p.items() if k in names and v is not None})
+
+    def __bool__(self):
+        return self.repetition != 1.0 or bool(self.presence) or bool(self.frequency) or self.no_repeat_ngram > 1
+
+    def apply(self, logits, ctx):
+        """logits (B, V) for the next token; ctx (B, T) the tokens so far. Returns new logits."""
+        logits = logits.float().clone()
+        seen = ctx[:, -self.window:] if self.window else ctx
+        V = logits.size(-1)
+        if self.repetition != 1.0 or self.presence or self.frequency:
+            counts = torch.zeros_like(logits).scatter_add_(1, seen.clamp(0, V - 1), torch.ones_like(seen, dtype=logits.dtype))
+            used = counts > 0
+            if self.repetition != 1.0:
+                r = self.repetition
+                logits = torch.where(used, torch.where(logits > 0, logits / r, logits * r), logits)
+            logits = logits - self.presence * used - self.frequency * counts
+        n = self.no_repeat_ngram
+        if n > 1 and seen.shape[1] >= n:
+            # the last n-1 tokens; any token that followed the same n-1 tokens before is banned
+            win = seen.unfold(1, n, 1)  # (B, T-n+1, n)
+            tail = seen[:, -(n - 1):]
+            hit = (win[:, :, :-1] == tail[:, None, :]).all(-1)  # (B, T-n+1)
+            for b in range(seen.shape[0]):
+                banned = win[b, hit[b], -1]
+                if banned.numel():
+                    logits[b, banned] = -float("inf")
+            # if every token got banned (tiny vocab), fall back to the unbanned scores
+            dead = torch.isinf(logits).all(-1)
+            if dead.any():
+                logits[dead] = 0.0
+        return logits
 
 
 def sample(logits, temperature=0.8, top_k=50, top_p=0.95):

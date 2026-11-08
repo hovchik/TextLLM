@@ -228,3 +228,16 @@ def test_ingest_script_refuses_local_links(tmp_path):
     r = subprocess.run([__import__("sys").executable, "data/ingest.py", "--urls", "http://127.0.0.1:9/x",
                         "--out", str(tmp_path)], cwd=ROOT, capture_output=True, text=True, timeout=120, env=env)
     assert r.returncode == 1 and "local-network" in r.stdout and "ModuleNotFoundError" not in r.stderr, r.stdout + r.stderr
+
+
+def test_triton_not_found_warning_is_muted(caplog):
+    import logging
+
+    import core.quiet  # noqa: F401
+
+    lg = logging.getLogger("torch.utils.flop_counter")
+    with caplog.at_level(logging.WARNING):
+        lg.warning("triton not found; flop counting will not work for triton kernels")
+        lg.warning("something else")
+    msgs = [r.getMessage() for r in caplog.records]
+    assert "something else" in msgs and not any("triton" in m for m in msgs)

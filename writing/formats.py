@@ -174,7 +174,7 @@ def check_code(text):
 # finishes that sentence ("...bottle or other electronic gym on your desk"), so the answer seems
 # to start mid-sentence. For the writing formats the message is therefore turned into the start
 # of a document: the topic as a title, a blank line, and an opening that fits the format.
-_ASK = re.compile(r"^\s*(?:please\s+)?(?:can you\s+|could you\s+)?(?:write|tell|make|create|generate|give)\s+"
+_ASK = re.compile(r"^\s*(?:please\s+)?(?:can you\s+|could you\s+)?(write|tell|make|create|generate|give)\s+"
                   r"(?:me\s+|us\s+)?(?:an?\s+|the\s+|some\s+)?(?:(?:little|short|small|long|nice|new|funny|sad)\s+)*"
                   r"(?:(story|tale|post|essay|article|poem|caption)s?\b\s*)?(?:(?:about|of|on|where|in which)\s+)?",
                   re.I)
@@ -186,10 +186,12 @@ def scratch_opening(fmt, message, fields=None):
     the part of it that belongs to the answer (the story's opening words). Free chat keeps the
     message as the opening, unless it is a request such as "write a little story"."""
     m = _ASK.match(message)
-    asked = bool(m and m.group(0).strip())
-    if fmt == "free" and not asked:
+    kind = (m.group(2) or "").lower() if m else ""
+    # a request only when it names what to write ("tell me a story"), or says "write ... about";
+    # "Give me liberty or give me death" or "Write a Python function" are not story requests
+    asked = bool(m and (kind or (m.group(1).lower() == "write" and re.search(r"(about|of|on)\s+$", m.group(0), re.I))))
+    if fmt == "free" and not (asked and kind):
         return message, None
-    kind = (m.group(1) or "").lower() if asked else ""
     topic = (message[m.end():] if asked else message).strip().rstrip(".!?:;,").strip()
     if fmt == "free":
         fmt = "story" if kind in ("story", "tale", "") else "essay"

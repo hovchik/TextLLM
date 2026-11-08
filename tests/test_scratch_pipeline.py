@@ -116,6 +116,9 @@ def test_gguf_ngram_processor_bans_the_repeating_token():
     ("free", "Write a little story about a lighthouse keeper", "A lighthouse keeper\n\nOnce upon a time,", "Once upon a time,"),
     ("free", "write a little story", "Once upon a time,", "Once upon a time,"),
     ("free", "Once upon a time a fox", "Once upon a time a fox", None),       # an opening: continue it
+    ("free", "Give me liberty or give me death", "Give me liberty or give me death", None),  # not a request
+    ("free", "Write a Python function that adds two numbers", "Write a Python function that adds two numbers", None),
+    ("story", "write about the sea", "The sea\n\nOnce upon a time,", "Once upon a time,"),
     ("essay", "Write an essay on why cities need trees", "Why cities need trees\n\n", ""),
 ])
 def test_scratch_models_get_a_document_opening_not_a_sentence_to_finish(fmt, msg, prompt, shown):

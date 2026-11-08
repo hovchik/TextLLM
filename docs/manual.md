@@ -159,6 +159,17 @@ The Data tab prepares the training corpus in four steps. Run them in order with 
 
 If the download stops, press **Run** again: every source continues where it stopped.
 
+**Download progress.** While a download runs, the *Download progress* card (above the log) shows every source you chose, in the order they are fetched, refreshed every few seconds:
+
+![Download progress: overall ring, then one card per source](manual/06b-download-progress.png)
+
+- **Overall:** the ring is the share of all chosen sources that is done, then how many sources are finished, which one is downloading now, how much came over the network (and how fast), and the time left for the whole run.
+- **Each source:** *Waiting*, *Downloading*, *Done*, *Skipped* (nothing to do, e.g. already downloaded) or *Stopped*/*Failed*; a bar with the percent; how much text is saved out of what you asked for (books, or MB/GB of text); its speed and time left; and for Hugging Face sources which file it is reading ("file 2 of 14", plus how much of that file has arrived in *Download whole files first* mode).
+- Speeds and times left follow the last minute, so they settle after a minute and adjust when the connection slows. Text saved can grow faster than the network figure, because Hugging Face files are compressed.
+- The Dashboard's running-job card shows the same overall percent and time left. After the job ends, the card keeps the last run's numbers.
+
+The same progress shows on the command line: `python data/build_corpus.py ...` prints a bar per source and an `[overall 40% · 2/5 sources done · 1.2 GB downloaded · ETA 35m]` line before each source and at the end.
+
 **Step 2 · Build the tokenizer.** Learns the word pieces the model reads and writes. Vocabulary 8,192 for CPU models or 32,000 for GPU models; *Files used to learn it* (more is slower and slightly better).
 
 **Step 3 · Encode the corpus.** Turns all text into token files for fast training. *Held out for validation* is the share kept aside to measure validation loss (default 0.5%).
@@ -256,7 +267,7 @@ While it reads, the Studio:
 
 This is careful but not perfect: a model can remember what it trains on, so add only code you own or may use, and that you are happy to have inside the model.
 
-**Public GitHub.** Set how many repositories you want (most-starred first, per language) and the minimum stars, or list exact repositories as `owner/name`. A repository is used only when GitHub reports a **permissive licence** (MIT, Apache 2.0, BSD, ISC, Unlicense, CC0, zlib, Boost, 0BSD, MIT-0) **and** it has a LICENSE file. Copyleft licences (GPL, LGPL, AGPL, MPL, EPL), "other" licences and repositories with no licence are refused and listed in the log, because public code without a licence is still all rights reserved. Each repository's licence text, address and branch are saved in `data/code/github/`, and `data/code/ATTRIBUTION.md` lists them all; keep that file with any model you share. A **GitHub token** (any personal token, no permissions needed) raises GitHub's limit from 60 to 5,000 requests an hour; it is saved on this PC and never written to the log. Downloads resume: press the button again and finished repositories are skipped.
+**Public GitHub.** Set how many repositories you want (most-starred first, per language) and the minimum stars, or list exact repositories as `owner/name`. A repository is used only when GitHub reports a **permissive licence** (MIT, Apache 2.0, BSD, ISC, Unlicense, CC0, zlib, Boost, 0BSD, MIT-0) **and** it has a LICENSE file. Copyleft licences (GPL, LGPL, AGPL, MPL, EPL), "other" licences and repositories with no licence are refused and listed in the log, because public code without a licence is still all rights reserved. Each repository's licence text, address and branch are saved in `data/code/github/`, and `data/code/ATTRIBUTION.md` lists them all; keep that file with any model you share. A **GitHub token** (any personal token, no permissions needed) raises GitHub's limit from 60 to 5,000 requests an hour; it is saved on this PC and never written to the log. Downloads resume: press the button again and finished repositories are skipped. While code downloads, the *Download progress* card above the log shows each part (chosen repositories, new commits, the GitHub search, Hugging Face code) with how many repositories (or MB) are done, the repository being downloaded, the bytes downloaded and the time left.
 
 **Filters and more sources:** the languages to keep (Python, JavaScript and TypeScript by default; "Every programming language" or your own list such as `python,go,rust`), the largest file and repository, the licences you accept (you can only narrow the permissive list), and **Hugging Face code**: GB of the `codeparrot/github-code-clean` dataset, keeping only rows whose licence column is permissive. **Collect everything** runs all sources at once.
 

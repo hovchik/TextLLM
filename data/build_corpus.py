@@ -27,7 +27,9 @@ Usage:
 
 Everything resumes: run the same command again after a crash, a closed laptop or a dropped
 connection. Each source keeps data/raw/<source>/progress.json, saved after every small chunk, and
-network errors are retried with backoff (--retries). Books that Gutenberg already saved are
+network errors are retried with backoff (--retries). Each source gets a progress bar, and an
+[overall ...] line (percent, sources done, bytes downloaded, ETA) is printed before each source;
+in the Studio the same numbers show live on the Data page (core/progress.py). Books that Gutenberg already saved are
 listed in gutenberg/ids.list (not .txt, so the tokenizer never reads it) and PG-19 skips them.
 """
 import argparse, csv, gzip, html, io, json, os, posixpath, random, re, sys, time, zipfile
@@ -38,6 +40,9 @@ from urllib.parse import quote, urljoin
 
 import requests
 from tqdm import tqdm
+
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+from core import progress  # noqa: E402  (per-source and overall progress for the Studio)
 
 CATALOG = "https://www.gutenberg.org/cache/epub/feeds/pg_catalog.csv"
 # Please use a mirror for bulk downloads (Gutenberg asks robots not to hit www).
@@ -51,6 +56,9 @@ UA = "textllm-corpus-builder (+https://github.com/hovchik/textllm)"
 START_RE = re.compile(r"\*\*\*\s*START OF (THE|THIS) PROJECT GUTENBERG.*?\*\*\*", re.I | re.S)
 END_RE = re.compile(r"\*\*\*\s*END OF (THE|THIS) PROJECT GUTENBERG", re.I)
 RETRY_STATUS = {408, 429, 500, 502, 503, 504}
+# In the Studio the progress panel shows the live numbers, so tqdm only needs to write a line to the
+# log now and then; on a terminal it redraws as usual.
+BAR_EVERY = 30 if progress.active() else 0.1
 
 
 class ShardWriter:
@@ -101,11 +109,13 @@ def save_state(path, st):
 class Progress:
     """progress.json plus a shard writer for one source, so any source resumes where it stopped.
 
-    limit is a number of books (unit="books") or a number of bytes of text (unit="chars")."""
+    limit is a number of books (unit="books") or a number of bytes of text (unit="chars").
+    It also moves this source's line on the progress board (core/progress.py)."""
 
     def __init__(self, outdir, label, limit, unit="chars", **cursor):
         os.makedirs(outdir, exist_ok=True)
         self.outdir, self.label, self.limit, self.unit = outdir, label, limit, unit
+        self.task = progress.board().task(label, label, limit, "books" if unit == "books" else "bytes")
         self.path = os.path.join(outdir, "progress.json")
         if os.path.exists(self.path):
             with open(self.path) as f:
@@ -126,32 +136,53 @@ class Progress:
 
     def finished(self):
         """True (with a message) if there is nothing left to do."""
-        if self.st.get("end"):
-            print(f"{self.label}: the whole source is already saved ({self._fmt(self.count())})")
-            return True
-        if self.full():
-            print(f"{self.label}: already have {self._fmt(self.count())}, nothing to do")
+        if self.st.get("end") or self.full():
+            if self.st.get("end"):
+                print(f"{self.label}: the whole source is already saved ({self._fmt(self.count())})")
+            else:
+                print(f"{self.label}: already have {self._fmt(self.count())}, nothing to do")
+            self.task.start(done=self.count(), total=self.limit)
+            self.task.finish("done", "already downloaded")
             return True
         if self.count():
             print(f"{self.label}: resuming at {self._fmt(self.count())}")
         return False
 
+    def set_total(self, n):
+        """The source turned out smaller than the limit (e.g. the catalog has fewer books)."""
+        n = min(self.limit, n)
+        self.task.set(total=n)
+        if self.bar is not None:
+            self.bar.total = n
+            self.bar.refresh()
+
     def __enter__(self):
         self.w = ShardWriter(self.outdir, self.st["shard"], self.st["shard_bytes"])
         books = self.unit == "books"
-        self.bar = tqdm(total=self.limit, initial=self.count(), desc=self.label,
+        if self.task.state != "running":
+            self.task.start(done=self.count(), total=self.limit)
+        print(progress.board().summary(), flush=True)
+        self.bar = tqdm(total=self.limit, initial=self.count(), desc=self.label, mininterval=BAR_EVERY,
                         unit="book" if books else "B", unit_scale=not books)
         return self
 
-    def __exit__(self, *exc):
+    def __exit__(self, kind, *exc):
         self.bar.close()
         self.w.close()
+        if self.task.state == "running":
+            if kind is None:
+                self.task.finish("done", "" if self.full() else None)
+            else:
+                stop = issubclass(kind, KeyboardInterrupt)
+                self.task.finish("stopped" if stop else "failed", "" if stop else str(exc[0])[:200])
 
     def write(self, text):
         self.w.write(text)
         self.st["chars"] += len(text)
         self.st["docs"] += 1
-        self.bar.update(1 if self.unit == "books" else len(text))
+        n = 1 if self.unit == "books" else len(text)
+        self.bar.update(n)
+        self.task.add(n)
 
     def save(self, **cursor):
         self.st.update(cursor)
@@ -160,7 +191,13 @@ class Progress:
 
     def end(self, **cursor):
         self.save(end=True, **cursor)
+        self.task.finish("done", "reached the end of the source")
         print(f"{self.label}: reached the end of the source ({self._fmt(self.count())})")
+
+
+def skip_source(label, note):
+    """Mark a planned source as skipped on the progress board (already there from an older run)."""
+    progress.board().task(label).finish("skipped", note)
 
 
 # ---------------------------------------------------------------- networking helpers
@@ -204,6 +241,8 @@ def get(sess, url, tries, what=None, missing_ok=False, **kw):
         if missing_ok and r.status_code in (401, 403, 404, 410):
             return None
         r.raise_for_status()
+        if not kw.get("stream"):
+            progress.net(len(r.content))
         return r
     return retry(go, what or f"fetching {url.rsplit('/', 1)[-1][:60]}", tries)
 
@@ -313,12 +352,14 @@ def gutenberg(outdir, max_books, workers, method="mirror", tries=30):
             if done >= max_books:
                 print(f"Gutenberg: already downloaded ({done} books requested last time), skipping. "
                       f"Delete {marker} to download again.")
+                skip_source("Gutenberg", "already downloaded")
                 return
         elif glob_shards(outdir) and glob_shards(os.path.join(os.path.dirname(outdir), "fineweb")):
             # an older version of this script got past Gutenberg (FineWeb shards exist) but left no marker
             print("Gutenberg: shards from an earlier run found, skipping. "
                   f"Delete {outdir} to download again.")
             json.dump({"max_books": max_books}, open(marker, "w"))
+            skip_source("Gutenberg", "already downloaded")
             return
     p = Progress(outdir, "Gutenberg", max_books, unit="books", method=method, pos=0, page=None)
     if p.finished():
@@ -333,6 +374,7 @@ def gutenberg_mirror(p, workers, tries):
     sess = session()
     ids = catalog_ids(sess, tries)
     print(f"Gutenberg: {len(ids):,} English books in the catalog")
+    p.set_total(len(ids))
     with p, ThreadPoolExecutor(workers) as pool:
         run_list(p, ids, lambda i: fetch_book(i, sess), pool, workers * 4,
                  on_saved=lambda saved: record_ids(p.outdir, saved))
@@ -433,6 +475,7 @@ def pg19(outdir, max_books, workers, tries, gutenberg_dir):
     names = pg19_files(sess, tries)
     skip = gutenberg_ids(gutenberg_dir, tries)
     print(f"PG-19: {len(names):,} books" + (", skipping the ones Gutenberg already saved" if skip else ""))
+    p.set_total(len(names))
 
     def fetch(name):
         if name.rsplit("/", 1)[-1][:-4] in skip:
@@ -560,6 +603,7 @@ def standard_ebooks(outdir, max_books, workers, tries):
         books = se_books_feed(sess, email, tries) if email else se_books_github(sess, tries)
         save_state(listing, books)
     print(f"Standard Ebooks: {len(books):,} books ({'Patrons feed' if email else 'GitHub'})")
+    p.set_total(len(books))
 
     def fetch(b):
         try:
@@ -766,6 +810,7 @@ class HttpFile(io.RawIOBase):
             return data
 
         data = retry(go, f"reading {self.url.rsplit('/', 1)[-1]} @ {start / 1e6:.0f} MB", self.tries)
+        progress.net(len(data))
         self.pos += n
         return data
 
@@ -775,13 +820,21 @@ class HttpFile(io.RawIOBase):
         return len(data)
 
 
-def download_file(url, dest, size, sess, tries):
-    """Download url to dest, resuming a partial .part file after any disconnect."""
+def download_file(url, dest, size, sess, tries, task=None, note=""):
+    """Download url to dest, resuming a partial .part file after any disconnect.
+
+    task: the source's progress line; its note shows how much of this file has arrived."""
     if os.path.exists(dest) and os.path.getsize(dest) == size:
         return dest
     part = dest + ".part"
     os.makedirs(os.path.dirname(dest), exist_ok=True)
-    bar = tqdm(total=size, unit="B", unit_scale=True, desc=f"download {os.path.basename(dest)}")
+    bar = tqdm(total=size, unit="B", unit_scale=True, desc=f"download {os.path.basename(dest)}",
+               mininterval=BAR_EVERY)
+
+    def show(n):
+        if task:
+            task.set(note=f"{note}downloading {progress.fmt_bytes(n)} of {progress.fmt_bytes(size)} "
+                          f"({100 * n / max(1, size):.0f}%)")
 
     def go():
         have = os.path.getsize(part) if os.path.exists(part) else 0
@@ -798,11 +851,15 @@ def download_file(url, dest, size, sess, tries):
             for chunk in r.iter_content(1 << 20):
                 f.write(chunk)
                 bar.update(len(chunk))
+                progress.net(len(chunk))
+                show(bar.n)
         if os.path.getsize(part) < size:
             raise NetError("connection ended early")
 
     retry(go, f"downloading {os.path.basename(dest)}", tries)
     bar.close()
+    if task:
+        task.set(note=note.rstrip(" ·"))
     if os.path.getsize(part) != size:
         raise SystemExit(f"{part}: size mismatch, delete it and run again")
     os.replace(part, dest)
@@ -874,9 +931,11 @@ def hf_parquet(outdir, label, repo, dirs, max_gb, mode="stream", tries=30, cache
         for path, size in files[start:]:
             url = f"{HF}/datasets/{repo}/resolve/{sha}/{path}"
             local = None
+            note = f"file {names.index(path) + 1} of {len(names)} · "
+            p.task.set(note=note.rstrip(" ·"))
             if mode == "download":
                 local = download_file(url, os.path.join(cache, cache_name or repo.split("/")[-1], sha[:8], path),
-                                      size, sess, tries)
+                                      size, sess, tries, p.task, note)
                 src = local
             else:
                 src = HttpFile(url, size, sess, tries)
@@ -999,9 +1058,11 @@ def hf_jsonl(outdir, label, repo, max_gb, mode="stream", tries=30, cache="data/c
         for path, size in files[start:]:
             url = f"{HF}/datasets/{repo}/resolve/{sha}/{path}"
             local = None
+            note = f"file {names.index(path) + 1} of {len(names)} · "
+            p.task.set(note=note.rstrip(" ·"))
             if mode == "download":
                 local = download_file(url, os.path.join(cache, cache_name or repo.split("/")[-1], sha[:8], path),
-                                      size, sess, tries)
+                                      size, sess, tries, p.task, note)
                 raw = open(local, "rb")
             else:
                 raw = io.BufferedReader(HttpFile(url, size, sess, tries), 8 << 20)
@@ -1056,12 +1117,48 @@ def common_pile(outdir, max_gb, subsets, mode="stream", tries=30, cache="data/ca
     for i, sub in enumerate(subsets):
         share = left / (len(subsets) - i)
         if share < 1e6:
+            for rest in subsets[i:]:
+                skip_source(f"Common Pile {rest}", "the GB were used up by the parts before it")
             break
+        progress.board().task(f"Common Pile {sub}").set(total=int(share))
         keep = _wiki_keep(CP_WIKIS) if sub == "wikimedia" else None
         used = hf_jsonl(os.path.join(outdir, sub), f"Common Pile {sub}", f"{CP_ORG}/{sub}_filtered",
                         share / 1024**3, mode, tries, cache, keep_parquet, keep=keep,
                         cache_name=f"common-pile-{sub}")
         left -= min(used, share)
+
+
+def _parts(v):
+    return [x.strip() for x in v.split(",") if x.strip()]
+
+
+def plan(a):
+    """Every source this run will fetch, in order, as progress-board lines: (key, label, total, unit).
+    The labels are the ones each source's Progress uses, so the lines fill in as the run goes."""
+    gb = lambda g: int(g * 1024**3)
+    items = []
+    if a.gutenberg_max > 0:
+        items.append(("Gutenberg", "Gutenberg", a.gutenberg_max, "books"))
+    if a.pg19_books > 0:
+        items.append(("PG-19", "PG-19", a.pg19_books, "books"))
+    if a.standard_ebooks > 0:
+        items.append(("Standard Ebooks", "Standard Ebooks", a.standard_ebooks, "books"))
+    if a.common_corpus_gb > 0:
+        items.append(("Common Corpus", "Common Corpus", gb(a.common_corpus_gb), "bytes"))
+    if a.archive_books > 0:
+        items.append(("Internet Archive", "Internet Archive", a.archive_books, "books"))
+    if a.cosmopedia_gb > 0:
+        subs = _parts(a.cosmopedia_subsets)
+        items += [(f"Cosmopedia {s}", f"Cosmopedia {s}", gb(a.cosmopedia_gb / len(subs)), "bytes") for s in subs]
+    if a.wikipedia_gb > 0:
+        lang = a.wikipedia_lang.strip().lower()
+        items.append((f"Wikipedia {lang}", f"Wikipedia {lang}", gb(a.wikipedia_gb), "bytes"))
+    if a.common_pile_gb > 0:
+        subs = _parts(a.common_pile_subsets)
+        items += [(f"Common Pile {s}", f"Common Pile {s}", gb(a.common_pile_gb / len(subs)), "bytes") for s in subs]
+    if a.fineweb_gb > 0:
+        items.append(("FineWeb-Edu", "FineWeb-Edu", gb(a.fineweb_gb), "bytes"))
+    return items
 
 
 if __name__ == "__main__":
@@ -1104,6 +1201,8 @@ if __name__ == "__main__":
     a = ap.parse_args()
     out = lambda name: os.path.join(a.out, name)
     hf = dict(mode=a.hf_mode, tries=a.retries, cache=a.cache, keep_parquet=a.keep_parquet)
+    board = progress.board()
+    board.plan(plan(a), title="Downloading the training corpus")
     try:
         if a.gutenberg_max > 0:
             gutenberg(out("gutenberg"), a.gutenberg_max, a.workers, a.gutenberg_method, a.retries)
@@ -1126,4 +1225,7 @@ if __name__ == "__main__":
         if a.fineweb_gb > 0:
             fineweb(out("fineweb"), a.fineweb_gb, **hf)
     except KeyboardInterrupt:
+        board.touch(force=True)
         sys.exit("\nStopped. Run the same command again to continue where it left off.")
+    board.touch(force=True)
+    print("Done. " + board.summary(), flush=True)

@@ -217,10 +217,15 @@ def test_github_keeps_only_permissive_licensed_repos(fake_github, tmp_path):
     import subprocess, sys
 
     out = tmp_path / "code"
-    env = {**os.environ, "GITHUB_API": fake_github, "GITHUB_CODELOAD": fake_github}
+    prog = tmp_path / "progress.json"
+    env = {**os.environ, "GITHUB_API": fake_github, "GITHUB_CODELOAD": fake_github, "TEXTLLM_PROGRESS": str(prog)}
     r = subprocess.run([sys.executable, "data/build_code.py", "--github-repos", "10", "--langs", "python,javascript",
                         "--out", str(out), "--retries", "1"], cwd=ROOT, env=env, capture_output=True, text=True, timeout=120)
     assert r.returncode == 0, r.stdout + r.stderr
+    p = json.load(open(prog))  # the Studio's download progress: one line for the search, finished
+    (t,) = p["tasks"]
+    assert (t["label"], t["done"], t["total"], t["state"]) == ("GitHub: search", 1, 10, "done")
+    assert p["net_bytes"] > 0 and p["overall"]["pct"] == 100
     docs = read_docs(out)
     assert sorted(d.split("\n", 1)[0] for d in docs) == ["# path: alice/good/lib/add.py", "// path: alice/good/web/chunk.js"]
     st = json.load(open(out / "github" / "progress.json"))

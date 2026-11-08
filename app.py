@@ -486,6 +486,10 @@ def train(r: TrainReq):
     out = os.path.join(RUNS, name)
     code = r.task == "code"
     resuming_saved = r.resume and os.path.exists(os.path.join(out, "train_cmd.json"))
+    if r.resume and not resuming_saved and ((_read_json(os.path.join(out, "meta.json")) or {}).get("retrained") or {}).get("resumable") is False:
+        # a retrain on your own files and links keeps no copy of them, so it must not quietly go on with other data
+        err(f"{name} was retrained on files and links that were deleted afterwards, so it can't be resumed. "
+            "Start the retrain again (Training → Retrain).", 409)
     if r.mode == "scratch":
         bin_dir, tok_src = ("data/bin-code", "tokenizer/bpe-code.json") if code else ("data/bin", "tokenizer/bpe.json")
         where = "Training → Copilot, steps 1–3" if code else "Training → Data, steps 1–3"

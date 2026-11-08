@@ -160,7 +160,7 @@ def build_scratch_data(a, src, meta, cfg, tok_p, sources, private_dir, bindir):
                 np.asarray(p).tofile(f)
         val = np.concatenate([np.asarray(v) for v in vals]) if vals else np.zeros(0, np.uint16)
         if len(val) < block + 2:  # a small text: "val" = how well it now knows the new text
-            val = np.asarray(trains[0][: max(block + 2, min(len(trains[0]), 200_000))])
+            val = np.concatenate([np.asarray(t[:200_000]) for t in trains])[:200_000]
         val.tofile(os.path.join(bindir, "val.bin"))
         return new, sum(len(p) for p in parts)
     finally:
@@ -230,7 +230,12 @@ def lora(a, src, meta, sources, private_dir):
     m = write_meta(a, src, meta, sources, private_dir, steps=steps)
     # finetune_lora.py rewrites meta.json on every save; it carries the style profile over from the
     # adapter it starts from, and this keeps the "retrained from" note (short: it is a command argument)
-    cmd += ["--meta-extra", json.dumps({"retrained": m["retrained"]}, ensure_ascii=False)[:3500]]
+    note = dict(m["retrained"])
+    if len(note["sources"]) > 8:  # keep the argument short (and valid JSON): list a few, count the rest
+        note["sources"] = note["sources"][:8] + [f"... and {len(note['sources']) - 8} more"]
+    while len(json.dumps(note, ensure_ascii=False)) > 3000 and note["sources"]:
+        note["sources"] = note["sources"][:-1]
+    cmd += ["--meta-extra", json.dumps({"retrained": note}, ensure_ascii=False)]
     say(f"continuing the adapter of {os.path.basename(src)} ({meta['base']}) on about {n} examples → {steps} steps")
     return cmd, keep
 
@@ -241,7 +246,8 @@ def write_meta(a, src, meta, sources, private_dir, **info):
     m["retrained"] = {"from": os.path.basename(src), "time": int(time.time()),
                       "sources": [rel(d) for d in sources] + (["data you gave (deleted after training)"]
                                                               if private_dir else []),
-                      **({"data_bin": rel(a.data_bin)} if a.data_bin else {}), **info}
+                      **({"data_bin": rel(a.data_bin)} if a.data_bin else {}),
+                      "resumable": private_dir is None, **info}
     if m.get("type") == "scratch":
         m["tok"] = "tokenizer.json"
     with open(os.path.join(a.out, "meta.json"), "w") as f:

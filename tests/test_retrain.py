@@ -146,6 +146,22 @@ def test_private_texts_are_not_kept_and_not_resumable(scratch_run, work, tmp_pat
     assert not os.path.exists(os.path.join(out, "train_cmd.json"))
     assert not os.path.exists(os.path.join(out, "retrain-data"))
     assert mine.exists(), "the file was deleted without --delete-originals"
+    assert json.load(open(os.path.join(out, "meta.json")))["retrained"]["resumable"] is False
+
+
+def test_val_fallback_and_short_meta_note(scratch_run, work, tmp_path, monkeypatch):
+    import retrain
+
+    # a tiny folder first, then a bigger one: the fallback validation data must still be long enough
+    tiny = os.path.join(work, "tiny")
+    os.makedirs(tiny)
+    open(os.path.join(tiny, "a.txt"), "w").write("short text.")
+    big = write_texts(os.path.join(work, "big"), seed=8, n=30)
+    a = retrain.get_args(["--from", scratch_run, "--out", os.path.join(work, "v"), "--source", tiny, big,
+                          "--val-frac", "0", "--steps", "2", *SMALL])
+    retrain.prepare(a, str(tmp_path))
+    block = torch.load(os.path.join(scratch_run, "ckpt.pt"), map_location="cpu", weights_only=False)["config"]["block_size"]
+    assert os.path.getsize(os.path.join(work, "v", retrain.DATA_DIR, "val.bin")) // 2 >= block + 2
 
 
 # ---------------------------------------------------------------- LoRA
@@ -187,6 +203,7 @@ def test_lora_retrain_continues_the_adapter_into_a_new_run(tiny_base, work, tmp_
     assert meta["retrained"]["from"] == "qwen-writer"
     cmd = json.load(open(os.path.join(out, "train_cmd.json")))
     assert cmd[0] == "finetune/finetune_lora.py" and "--init-adapter" in cmd
+    json.loads(cmd[cmd.index("--meta-extra") + 1])
     from core import commands
     commands.check(cmd)  # Resume on the Runs page accepts it
 
@@ -235,3 +252,8 @@ def test_studio_retrain_endpoint_checks_and_launches(scratch_run, work, tmp_path
     # a model already in that folder is never overwritten from the browser
     shutil.copy(os.path.join(scratch_run, "meta.json"), os.path.join(work, "writer-v2", "meta.json"))
     assert post(name="writer-v2", sources="news").status_code == 409
+    # Resume of a retrain on deleted private texts is refused instead of falling back to data/bin
+    os.makedirs(os.path.join(work, "mine"))
+    json.dump({"type": "scratch", "retrained": {"from": "writer", "resumable": False}}, open(os.path.join(work, "mine", "meta.json"), "w"))
+    r = c.post("/api/train", json={"mode": "scratch", "name": "mine", "resume": True})
+    assert r.status_code == 409 and "can't be resumed" in r.text

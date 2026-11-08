@@ -21,6 +21,8 @@ PACKAGES = [
     ("datasets", "datasets", "core", "Stream and map huge datasets from disk or the Hub"),
     ("tokenizers", "tokenizers", "core", "Fast BPE tokenizer training (from-scratch GPT)"),
     ("safetensors", "safetensors", "core", "Safe, fast model weight files"),
+    ("cryptography", "cryptography", "core", "Open AES-encrypted PDFs (most protected e-books)"),
+    ("pdfminer.six", "pdfminer", "core", "Second PDF reader when pypdf gets little text"),
     ("trl", "trl", "ai", "SFT, DPO, ORPO, KTO, GRPO trainers (instruction + preference tuning)"),
     ("lm-eval", "lm_eval", "ai", "Standard benchmarks: HellaSwag, ARC, MMLU, ..."),
     ("sentence-transformers", "sentence_transformers", "ai", "Embeddings for search, RAG, semantic dedup"),
@@ -29,6 +31,7 @@ PACKAGES = [
     ("rapidfuzz", "rapidfuzz", "ai", "Fast fuzzy string matching"),
     ("gguf", "gguf", "ai", "Read/write GGUF files for llama.cpp"),
     ("tensorboard", "tensorboard", "ai", "Loss curves in the browser: tensorboard --logdir runs"),
+    ("pytesseract", "pytesseract", "ai", "OCR for scanned PDFs (also needs the Tesseract program)"),
 ] + [(pip, imp, grp, what) for imp, pip, grp, what, _ in backends.ENGINES if grp == "fast"] + [
     ("bitsandbytes", "bitsandbytes", "gpu", "4/8-bit loading (QLoRA) and 8-bit optimizers"),
     ("liger-kernel", "liger_kernel", "gpu", "Fused Triton kernels: faster, leaner training (Linux)"),
@@ -110,6 +113,10 @@ def main():
         line = f"{pip_name:<22} {group:<5} {ver or '-':<12} {status:<8} {unlocks}"
         print(line + (f"  [{note}]" if note else ""))
 
+    from data import pdftext
+
+    exe = pdftext.tesseract_cmd()
+    print(f"\nTesseract OCR program: {exe or 'not found (scanned PDFs are skipped; see README)'}")
     print()
     if missing:
         print("Not working here: " + ", ".join(missing))

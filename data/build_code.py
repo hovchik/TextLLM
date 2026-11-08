@@ -44,6 +44,10 @@ sys.path.insert(0, ROOT)
 from coding import fim, langs as L  # noqa: E402
 from coding.gitignore import Ignore  # noqa: E402
 from coding.secrets_scan import scrub, skip_file  # noqa: E402
+from core import progress  # noqa: E402
+
+# progress-board lines (core/progress.py), one per GitHub phase
+T_NAMED, T_REFRESH, T_SEARCH = "GitHub: chosen repositories", "GitHub: new commits", "GitHub: search"
 
 PERMISSIVE = ["mit", "mit-0", "apache-2.0", "bsd-2-clause", "bsd-3-clause", "0bsd", "isc", "unlicense",
               "cc0-1.0", "zlib", "bsl-1.0"]
@@ -316,6 +320,8 @@ def gh_get(sess, url, tries, params=None, stream=False):
             raise NetError("rate limited")
         if r.status_code in (408, 500, 502, 503, 504):
             raise NetError(f"HTTP {r.status_code}")
+        if not stream:
+            progress.net(len(r.content))
         return r
     return retry(go, f"fetching {url.split('github.com', 1)[-1][:80]}", tries)
 
@@ -398,6 +404,10 @@ def repo_files(sess, full, ref, tries, langs, max_kb, max_repo_mb, stats):
                     continue
                 stats["redacted"] += why
                 out.append((rel, kind[0], kind[1], text))
+        try:
+            progress.net(r.raw.tell())  # compressed bytes that came over the network
+        except Exception:
+            pass
         return out, lic_text
     return retry(go, f"downloading {full}", tries)
 
@@ -472,6 +482,9 @@ def github(out, max_repos, explicit, langs, licences, min_stars, max_kb, max_rep
         """Download a repository and add its files that aren't in the collection yet (all of them the first
         time, only new or changed ones on a refresh). None when it has no LICENSE file."""
         full = repo["full_name"]
+        for t in board.tasks.values():
+            if t.state == "running" and t.key.startswith("GitHub"):
+                t.set(note=f"downloading {full}")
         ref = repo.get("default_branch") or "HEAD"
         files, lic_text = repo_files(sess, full, ref, tries, langs, max_kb, max_repo_mb, rs)
         if not lic_text:
@@ -530,8 +543,11 @@ def github(out, max_repos, explicit, langs, licences, min_stars, max_kb, max_rep
         say(f"github: {full}: updated, {kept} new or changed files")
         return kept
 
+    board = progress.board()
     try:
-        for full in explicit:
+        named_task = board.task(T_NAMED, T_NAMED, len(explicit), "repositories").start() if explicit else None
+        for i, full in enumerate(explicit):
+            named_task.set(done=i)
             full = full.strip().strip("/").removeprefix("https://github.com/").removesuffix(".git")
             if not re.fullmatch(r"[\w.-]+/[\w.-]+", full):
                 say(f"github: {full!r} is not owner/name, skipped")
@@ -544,22 +560,38 @@ def github(out, max_repos, explicit, langs, licences, min_stars, max_kb, max_rep
                 say(f"github: {full}: not found (or private)")
                 continue
             take(info)
+        if explicit:
+            named_task.set(done=len(explicit))
+            named_task.finish("done", "")
+        if refresh and not done:
+            board.task(T_REFRESH).finish("skipped", "nothing downloaded yet")
         if refresh and done:
             named = [f for f in (x.strip().strip("/").removeprefix("https://github.com/").removesuffix(".git")
                                  for x in explicit) if f in done]
             rest = sorted((f for f in done if f not in named), key=lambda f: st["checked"].get(f, 0))
             order = (named + rest)[:refresh_limit] if refresh_limit > 0 else named + rest
             say(f"github: checking {len(order)} of {len(done)} repositories for new commits")
+            ref_task = board.task(T_REFRESH, T_REFRESH, len(order), "repositories").start(total=len(order))
             changed = added = 0
             for full in order:
+                ref_task.set(note=f"checking {full}")
                 n = update(full)
                 changed += n > 0
                 added += n
+                ref_task.add(1)
                 save()
+            ref_task.finish("done", f"{changed} had new code, {added} files added")
             say(f"github: {changed} repositories had new code, {added} files added")
         # in total, counting repositories downloaded earlier and the named ones
         target = max(max_repos, len(done) + new) if new > 0 else max_repos
+        searching = max_repos > 0 or new > 0
+        search_task = board.task(T_SEARCH, T_SEARCH, target, "repositories") if searching else None
+        if searching and target <= len(done):
+            search_task.start(done=len(done), total=target)
+            search_task.finish("done", "already downloaded")
         if target > len(done):
+            search_task = search_task or board.task(T_SEARCH, T_SEARCH, target, "repositories")
+            search_task.start(done=len(done), total=target)
             want_langs = sorted(langs) if langs else ["python", "javascript", "typescript"]
             lics = [x for x in SEARCHABLE if x in allowed]
             queries = [(lg, lc, tp) for lg in want_langs for tp in (list(topics) or [""]) for lc in lics]
@@ -579,7 +611,9 @@ def github(out, max_repos, explicit, langs, licences, min_stars, max_kb, max_rep
                         if len(done) >= target:
                             finished = False  # a bigger total later continues on this same page
                             break
-                        progressed |= take(repo)
+                        if take(repo):
+                            progressed = True
+                            search_task.set(done=len(done))
                     # Advance only once the whole page is handled; repositories already done or refused
                     # are skipped at once when a page is read again (after a stop, or a bigger total).
                     if finished:
@@ -595,8 +629,14 @@ def github(out, max_repos, explicit, langs, licences, min_stars, max_kb, max_rep
                             st["pages"].pop(f"{lg}|{lc}|{min_stars}" + (f"|{tp}" if tp else ""), None)
                         continue
                     say("github: no more repositories match; lower the minimum stars or add languages")
+                    search_task.finish("done", "no more repositories match")
                     break
+            if search_task.state == "running":
+                search_task.finish("done", "")
     finally:
+        for t in board.tasks.values():
+            if t.state == "running" and t.key.startswith("GitHub"):
+                t.finish("stopped")
         save()
         w.close()
         dedup.close()
@@ -630,6 +670,9 @@ def write_attribution(out):
 
 
 # ---------------------------------------------------------------- Hugging Face
+HF_TASK = "GitHub code (Hugging Face)"
+
+
 def hf_code(out, max_gb, langs, licences, max_kb, mode, tries, cache, keep_parquet):
     from data.build_corpus import hf_parquet
 
@@ -650,7 +693,7 @@ def hf_code(out, max_gb, langs, licences, max_kb, mode, tries, cache, keep_parqu
     if langs:
         filters["language"] = lambda v: L.norm(v) in langs
     try:
-        hf_parquet(os.path.join(out, "hf"), "GitHub code (Hugging Face)", HF_CODE_REPO, [""], max_gb, mode, tries,
+        hf_parquet(os.path.join(out, "hf"), HF_TASK, HF_CODE_REPO, [""], max_gb, mode, tries,
                    cache, keep_parquet, column="code", filters=filters, extra=("repo_name", "path"), make=make,
                    cache_name="github-code-clean")
     finally:
@@ -693,6 +736,16 @@ def main():
                          "--github-repo owner/name or --hf-gb G")
     topics = parse_topics(a.topics)
     os.makedirs(a.out, exist_ok=True)
+    items = []
+    if a.github_repo:
+        items.append((T_NAMED, T_NAMED, len(a.github_repo), "repositories"))
+    if a.refresh:
+        items.append((T_REFRESH, T_REFRESH, 0, "repositories"))
+    if a.github_repos > 0 or a.github_new > 0:
+        items.append((T_SEARCH, T_SEARCH, a.github_repos, "repositories"))
+    if a.hf_gb > 0:
+        items.append((HF_TASK, HF_TASK, int(a.hf_gb * 1024**3), "bytes"))
+    progress.board().plan(items, title="Downloading code")
     try:
         if a.local:
             local(a.local, a.out, langs, a.max_file_kb)

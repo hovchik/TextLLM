@@ -2,6 +2,7 @@
 import glob, json, math, os, subprocess, sys, threading, time
 
 import graceful
+from core import progress
 from chat_engine import ROOT, RUNS
 
 PY = sys.executable
@@ -10,6 +11,7 @@ _lock = threading.Lock()
 JOB = {"proc": None, "name": None, "kind": None, "log": None, "run": None, "started": None, "cleanup": []}
 HISTORY_PATH = os.path.join(RUNS, "jobs.jsonl")
 LOCK_PATH = os.path.join(RUNS, "_job.lock")   # pid of the running job: data/crawl.py checks it
+PROGRESS_PATH = os.path.join(RUNS, "_progress.json")  # download progress the job writes (core/progress.py)
 
 
 def running():
@@ -42,10 +44,15 @@ def launch(kind, name, cmd, log_path, run=None, cleanup=(), env=None):
         logf = open(log_path, "a", encoding="utf-8", errors="replace")
         logf.write(f"\n$ {' '.join(cmd)}\n")
         logf.flush()
+        try:  # the last job's progress must not show as this one's
+            os.remove(PROGRESS_PATH)
+        except OSError:
+            pass
         # own process group, so Stop reaches the trainers a job starts, not just the job (graceful.py)
         proc = subprocess.Popen(cmd, cwd=ROOT, stdout=logf, stderr=subprocess.STDOUT,
                                 env={**os.environ, "PYTHONUNBUFFERED": "1", # UTF-8 log on Windows too
-                                     "PYTHONIOENCODING": "utf-8:replace", **(env or {})}, **graceful.popen_kwargs())
+                                     "PYTHONIOENCODING": "utf-8:replace", progress.ENV: PROGRESS_PATH,
+                                     **(env or {})}, **graceful.popen_kwargs())
         with open(LOCK_PATH, "w") as lk:
             lk.write(json.dumps({"pid": proc.pid, "kind": kind, "name": name, "started": time.time()}))
         JOB.update(proc=proc, name=name, kind=kind, log=log_path, run=run, started=time.time(),
@@ -126,7 +133,21 @@ def status():
         "kind": JOB["kind"], "name": JOB["name"], "run": JOB["run"], "started": JOB["started"],
         "exit": None if p is None or p.poll() is None else p.returncode,
         "log": tail(JOB["log"], 60),
+        "progress": job_progress(),
     }
+
+
+def job_progress():
+    """Per-source and overall download progress of the current (or last) job, if it reports any."""
+    if JOB["proc"] is None:
+        return None
+    d = progress.read(PROGRESS_PATH)
+    if d and not running():
+        for t in d["tasks"]:  # stopped or crashed mid-source: say so instead of a frozen "running"
+            if t["state"] == "running":
+                t["state"], t["eta"], t["speed"] = ("stopped" if JOB["proc"].returncode else "done"), None, 0
+        d["overall"]["eta"], d["net_speed"] = None, 0
+    return d
 
 
 def history(n=50):

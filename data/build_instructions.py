@@ -31,6 +31,7 @@ ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, ROOT)
 sys.path.insert(0, os.path.join(ROOT, "data"))
 from writing import formats as F  # noqa: E402
+from core import progress  # noqa: E402
 
 OUT = os.path.join(ROOT, "data", "instructions")
 PD = "public domain (US)"
@@ -93,16 +94,21 @@ def gutenberg_pieces(kind, max_books, max_pieces, workers, rng):
     rng.shuffle(ids)
     ids = ids[:max_books]
     say(f"Gutenberg {kind}: {len(ids)} books tagged '{subject}'")
+    task = progress.board().task(f"Gutenberg {kind} books", f"Gutenberg {kind} books", len(ids), "books")
+    task.start(total=len(ids))
     lo, hi = F.get(kind)["words"]
     out, s = [], requests.Session()
     with ThreadPoolExecutor(workers) as pool:
         for bid, text in zip(ids, pool.map(lambda i: fetch_book(i, s), ids)):
+            task.add(1)
             if not text:
                 continue
             for title, body in split_pieces(text, lo, int(hi * 1.3)):
                 out.append((bid, title, unwrap(body)))
+            task.set(note=f"{min(len(out), max_pieces):,} of {max_pieces:,} pieces")
             if len(out) >= max_pieces:
                 break
+    task.finish("done", f"{min(len(out), max_pieces):,} pieces")
     return out[:max_pieces]
 
 

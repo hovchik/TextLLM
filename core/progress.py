@@ -193,18 +193,21 @@ class Board:
     def touch(self, force=False):
         if not self.path:
             return
-        now = time.time()
-        if not force and now - self._last < WRITE_EVERY:
-            return
-        self._last = now
-        try:
-            snap = self.snapshot()
-            tmp = f"{self.path}.{os.getpid()}.tmp"
-            with open(tmp, "w") as f:
-                json.dump(snap, f)
-            os.replace(tmp, self.path)
-        except OSError:
-            pass                     # progress is a nicety; never stop a download over it
+        # One writer at a time: download threads and the main thread share the temp file, so the
+        # throttle check, snapshot and rename all happen under the board lock.
+        with self.lock:
+            now = time.time()
+            if not force and now - self._last < WRITE_EVERY:
+                return
+            self._last = now
+            try:
+                snap = self.snapshot()
+                tmp = f"{self.path}.{os.getpid()}.tmp"
+                with open(tmp, "w") as f:
+                    json.dump(snap, f)
+                os.replace(tmp, self.path)
+            except OSError:
+                pass                 # progress is a nicety; never stop a download over it
 
     def summary(self):
         """One line for the command line: overall percent, ETA and bytes downloaded."""

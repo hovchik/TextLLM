@@ -171,3 +171,33 @@ def test_job_status_includes_progress_and_marks_a_stopped_source(tmp_path, monke
     p = jobs.status()["progress"]
     assert p["tasks"][0]["state"] == "stopped" and p["overall"]["eta"] is None
     assert p["tasks"][1]["state"] == "waiting"
+
+
+def test_a_smaller_source_keeps_its_real_total(tmp_path):
+    sys.path.insert(0, os.path.join(ROOT, "data"))
+    import build_corpus as bc
+
+    p = bc.Progress(str(tmp_path / "src"), "Tiny catalog", 1000, unit="books", pos=0)
+    p.set_total(40)                  # the catalog has only 40 books
+    with p:
+        p.write("x" * 100)
+        assert p.task.total == 40 and p.bar.total == 40
+
+
+def test_concurrent_writers_leave_valid_json(tmp_path):
+    path = tmp_path / "p.json"
+    b = progress.Board(str(path))
+    t = b.task("a", "A", 10**9, "bytes").start()
+
+    def work():
+        for _ in range(300):
+            b.net(10)
+            t.add(1)
+            b.touch(force=True)
+
+    threads = [threading.Thread(target=work) for _ in range(8)]
+    [x.start() for x in threads]
+    [x.join() for x in threads]
+    b.touch(force=True)
+    d = progress.read(str(path))
+    assert d is not None and d["net_bytes"] == 8 * 300 * 10

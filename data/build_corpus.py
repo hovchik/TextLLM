@@ -124,6 +124,7 @@ class Progress:
         else:
             self.st = {"chars": 0, "docs": 0, "shard": 0, "shard_bytes": 0, **cursor}
         self.w = self.bar = None
+        self.shown_total = limit   # what the bars count towards: the limit, or less if the source is smaller
 
     def count(self):
         return self.st["docs"] if self.unit == "books" else self.st["chars"]
@@ -151,6 +152,7 @@ class Progress:
     def set_total(self, n):
         """The source turned out smaller than the limit (e.g. the catalog has fewer books)."""
         n = min(self.limit, n)
+        self.shown_total = n
         self.task.set(total=n)
         if self.bar is not None:
             self.bar.total = n
@@ -160,9 +162,9 @@ class Progress:
         self.w = ShardWriter(self.outdir, self.st["shard"], self.st["shard_bytes"])
         books = self.unit == "books"
         if self.task.state != "running":
-            self.task.start(done=self.count(), total=self.limit)
+            self.task.start(done=self.count(), total=self.shown_total)
         print(progress.board().summary(), flush=True)
-        self.bar = tqdm(total=self.limit, initial=self.count(), desc=self.label, mininterval=BAR_EVERY,
+        self.bar = tqdm(total=self.shown_total, initial=self.count(), desc=self.label, mininterval=BAR_EVERY,
                         unit="book" if books else "B", unit_scale=not books)
         return self
 

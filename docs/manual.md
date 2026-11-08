@@ -159,6 +159,17 @@ The Data tab prepares the training corpus in four steps. Run them in order with 
 
 If the download stops, press **Run** again: every source continues where it stopped.
 
+**Download progress.** While a download runs, the *Download progress* card (above the log) shows every source you chose, in the order they are fetched, refreshed every few seconds:
+
+![Download progress: overall ring, then one card per source](manual/06b-download-progress.png)
+
+- **Overall:** the ring is the share of all chosen sources that is done, then how many sources are finished, which one is downloading now, how much came over the network (and how fast), and the time left for the whole run.
+- **Each source:** *Waiting*, *Downloading*, *Done*, *Skipped* (nothing to do, e.g. already downloaded) or *Stopped*/*Failed*; a bar with the percent; how much text is saved out of what you asked for (books, or MB/GB of text); its speed and time left; and for Hugging Face sources which file it is reading ("file 2 of 14", plus how much of that file has arrived in *Download whole files first* mode).
+- Speeds and times left follow the last minute, so they settle after a minute and adjust when the connection slows. Text saved can grow faster than the network figure, because Hugging Face files are compressed.
+- The Dashboard's running-job card shows the same overall percent and time left. After the job ends, the card keeps the last run's numbers.
+
+The same progress shows on the command line: `python data/build_corpus.py ...` prints a bar per source and an `[overall 40% · 2/5 sources done · 1.2 GB downloaded · ETA 35m]` line before each source and at the end.
+
 **Step 2 · Build the tokenizer.** Learns the word pieces the model reads and writes. Vocabulary 8,192 for CPU models or 32,000 for GPU models; *Files used to learn it* (more is slower and slightly better).
 
 **Step 3 · Encode the corpus.** Turns all text into token files for fast training. *Held out for validation* is the share kept aside to measure validation loss (default 0.5%).
@@ -182,7 +193,7 @@ Teach a model your own books, articles and notes, or add them to the corpus.
    - **Add to training data:** keeps them in `data/raw/custom/` for the next full training. Then run Data step 3 (Encode); also step 2 only if you will train a new model from scratch (see section 5).
 3. Press **Start**.
 
-Good to know: scanned PDFs have no text layer, so run OCR first (e.g. `ocrmypdf`); old `.doc` files need LibreOffice; only use texts you have the right to use.
+Good to know: scanned PDFs (pictures of pages) are read with OCR when Tesseract is installed; the *Scanned PDFs (OCR)* section shows whether it is and lets you pick the languages (e.g. `eng+hye`). A file that can't be read (password-protected, not really a PDF, empty) is skipped with a message saying why, and the others still go ahead. Old `.doc` files need LibreOffice; only use texts you have the right to use.
 
 # 7. Training: News & web
 
@@ -256,7 +267,7 @@ While it reads, the Studio:
 
 This is careful but not perfect: a model can remember what it trains on, so add only code you own or may use, and that you are happy to have inside the model.
 
-**Public GitHub.** Set how many repositories you want (most-starred first, per language) and the minimum stars, or list exact repositories as `owner/name`. A repository is used only when GitHub reports a **permissive licence** (MIT, Apache 2.0, BSD, ISC, Unlicense, CC0, zlib, Boost, 0BSD, MIT-0) **and** it has a LICENSE file. Copyleft licences (GPL, LGPL, AGPL, MPL, EPL), "other" licences and repositories with no licence are refused and listed in the log, because public code without a licence is still all rights reserved. Each repository's licence text, address and branch are saved in `data/code/github/`, and `data/code/ATTRIBUTION.md` lists them all; keep that file with any model you share. A **GitHub token** (any personal token, no permissions needed) raises GitHub's limit from 60 to 5,000 requests an hour; it is saved on this PC and never written to the log. Downloads resume: press the button again and finished repositories are skipped.
+**Public GitHub.** Set how many repositories you want (most-starred first, per language) and the minimum stars, or list exact repositories as `owner/name`. A repository is used only when GitHub reports a **permissive licence** (MIT, Apache 2.0, BSD, ISC, Unlicense, CC0, zlib, Boost, 0BSD, MIT-0) **and** it has a LICENSE file. Copyleft licences (GPL, LGPL, AGPL, MPL, EPL), "other" licences and repositories with no licence are refused and listed in the log, because public code without a licence is still all rights reserved. Each repository's licence text, address and branch are saved in `data/code/github/`, and `data/code/ATTRIBUTION.md` lists them all; keep that file with any model you share. A **GitHub token** (any personal token, no permissions needed) raises GitHub's limit from 60 to 5,000 requests an hour; it is saved on this PC and never written to the log. Downloads resume: press the button again and finished repositories are skipped. While code downloads, the *Download progress* card above the log shows each part (chosen repositories, new commits, the GitHub search, Hugging Face code) with how many repositories (or MB) are done, the repository being downloaded, the bytes downloaded and the time left.
 
 **Filters and more sources:** the languages to keep (Python, JavaScript and TypeScript by default; "Every programming language" or your own list such as `python,go,rust`), the largest file and repository, the licences you accept (you can only narrow the permissive list), and **Hugging Face code**: GB of the `codeparrot/github-code-clean` dataset, keeping only rows whose licence column is permissive. **Collect everything** runs all sources at once.
 
@@ -569,7 +580,7 @@ See README.md for every option.
 | Resumed model writes nonsense after a corpus change | The tokenizer was rebuilt. Restore the old one (each run keeps a copy as `runs/<name>/tokenizer.json`; copy it to `tokenizer/bpe.json`) and run Data step 3 again. |
 | The GPU isn't used | Update the NVIDIA driver, then `run.bat --reinstall` (or `--gpu`). Check Settings → Hardware. On laptops, plug in the charger and set Windows Graphics to "High performance" for Python. |
 | "CUDA out of memory" | Halve the batch size and double the gradient accumulation. |
-| A PDF gives no text | It's a scan: run OCR (`ocrmypdf`) first. |
+| A PDF gives no text | It's a scan: install Tesseract OCR (see the README) or run `ocrmypdf` first. Password-protected: save it again without the password. The ✗ line in the log says which. |
 | A news source is "skipped until you confirm the rights" | Its license is copyrighted/unknown: tick that you have permission, or remove it. |
 | Chat writes one sentence again and again | The model is small or not trained enough yet (see *How much training is enough* below). Meanwhile open Chat's settings and raise **Avoid repeats** to 1.3 and set **Never repeat a phrase** to 3. From-scratch models only continue text: start with the opening of the story ("Once upon a time, a fox") instead of an instruction ("Write a little story"). |
 | Chat is slow with a fine-tuned model | Open the run and press **Make fast CPU copy**. |

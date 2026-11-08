@@ -861,20 +861,32 @@ def styles_train(pid: str, r: StyleTrainReq):
 @app.post("/api/texts")
 async def texts(files: list[UploadFile] = File(default=[]), urls: str = Form(""), paths: str = Form(""),
                 action: str = Form("learn"), model: str = Form(""), passes: float = Form(3),
-                delete_local: bool = Form(False), mix: float = Form(1.0), lr: float = Form(0)):
+                delete_local: bool = Form(False), mix: float = Form(1.0), lr: float = Form(0),
+                ocr: str = Form("auto"), ocr_lang: str = Form("auto")):
+    from data import pdftext
+
     up_dir = os.path.join(RUNS, "_uploads", str(int(time.time() * 1000)))
-    saved = []
+    saved, skipped = [], []
     for f in files:
         if not f.filename:
             continue
         os.makedirs(up_dir, exist_ok=True)
-        p = os.path.join(up_dir, os.path.basename(f.filename))
+        # keep letters of any script (Armenian, Cyrillic, ...) but never "..", a drive or a folder
+        base = os.path.basename(f.filename.replace("\\", "/")).strip().lstrip(".") or "file"
+        p = os.path.join(up_dir, f"{len(saved) + len(skipped)}-{base}")
         with open(p, "wb") as o:
             shutil.copyfileobj(f.file, o)
-        saved.append(p)
+        problem = pdftext.check(p) if p.lower().endswith(".pdf") else None
+        if problem:  # tell the browser now, instead of a failed job later
+            skipped.append({"file": base, "reason": problem})
+            os.remove(p)
+        else:
+            saved.append(p)
     url_list = [u.strip() for u in urls.splitlines() if u.strip()]
     path_list = [p.strip().strip('"') for p in paths.splitlines() if p.strip()]
     if not (saved or url_list or path_list):
+        if skipped:
+            err(" ".join(f"{s['file']}: {s['reason']}." for s in skipped))
         err("Add files, links or a folder path.")
     for u in url_list:
         try:
@@ -891,13 +903,36 @@ async def texts(files: list[UploadFile] = File(default=[]), urls: str = Form("")
     else:
         cmd = [PY, "data/ingest.py", "--out", "data/raw/custom"]
         log, run = os.path.join(RUNS, "_data", "log.txt"), None
+    if ocr == "off":
+        cmd += ["--ocr", "off"]
+    lang = re.sub(r"[^a-z_+]", "", (ocr_lang or "").lower())
+    if lang and lang != "auto":
+        cmd += ["--ocr-lang", lang]
     if path_list and delete_local:
         cmd.append("--delete-originals")
     if saved or path_list:
         cmd += ["--files", *saved, *path_list]
     if url_list:
         cmd += ["--urls", *url_list]
-    return _launch("texts", run or "add texts", cmd, log, run=run, cleanup=saved)
+    out = _launch("texts", run or "add texts", cmd, log, run=run, cleanup=saved)
+    return {**out, "skipped": skipped}
+
+
+@app.get("/api/texts/ocr")
+def texts_ocr():
+    """Whether scanned PDFs can be read here, for the hint under Your texts."""
+    from data import pdftext
+
+    if not pdftext.ocr_available():
+        return {"available": False, "languages": [], "hint": pdftext.TESSERACT_HINT}
+    import pytesseract
+
+    pytesseract.pytesseract.tesseract_cmd = pdftext.tesseract_cmd()
+    try:
+        langs = sorted(l for l in pytesseract.get_languages(config="") if l not in ("osd", "equ", "snum"))
+    except Exception:
+        langs = []
+    return {"available": True, "languages": langs, "auto": pdftext.ocr_languages("auto")}
 
 
 @app.get("/api/runs")

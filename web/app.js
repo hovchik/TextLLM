@@ -134,15 +134,54 @@ function liveCard(run) {
   const j = S.status?.job;
   if (!j?.running) return "";
   const r = run && run.name === j.run ? run : null;
+  const dl = !r && j.progress && j.progress.tasks && j.progress.tasks.length ? j.progress : null;
+  const sub = r ? `${j.kind === "cluster" ? "Round" : "Step"} ${num(r.step)} of ${num(r.max_steps)} · ETA ${dur(r.eta_sec)} · loss ${num(r.train_loss, 3)}`
+    : dl ? `${num(dl.overall.pct, 1)}% · ${dl.overall.done} of ${dl.overall.count} sources${dl.overall.current ? ` · ${esc(dl.overall.current)}` : ""} · ${bytes(dl.net_bytes)} downloaded · ETA ${eta(dl.overall.eta)}`
+    : `Started ${ago(j.started)}`;
   return `<div class="card live" id="live">
     <div class="row" style="gap:18px;align-items:center">
-      ${Charts.ring(r ? r.progress : 0)}
+      ${Charts.ring(r ? r.progress : dl ? dl.overall.pct / 100 : 0)}
       <div style="flex:1;min-width:0">
         <div class="row" style="gap:8px"><span class="pill good">● Running</span><b>${labelKind(j.kind)}</b><span class="muted">${esc(j.name)}</span></div>
-        <div class="muted" style="margin-top:4px">${r ? `${j.kind === "cluster" ? "Round" : "Step"} ${num(r.step)} of ${num(r.max_steps)} · ETA ${dur(r.eta_sec)} · loss ${num(r.train_loss, 3)}` : `Started ${ago(j.started)}`}</div>
+        <div class="muted" style="margin-top:4px" id="live-sub">${sub}</div>
       </div>
       <button class="btn danger sm" id="live-stop">${I.stop} Stop</button>
     </div></div>`;
+}
+// ---- download progress (per source + overall), written by the data scripts through core/progress.py
+const bytes = (n) => {
+  n = +n || 0;
+  for (const u of ["B", "KB", "MB", "GB"]) { if (Math.abs(n) < 1024) return u === "B" ? `${Math.round(n)} B` : `${n.toFixed(1)} ${u}`; n /= 1024; }
+  return `${n.toFixed(1)} TB`;
+};
+const eta = (s) => (s == null ? "—" : s >= 86400 ? `${Math.floor(s / 86400)}d ${Math.floor((s % 86400) / 3600)}h` : dur(s));
+const amount = (n, unit) => (unit === "bytes" ? bytes(n) : `${num(n)} ${esc(unit)}`);
+const PSTATE = { running: ["good", "Downloading"], done: ["accent", "Done"], skipped: ["", "Skipped"], waiting: ["", "Waiting"], stopped: ["warn", "Stopped"], failed: ["bad", "Failed"] };
+function progressCard(p, opts = {}) {
+  if (!p || !p.tasks || !p.tasks.length) return opts.empty ? `<div class="hint">${esc(opts.empty)}</div>` : "";
+  const o = p.overall || {};
+  const live = S.status?.job?.running;
+  const rows = p.tasks.map((t) => {
+    const [cls, word] = PSTATE[t.state] || ["", t.state];
+    const tot = t.total ? ` of ${amount(t.total, t.unit)}` : "";
+    const speed = t.state === "running" && t.speed > 0 ? ` · ${t.unit === "bytes" ? bytes(t.speed) + "/s" : `${num(t.speed * 60, 1)} ${esc(t.unit)}/min`}` : "";
+    return `<div class="dl-row"><div class="row" style="gap:8px;justify-content:space-between"><b>${esc(t.label)}</b><span class="row" style="gap:8px"><span class="mono">${num(t.pct, 1)}%</span><span class="pill ${cls}">${word}</span></span></div>
+      <div class="bar" style="margin:6px 0 4px"><i style="width:${Math.min(100, t.pct || 0)}%"></i></div>
+      <div class="hint">${amount(t.done, t.unit)}${tot}${speed}${t.state === "running" ? ` · ETA ${eta(t.eta)}` : ""}${t.note ? ` · ${esc(t.note)}` : ""}</div></div>`;
+  }).join("");
+  return `<div class="dl">
+    <div class="row" style="gap:16px;align-items:center">
+      ${Charts.ring((o.pct || 0) / 100)}
+      <div style="flex:1;min-width:0"><b>${esc(p.title || "Download")}</b> <span class="muted">${live ? "" : "· last run"}</span>
+        <div class="muted" style="margin-top:4px">${o.done || 0} of ${o.count || 0} sources done${o.current ? ` · now: ${esc(o.current)}` : ""}</div>
+        <div class="muted">${bytes(p.net_bytes)} downloaded${p.net_speed > 0 ? ` at ${bytes(p.net_speed)}/s` : ""}${live ? ` · ETA ${eta(o.eta)}` : ""}</div></div>
+    </div>
+    <div class="dl-rows">${rows}</div></div>`;
+}
+function bindProgress(sel, kinds = ["data"]) {
+  const draw = (s) => { const el = $(sel); if (el && s.job && kinds.includes(s.job.kind)) el.innerHTML = progressCard(s.job.progress, { empty: "No download running. Progress for each source shows here while one runs." }); };
+  const prev = S.onStatus;
+  S.onStatus = (s) => { prev && prev(s); draw(s); };
 }
 function bindLive() {
   const b = $("#live-stop");
@@ -189,7 +228,10 @@ pages.dashboard = async () => {
   Charts.line($("#dash-curves"), Object.entries(a.val_curves).map(([name, pts]) => ({ name, points: pts.map((p) => ({ x: p.step, y: p.loss })) })), { xLabel: "step", empty: "Train a model to see its learning curve" });
   $$("[data-chat]").forEach((b) => (b.onclick = () => { localStorage.setItem("chatModel", b.dataset.chat); location.hash = "#/chat"; }));
   $$("[data-run]").forEach((b) => (b.onclick = () => openRun(b.dataset.run)));
-  S.onStatus = (s) => { if (!!s.job.running !== !!$("#live")) route(); };
+  S.onStatus = (s) => {
+    if (!!s.job.running !== !!$("#live")) return route();
+    if ($("#live") && s.job.kind === "data") { $("#live").outerHTML = liveCard(null); bindLive(); }  // download % and ETA
+  };
 };
 const deviceNote = (dv) => !dv ? "" : `<div class="hint">${dv.gpu ? "⚡ Training and chat run on the GPU" : "Training and chat run on the CPU"}: <b>${esc(dv.name)}</b>${dv.hint ? ` · ${esc(dv.hint)}` : ""} · <a href="#/settings"><u>change</u></a></div>`;
 const kpi = (l, v, ic, sub) => `<div class="card kpi"><div class="ic">${ic}</div><div class="l">${l}</div><div class="v">${v}</div><div class="sub">${sub || ""}</div></div>`;
@@ -447,6 +489,7 @@ async function trainCopilot() {
       <li>Rate answers with ★ to teach it, like any model.</li></ul>
     <p class="hint" style="margin:0">Public code is used under its licence; the list of repositories and their licence texts are kept in <span class="mono">data/code/ATTRIBUTION.md</span>${st.attribution ? " (ready)" : ""}.</p></div></div>
   ${autoCard(st.auto)}
+  <div class="card" style="margin-top:16px"><div class="card-head"><h2>Download progress</h2></div><div id="cp-prog">${S.status.job.kind === "data" ? progressCard(S.status.job.progress, { empty: "No download running." }) : `<div class="hint">No download running.</div>`}</div></div>
   <div class="card" style="margin-top:16px"><div class="card-head"><h2>Log</h2></div><pre class="console" id="cp-log">${esc(S.status.job.kind === "data" ? S.status.job.log : "No data job yet.")}</pre></div>`;
 
   const drawDirs = () => {
@@ -521,6 +564,7 @@ async function trainCopilot() {
   S.onStatus = async (s) => {
     prev && prev(s);
     const l = $("#cp-log"); if (l && s.job.kind === "data") { l.textContent = s.job.log; l.scrollTop = 1e9; }
+    const pg = $("#cp-prog"); if (pg && s.job.kind === "data") pg.innerHTML = progressCard(s.job.progress, { empty: "No download running." });
     if (wasRunning && !s.job.running && $("#cp-sources")) { try { drawSources((await api("/api/code")).sources); } catch {} }
     wasRunning = s.job.running;
   };
@@ -793,6 +837,7 @@ function trainData() {
       <li>Only <b>from-scratch</b> training needs steps 2 and 3. Fine-tuning uses step 4 plus a share of the downloaded books.</li>
       <li>Want your own books in the corpus? Add them under <a href="#/training/texts"><u>Your texts</u></a> → "Add to training data", then re-run steps 2–3.</li>
       <li>Progress and logs show at the top of this page while a step runs.</li></ul></div></div>
+    <div class="card" style="margin-top:16px"><div class="card-head"><h2>Download progress</h2><span class="hint">every source, live</span></div><div id="dprog">${S.status.job.kind === "data" ? progressCard(S.status.job.progress, { empty: "No download running. Progress for each source shows here while one runs." }) : `<div class="hint">No download running. Progress for each source shows here while one runs.</div>`}</div></div>
     <div class="card" style="margin-top:16px"><div class="card-head"><h2>Log</h2></div><pre class="console" id="dlog">${esc(S.status.job.kind === "data" ? S.status.job.log : "No data job yet.")}</pre></div>`;
   $$("[data-step]").forEach((b) => (b.onclick = async () => {
     try {
@@ -812,10 +857,11 @@ function trainData() {
   };
   const prev = S.onStatus;
   S.onStatus = (s) => { prev && prev(s); const l = $("#dlog"); if (l && s.job.kind === "data") { l.textContent = s.job.log; l.scrollTop = 1e9; } };
+  bindProgress("#dprog");
 }
 
 async function trainTexts() {
-  const models = await api("/api/models").catch(() => []);
+  const [models, ocr] = await Promise.all([api("/api/models").catch(() => []), api("/api/texts/ocr").catch(() => null)]);
   const files = [];
   $("#tbody").innerHTML = `<div class="grid g3"><div class="card span2" style="display:flex;flex-direction:column;gap:18px">
     <div><h2>Learn from your own texts</h2><p class="muted" style="margin:4px 0 0">PDF, Word (.doc/.docx), TXT, Markdown or HTML files, links to books and articles, or a whole folder.</p></div>
@@ -836,10 +882,15 @@ async function trainTexts() {
         <label class="field">Old text mixed in, per new token<input class="input" id="x-mix" type="number" min="0" max="10" step="0.5" value="1"><span class="hint">From-scratch models only: keeps them from forgetting. 0 = only the new texts.</span></label>
         <label class="field">Learning rate<input class="input" id="x-lr" type="number" min="0" step="any" value="0"><span class="hint">0 = automatic (0.0003 from scratch, 0.0001 fine-tuned)</span></label></div></details>
     </div>
+    <details><summary>Scanned PDFs (OCR)</summary><div class="grid g2" style="margin-top:8px">
+      <label class="field">Read scanned pages<select class="input" id="x-ocr"><option value="auto">Yes, with OCR when a page has no text</option><option value="off">No, skip scanned pages</option></select>
+        <span class="hint">${ocr && ocr.available ? `Tesseract OCR is installed (${esc((ocr.languages || []).join(", ") || "no languages")}).` : `Tesseract OCR is not installed, so scanned pages are skipped. ${esc(ocr ? ocr.hint : "")}`}</span></label>
+      <label class="field">OCR languages<input class="input" id="x-ocrlang" value="auto" placeholder="auto, or e.g. eng+hye"><span class="hint">auto = ${esc((ocr && ocr.auto) || "eng")}. Tesseract codes joined with +: eng, hye (Armenian), rus …</span></label></div></details>
     <div class="row end"><button class="btn primary" id="x-start">${I.play} Start</button></div>
   </div>
   <div class="card"><h2>Good to know</h2><ul class="muted" style="padding-left:18px">
-    <li>Scanned PDFs have no text layer; run OCR first (e.g. <span class="mono">ocrmypdf</span>).</li>
+    <li>Scanned PDFs (pictures of pages) are read with OCR when Tesseract is installed${ocr && ocr.available ? " (it is)" : ""}; password-protected PDFs must be saved without the password first.</li>
+    <li>Why a file was skipped is shown here and in the job log (lines starting with ✗).</li>
     <li>Old <b>.doc</b> files need LibreOffice installed.</li>
     <li>From-scratch models mix in old data while learning so they don't forget the rest.</li>
     <li>Use texts you have the right to use.</li></ul></div></div>`;
@@ -863,9 +914,11 @@ async function trainTexts() {
     fd.append("action", action); fd.append("model", $("#x-model").value);
     fd.append("passes", $("#x-passes").value); fd.append("delete_local", $("#x-del").checked);
     fd.append("mix", $("#x-mix").value || "1"); fd.append("lr", $("#x-lr").value || "0");
+    fd.append("ocr", $("#x-ocr").value); fd.append("ocr_lang", $("#x-ocrlang").value || "auto");
     try {
-      await api("/api/texts", { method: "POST", body: fd });
+      const r = await api("/api/texts", { method: "POST", body: fd });
       toast(action === "learn" ? "Reading your texts and training…" : "Adding texts to the corpus…", "ok");
+      (r.skipped || []).forEach((s) => toast(`<b>Skipped ${esc(s.file)}</b>: ${esc(s.reason)}`, "err"));
       files.length = 0; drawFiles(); poll();
       if (action === "learn") setTimeout(() => openRun($("#x-model").value), 500);
     } catch (e) { fail(e); }

@@ -6,6 +6,9 @@
     core.commands   check a saved training command before it is run again
     core.backends   which fast (C++/Rust) engines are installed: llama.cpp, tokenizers, faiss, ...
     core.bench      micro-benchmarks for the hot paths
+    core.quiet      mutes harmless library warnings (e.g. "triton not found" on Windows)
 
 Nothing here imports torch at module level, so the Studio starts fast.
 """
+
+from . import quiet  # noqa: E402,F401  (installs the log filters on any `import core...`)

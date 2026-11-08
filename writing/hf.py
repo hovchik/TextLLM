@@ -1,6 +1,8 @@
 """Shared helpers for Hugging Face models on CPU: loading, chat templates, threads, precision."""
 import os
 
+import core.quiet  # noqa: F401  mutes "triton not found" (transformers imports the flop counter)
+
 
 def physical_cores():
     """Physical CPU cores (hyperthreads slow matmuls down). Falls back to logical/2."""

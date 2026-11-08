@@ -492,7 +492,7 @@ Under every answer:
 
 ## How much training is enough
 
-A model trained from scratch only **continues text**: it has never seen an instruction, so "Write a little story" is read as the start of a sentence. Give it the opening instead ("The old fox looked at the river and"). How well it continues depends on its **level** (Dashboard and Runs, from the validation loss):
+A model trained from scratch only **continues text**: it has never seen an instruction. So Chat turns your message into the start of a document for it: with **Short story**, "A lighthouse keeper finds a message in a bottle" becomes a title, a blank line and "Once upon a time," and the answer starts with those opening words (the *setting* and *characters* fields go into the title). Essays and posts get the title only. In **Free chat** a request such as "Write a little story about a fox" is treated the same way; anything else is taken as an opening to continue ("The old fox looked at the river and"). The model can still wander off topic: it writes the kind of text it read most. How well it continues depends on its **level** (Dashboard and Runs, from the validation loss):
 
 | Level (val loss) | What chat looks like |
 |---|---|
@@ -501,7 +501,7 @@ A model trained from scratch only **continues text**: it has never seen an instr
 | 5 Fluent paragraphs (3.0–3.4) | Readable paragraphs; a story keeps its characters for a few sentences. |
 | 6 Stays on topic (below 3.0) | Short stories that mostly hold together. |
 
-Rough budgets: the **cpu** size (~14M weights) with the README's settings (16 × 4 × 256 ≈ 16k tokens per step) needs about **20,000 steps** (≈330M tokens, a few days on a laptop CPU) to reach level 4–5, and it stays a "book-flavoured continuer" at best. Coherent stories from scratch need the **small** size (~110M) trained on a few billion tokens on a GPU, ideally with simple story text mixed in (*More book sources → Cosmopedia, subset stories*). For stories, posts and following instructions on a normal PC, the practical route is a **fine-tuned open model** (section 4.2, e.g. Qwen3-0.6B) with the **Short story** format.
+Rough budgets: the **cpu** size (~14M weights) with the README's settings (16 × 4 × 256 ≈ 16k tokens per step) needs about **20,000 steps** (≈330M tokens, a few days on a laptop CPU) to reach level 4–5, and it stays a "book-flavoured continuer" at best. Coherent stories from scratch need the **small** size (~110M) trained on a few billion tokens on a GPU, ideally with simple story text mixed in (*More book sources → Cosmopedia, subset stories*). The data decides the voice: a corpus that is mostly FineWeb-Edu (web pages) gives web-page answers ("You can use this to learn more…"); for stories, give books and stories the biggest share (Gutenberg, PG-19, Standard Ebooks, Cosmopedia stories) and keep FineWeb small. For stories, posts and following instructions on a normal PC, the practical route is a **fine-tuned open model** (section 4.2, e.g. Qwen3-0.6B) with the **Short story** format.
 
 With **About today's news**, the answer lists the articles it is based on, with links.
 
@@ -611,7 +611,8 @@ See README.md for every option.
 | "CUDA out of memory" | Halve the batch size and double the gradient accumulation. |
 | A PDF gives no text | It's a scan: install Tesseract OCR (see the README) or run `ocrmypdf` first. Password-protected: save it again without the password. The ✗ line in the log says which. |
 | A news source is "skipped until you confirm the rights" | Its license is copyrighted/unknown: tick that you have permission, or remove it. |
-| Chat writes one sentence again and again | The model is small or not trained enough yet (see *How much training is enough* below). Meanwhile open Chat's settings and raise **Avoid repeats** to 1.3 and set **Never repeat a phrase** to 3. From-scratch models only continue text: start with the opening of the story ("Once upon a time, a fox") instead of an instruction ("Write a little story"). |
+| Chat writes one sentence again and again | The model is small or not trained enough yet (see *How much training is enough* below). Meanwhile open Chat's settings and raise **Avoid repeats** to 1.3 and set **Never repeat a phrase** to 3. From-scratch models only continue text: use the **Short story** format, or start Free chat with the story's opening ("Once upon a time, a fox"). |
+| A from-scratch story reads like a web page or an ad | The corpus is mostly web text (FineWeb) and the model is young. Train longer and give books and stories the biggest share of the data (*How much training is enough*). |
 | Chat is slow with a fine-tuned model | Open the run and press **Make fast CPU copy**. |
 | A worker keeps saying "coordinator not reachable" | Check the address and port, and that the coordinator's firewall allows port 7861 (Windows asks once; allow it on private and public networks). From another network use the Internet address only when the card says "Reachable from other networks"; otherwise use Tailscale. The worker retries by itself. |
 | "403 wrong secret" when joining | Copy the secret again from the coordinator's Cluster page; a new secret is made each time a cluster starts unless you set one. |

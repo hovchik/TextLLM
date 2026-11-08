@@ -108,3 +108,35 @@ def test_gguf_ngram_processor_bans_the_repeating_token():
 
     out = _ngram_processor_gguf(3)(np.array([1, 2, 3, 4, 1, 2]), np.zeros(5, dtype=np.float32))
     assert out.dtype == np.float32 and np.isneginf(out[3]) and np.isfinite(out[[0, 1, 2, 4]]).all()
+
+
+@pytest.mark.parametrize("fmt,msg,prompt,shown", [
+    ("story", "A lighthouse keeper finds a message in a bottle.",
+     "A lighthouse keeper finds a message in a bottle\n\nOnce upon a time,", "Once upon a time,"),
+    ("free", "Write a little story about a lighthouse keeper", "A lighthouse keeper\n\nOnce upon a time,", "Once upon a time,"),
+    ("free", "write a little story", "Once upon a time,", "Once upon a time,"),
+    ("free", "Once upon a time a fox", "Once upon a time a fox", None),       # an opening: continue it
+    ("essay", "Write an essay on why cities need trees", "Why cities need trees\n\n", ""),
+])
+def test_scratch_models_get_a_document_opening_not_a_sentence_to_finish(fmt, msg, prompt, shown):
+    from writing import formats as F
+
+    assert F.scratch_opening(fmt, msg) == (prompt, shown)
+
+
+def test_scratch_story_answer_starts_with_the_opening_not_mid_sentence(run_dir):
+    from chat_engine import Engine
+
+    eng = Engine(run_dir.dir)
+    seen = {}
+    real = eng.model.stream
+
+    def spy(ids, *a, **kw):
+        seen["ids"] = ids[0].tolist()
+        return real(ids, *a, **kw)
+
+    eng.model.stream = spy
+    evs = list(eng.write("story", "A lighthouse keeper finds a message in a bottle", {}, [], {"max_tokens": 8}))
+    assert evs[-1]["type"] == "final" and evs[-1]["text"].startswith("Once upon a time,")
+    assert "lighthouse" not in evs[-1]["text"]                         # the title is not part of the answer
+    assert seen["ids"][0] == eng.tok.token_to_id(EOT)                  # starts a new document

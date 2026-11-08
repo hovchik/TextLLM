@@ -166,3 +166,37 @@ def check_code(text):
     c = {"not_empty": bool(body.strip()), "balanced": all(v == 0 for v in depth.values()), "no_loop": worst < 4}
     return {"score": round(100 * sum(c.values()) / len(c), 1), "checks": c,
             "stats": {"chars": len(t), "lines": len(lines)}}
+
+
+# ---------------------------------------------------------------- from-scratch models
+# A model trained from scratch has only seen running text: it continues whatever it is given and
+# has never seen an instruction. Fed "A lighthouse keeper finds a message in a bottle" it simply
+# finishes that sentence ("...bottle or other electronic gym on your desk"), so the answer seems
+# to start mid-sentence. For the writing formats the message is therefore turned into the start
+# of a document: the topic as a title, a blank line, and an opening that fits the format.
+_ASK = re.compile(r"^\s*(?:please\s+)?(?:can you\s+|could you\s+)?(?:write|tell|make|create|generate|give)\s+"
+                  r"(?:me\s+|us\s+)?(?:an?\s+|the\s+|some\s+)?(?:(?:little|short|small|long|nice|new|funny|sad)\s+)*"
+                  r"(?:(story|tale|post|essay|article|poem|caption)s?\b\s*)?(?:(?:about|of|on|where|in which)\s+)?",
+                  re.I)
+OPENINGS = {"story": "Once upon a time,", "essay": "", "news": ""}
+
+
+def scratch_opening(fmt, message, fields=None):
+    """(prompt, shown) for a from-scratch model: prompt is the text the model continues; shown is
+    the part of it that belongs to the answer (the story's opening words). Free chat keeps the
+    message as the opening, unless it is a request such as "write a little story"."""
+    m = _ASK.match(message)
+    asked = bool(m and m.group(0).strip())
+    if fmt == "free" and not asked:
+        return message, None
+    kind = (m.group(1) or "").lower() if asked else ""
+    topic = (message[m.end():] if asked else message).strip().rstrip(".!?:;,").strip()
+    if fmt == "free":
+        fmt = "story" if kind in ("story", "tale", "") else "essay"
+    title = (topic[:1].upper() + topic[1:]) if topic else ""
+    shown = OPENINGS.get(fmt, "")
+    extra = [str(v).strip() for k, v in (fields or {}).items() if k in ("setting", "characters") and str(v).strip()]
+    if fmt == "story" and extra:
+        title = (title + " (" + ", ".join(extra) + ")") if title else ", ".join(extra)
+    prompt = (title + "\n\n" if title else "") + shown
+    return prompt, shown

@@ -16,3 +16,5 @@ rapidfuzz>=3.6,<4
 gguf>=0.10,<1
 # Loss curves and metrics in a browser tab: tensorboard --logdir runs
 tensorboard>=2.16,<3
+# OCR for scanned PDFs under Your texts (also needs the Tesseract program: see README)
+pytesseract>=0.3.10,<1

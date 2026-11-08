@@ -26,20 +26,21 @@ def clean(text):
     if m:
         text = text[: m.start()]
     text = text.replace("\r\n", "\n").replace("\x00", "").replace(EOT, "")
-    text = re.sub(r"-\n(?=[a-z])", "", text)        # re-join words hyphenated across PDF lines
+    # re-join words hyphenated across PDF lines, in any script ("mag-\nnificent", "աղ-\nվես")
+    text = re.sub(r"(?<=[^\W\d_])-\n(?=[^\W\d_])", lambda m: "" if text[m.end()].islower() else m.group(0), text)
     text = re.sub(r"[ \t]+\n", "\n", text)
     text = re.sub(r"\n{3,}", "\n\n", text)
     return text.strip()
 
 
-def from_pdf(path):
-    from pypdf import PdfReader
+PDF_OPTS = {"ocr": "auto", "ocr_lang": "auto"}   # set from --ocr / --ocr-lang
 
-    pages = [p.extract_text() or "" for p in PdfReader(path).pages]
-    text = "\n\n".join(pages)
-    if len(text.strip()) < 50:
-        raise ValueError("no text layer found (scanned PDF?). Run OCR first, e.g. `ocrmypdf in.pdf out.pdf`")
-    return text
+
+def from_pdf(path, log=lambda m: None):
+    """Text of a PDF: several readers, OCR for scanned pages, clear errors (see data/pdftext.py)."""
+    from data import pdftext
+
+    return pdftext.extract(path, ocr=PDF_OPTS["ocr"], ocr_lang=PDF_OPTS["ocr_lang"], log=log)
 
 
 def from_docx(path):
@@ -80,10 +81,10 @@ def from_html(html, url=None):
     return soup.get_text("\n")
 
 
-def from_file(path):
+def from_file(path, log=lambda m: None):
     ext = os.path.splitext(path)[1].lower()
     if ext == ".pdf":
-        return from_pdf(path)
+        return from_pdf(path, log)
     if ext == ".docx":
         return from_docx(path)
     if ext == ".doc":
@@ -100,7 +101,7 @@ def from_file(path):
     raise ValueError(f"unsupported file type {ext}")
 
 
-def from_url(url, tmpdir):
+def from_url(url, tmpdir, log=lambda m: None):
     """Download to a temp file, extract, and leave deletion to the caller (tmpdir is removed)."""
     from core import net
 
@@ -111,7 +112,7 @@ def from_url(url, tmpdir):
     if "pdf" in ctype or name.lower().endswith(".pdf"):
         path = os.path.join(tmpdir, hashlib.md5(url.encode()).hexdigest() + ".pdf")
         open(path, "wb").write(r.content)
-        return from_pdf(path)
+        return from_pdf(path, log)
     if name.lower().endswith(".docx") or "officedocument.wordprocessingml" in ctype:
         path = os.path.join(tmpdir, hashlib.md5(url.encode()).hexdigest() + ".docx")
         open(path, "wb").write(r.content)
@@ -120,6 +121,16 @@ def from_url(url, tmpdir):
         return from_html(r.text, url)
     r.encoding = r.encoding or r.apparent_encoding or "utf-8"
     return r.text
+
+
+def utf8_stdout():
+    """Windows writes a redirected stdout in the ANSI code page (cp1252), which can't encode ✓, ✗ or
+    Armenian file names: printing them crashed the script. Always write UTF-8 (the Studio reads it so)."""
+    for s in (sys.stdout, sys.stderr):
+        try:
+            s.reconfigure(encoding="utf-8", errors="replace")
+        except (AttributeError, ValueError):
+            pass
 
 
 SUPPORTED = {".pdf", ".docx", ".doc", ".html", ".htm"} | TEXT_EXT
@@ -146,7 +157,9 @@ def ingest(files=(), urls=(), out="data/raw/custom", delete_originals=False, log
         sources = [("file", p) for p in files] + [("url", u.strip()) for u in urls if u.strip()]
         for kind, src in sources:
             try:
-                text = clean(from_file(src) if kind == "file" else from_url(src, tmp))
+                if kind == "file" and not os.path.isfile(src):
+                    raise ValueError("file not found" if not os.path.exists(src) else "not a file")
+                text = clean(from_file(src, log) if kind == "file" else from_url(src, tmp, log))
                 if len(text) < 200:
                     raise ValueError("almost no text extracted")
                 f.write(text + f"\n{EOT}\n")
@@ -156,7 +169,7 @@ def ingest(files=(), urls=(), out="data/raw/custom", delete_originals=False, log
                     os.remove(src)
                     log(f"  removed original {src}")
             except Exception as e:
-                log(f"✗ {src}: {e}")
+                log(f"✗ {src}: {e}" if str(e) else f"✗ {src}: {type(e).__name__}")
     if ok == 0:
         os.remove(shard)
         return None, 0, 0
@@ -171,7 +184,12 @@ if __name__ == "__main__":
     ap.add_argument("--url-list", help="text file with one URL per line")
     ap.add_argument("--out", default="data/raw/custom")
     ap.add_argument("--delete-originals", action="store_true")
+    ap.add_argument("--ocr", choices=["auto", "off"], default="auto",
+                    help="auto: read scanned PDF pages with Tesseract OCR when it is installed")
+    ap.add_argument("--ocr-lang", default="auto", help="Tesseract languages, e.g. eng+hye (default: auto)")
     a = ap.parse_args()
+    utf8_stdout()
+    PDF_OPTS.update(ocr=a.ocr, ocr_lang=a.ocr_lang)
     urls = list(a.urls) + ([l for l in open(a.url_list) if l.strip()] if a.url_list else [])
     shard, n, _ = ingest(a.files, urls, a.out, a.delete_originals, log=lambda m: print(m, flush=True))
     sys.exit(0 if shard else 1)

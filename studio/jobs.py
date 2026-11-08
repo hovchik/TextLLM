@@ -41,7 +41,7 @@ def launch(kind, name, cmd, log_path, run=None, cleanup=(), env=None):
                                f"since {time.strftime('%H:%M', time.localtime(ext.get('started', 0)))}). "
                                "Wait for it to finish.")
         os.makedirs(os.path.dirname(log_path), exist_ok=True)
-        logf = open(log_path, "a")
+        logf = open(log_path, "a", encoding="utf-8", errors="replace")
         logf.write(f"\n$ {' '.join(cmd)}\n")
         logf.flush()
         try:  # the last job's progress must not show as this one's
@@ -50,7 +50,9 @@ def launch(kind, name, cmd, log_path, run=None, cleanup=(), env=None):
             pass
         # own process group, so Stop reaches the trainers a job starts, not just the job (graceful.py)
         proc = subprocess.Popen(cmd, cwd=ROOT, stdout=logf, stderr=subprocess.STDOUT,
-                                env={**os.environ, "PYTHONUNBUFFERED": "1", progress.ENV: PROGRESS_PATH, **(env or {})}, **graceful.popen_kwargs())
+                                env={**os.environ, "PYTHONUNBUFFERED": "1", # UTF-8 log on Windows too
+                                     "PYTHONIOENCODING": "utf-8:replace", progress.ENV: PROGRESS_PATH,
+                                     **(env or {})}, **graceful.popen_kwargs())
         with open(LOCK_PATH, "w") as lk:
             lk.write(json.dumps({"pid": proc.pid, "kind": kind, "name": name, "started": time.time()}))
         JOB.update(proc=proc, name=name, kind=kind, log=log_path, run=run, started=time.time(),

@@ -486,6 +486,10 @@ def train(r: TrainReq):
     out = os.path.join(RUNS, name)
     code = r.task == "code"
     resuming_saved = r.resume and os.path.exists(os.path.join(out, "train_cmd.json"))
+    if r.resume and not resuming_saved and ((_read_json(os.path.join(out, "meta.json")) or {}).get("retrained") or {}).get("resumable") is False:
+        # a retrain on your own files and links keeps no copy of them, so it must not quietly go on with other data
+        err(f"{name} was retrained on files and links that were deleted afterwards, so it can't be resumed. "
+            "Start the retrain again (Training → Retrain).", 409)
     if r.mode == "scratch":
         bin_dir, tok_src = ("data/bin-code", "tokenizer/bpe-code.json") if code else ("data/bin", "tokenizer/bpe.json")
         where = "Training → Copilot, steps 1–3" if code else "Training → Data, steps 1–3"
@@ -916,6 +920,83 @@ async def texts(files: list[UploadFile] = File(default=[]), urls: str = Form("")
         cmd += ["--urls", *url_list]
     out = _launch("texts", run or "add texts", cmd, log, run=run, cleanup=saved)
     return {**out, "skipped": skipped}
+
+
+@app.post("/api/retrain")
+async def retrain(files: list[UploadFile] = File(default=[]), model: str = Form(...), name: str = Form(...),
+                  sources: str = Form(""), data_bin: bool = Form(False), urls: str = Form(""), paths: str = Form(""),
+                  delete_local: bool = Form(False), steps: int = Form(0), lr: float = Form(0), mix: float = Form(0.5),
+                  batch: int = Form(0), accum: int = Form(0), gguf: bool = Form(True),
+                  ocr: str = Form("auto"), ocr_lang: str = Form("auto")):
+    """Training → Retrain: a new model that starts from an existing one and learns other data (retrain.py).
+    The original model is never changed."""
+    src = run_dir(model)
+    new = run_name(name, default="")
+    if not new or new != name.strip():
+        err("Give the new model a name: letters, digits, - _ . only.")
+    out = os.path.join(RUNS, new)
+    if out == src:
+        err("Pick a new name: retraining keeps the original model as it is.")
+    if any(os.path.exists(os.path.join(out, f)) for f in ("ckpt.pt", "adapter", "meta.json")):
+        err(f"A model named {new} already exists. Pick another name.", 409)
+    meta = _read_json(os.path.join(src, "meta.json")) or {}
+    kind = meta.get("type")
+    if kind not in ("scratch", "lora"):
+        err(f"{model} can't be retrained (only from-scratch and fine-tuned models).")
+    dirs = [corpus_dir(s) for s in sources.split(",") if s.strip()]
+    if data_bin and kind != "scratch":
+        err("The encoded corpus is for from-scratch models; pick text folders for a fine-tuned model.")
+    bin_dir = os.path.join(ROOT, "data", "bin-code" if meta.get("task") == "code" else "bin")
+    if data_bin and not os.path.exists(os.path.join(bin_dir, "train.bin")):
+        err("There is no encoded corpus yet (Training → Data, step 3).")
+    url_list = [u.strip() for u in urls.splitlines() if u.strip()]
+    path_list = [p.strip().strip('"') for p in paths.splitlines() if p.strip()]
+    for u in url_list:
+        try:
+            core_net.check_url(u)
+        except ValueError as e:
+            err(str(e))
+    up_dir = os.path.join(RUNS, "_uploads", str(int(time.time() * 1000)))
+    saved = []
+    for f in files:
+        if not f.filename:
+            continue
+        os.makedirs(up_dir, exist_ok=True)
+        base = os.path.basename(f.filename.replace("\\", "/")).strip().lstrip(".") or "file"
+        p = os.path.join(up_dir, f"{len(saved)}-{base}")
+        with open(p, "wb") as o:
+            shutil.copyfileobj(f.file, o)
+        saved.append(p)
+    if not (dirs or data_bin or saved or url_list or path_list):
+        err("Choose the new data: corpus folders, the encoded corpus, or your own files and links.")
+    cmd = [PY, "retrain.py", "--from", src, "--out", out, "--mix", str(max(0.0, min(10, mix)))]
+    if dirs:
+        cmd += ["--source", *dirs]
+    if data_bin:
+        cmd += ["--data-bin", bin_dir]
+    if steps > 0:
+        cmd += ["--steps", str(min(steps, 10_000_000))]
+    if lr > 0:
+        cmd += ["--lr", str(lr)]
+    if batch > 0:
+        cmd += ["--batch", str(batch)]
+    if accum > 0:
+        cmd += ["--grad-accum", str(accum)]
+    if gguf and kind == "lora":
+        cmd.append("--gguf")
+    if ocr == "off":
+        cmd += ["--ocr", "off"]
+    lang = re.sub(r"[^a-z_+]", "", (ocr_lang or "").lower())
+    if lang and lang != "auto":
+        cmd += ["--ocr-lang", lang]
+    if saved or path_list:
+        cmd += ["--files", *saved, *path_list]
+        if path_list and delete_local:
+            cmd.append("--delete-originals")
+    if url_list:
+        cmd += ["--urls", *url_list]
+    os.makedirs(out, exist_ok=True)
+    return _launch("training", new, cmd, os.path.join(out, "log.txt"), run=new, cleanup=saved)
 
 
 @app.get("/api/texts/ocr")

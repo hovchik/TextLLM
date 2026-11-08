@@ -3,10 +3,12 @@
 Single GPU:   python train.py --preset small
 Multi-GPU:    torchrun --nproc_per_node=8 train.py --preset 1b --batch 16 --grad-accum 4
 CPU run:      python train.py --preset cpu --vocab 8192 --batch 16 --grad-accum 4 --max-steps 20000 --warmup 500 --eval-every 250 --lr 1e-3
+Several processes on one PC (data parallel, faster for small models on the CPU):
+              python train.py --preset cpu --procs 2      (--procs 0 = auto, --threads N caps the CPU threads)
 Continue:     add --resume (same --out). The model size comes from the checkpoint, so it also works on
               another PC after copying the run folder (see transfer.py).
 """
-import argparse, json, math, os, time
+import argparse, json, math, os, sys, time
 from dataclasses import asdict
 
 import numpy as np
@@ -14,7 +16,7 @@ import torch
 
 import devices
 import graceful
-from core import safeload
+from core import parallel, safeload
 from model.gpt import GPT, GPTConfig, PRESETS
 from writing import hf
 
@@ -37,6 +39,11 @@ def get_args():
     ap.add_argument("--device", default="auto", help="auto (GPU if there is one), cuda, mps, xpu or cpu")
     ap.add_argument("--compile", action="store_true")
     ap.add_argument("--resume", action="store_true")
+    ap.add_argument("--threads", type=int, default=0,
+                    help="CPU threads for the whole run (0 = all physical cores, or TEXTLLM_THREADS)")
+    ap.add_argument("--procs", type=int, default=1,
+                    help="training processes on this PC, each on a slice of the batch (0 = auto; "
+                         "one per GPU on multi-GPU PCs); see core/parallel.py")
     return ap.parse_args()
 
 
@@ -80,17 +87,30 @@ def main():
     graceful.install()
     a = get_args()
     ddp = int(os.environ.get("RANK", -1)) != -1
-    if ddp:
-        import torch.distributed as dist  # only for multi-GPU runs (torchrun); phones' PyTorch may lack it
+    if not ddp:
+        a.device = devices.pick(a.device)
+        gpus = torch.cuda.device_count() if devices.kind(a.device) == "cuda" else 0
+        procs, per = parallel.plan(a.procs, a.threads, devices.kind(a.device), gpus, a.preset)
+        if procs > 1:
+            # Start the processes and wait; each one comes back here with RANK set.
+            print(f"{procs} training processes on this PC, {per} CPU threads each, "
+                  f"micro-batch {parallel.split_batch(a.batch, procs)} each (total {a.batch})", flush=True)
+            sys.exit(parallel.launch(os.path.abspath(__file__), sys.argv[1:], procs, per))
+        if devices.kind(a.device) == "cpu":
+            os.environ["TEXTLLM_THREADS"] = str(per)
+        rank, world = 0, 1
+    else:
+        import torch.distributed as dist  # only for several processes; phones' PyTorch may lack it
         from torch.nn.parallel import DistributedDataParallel as DDP
 
-        dist.init_process_group("nccl")
-        rank, world = dist.get_rank(), dist.get_world_size()
-        a.device = f"cuda:{int(os.environ['LOCAL_RANK'])}"
-        torch.cuda.set_device(a.device)
-    else:
-        rank, world = 0, 1
+        rank, world = int(os.environ["RANK"]), int(os.environ["WORLD_SIZE"])
         a.device = devices.pick(a.device)
+        if devices.kind(a.device) == "cuda":
+            a.device = f"cuda:{int(os.environ.get('LOCAL_RANK', rank))}"
+            torch.cuda.set_device(a.device)
+        dist.init_process_group(parallel.backend(devices.kind(a.device)), rank=rank, world_size=world)
+        if os.environ.get(parallel.ENV_SPLIT) == "1":  # --procs: --batch is the total; torchrun: per GPU
+            a.batch = parallel.split_batch(a.batch, world)
     master = rank == 0
     torch.manual_seed(1337 + rank)
     torch.backends.cuda.matmul.allow_tf32 = True
@@ -100,12 +120,14 @@ def main():
     autocast = devices.autocast(a.device, dtype)
     prec = str(dtype).split(".")[-1]
     if kind == "cpu":
-        hf.set_threads()  # physical cores (or TEXTLLM_THREADS)
+        threads = hf.set_threads()  # physical cores, TEXTLLM_THREADS, or this process's share
         if cpu_ac := devices.cpu_autocast(a.device):
             autocast, prec = cpu_ac, "fp32 + bf16 autocast"
     scaler = devices.grad_scaler(a.device, dtype)  # only active for fp16 (older NVIDIA GPUs)
     if master:
-        print(f"device {a.device}: {devices.describe(a.device)} · {prec}")
+        print(f"device {a.device}: {devices.describe(a.device)} · {prec}"
+              + (f" · {threads} threads" if kind == "cpu" else "")
+              + (f" × {world} processes" if world > 1 else ""))
 
     cfg = GPTConfig(vocab_size=a.vocab, **PRESETS[a.preset])
     step, best = 0, float("inf")
@@ -137,7 +159,7 @@ def main():
         model = torch.compile(model)
     raw = model
     if ddp:
-        model = DDP(model, device_ids=[int(os.environ["LOCAL_RANK"])])
+        model = DDP(model, device_ids=[torch.device(a.device).index] if kind == "cuda" else None)
         raw = model.module
     raw = getattr(raw, "_orig_mod", raw)
 
@@ -169,9 +191,16 @@ def main():
         for _ in range(a.eval_iters):
             x, y = val.next()
             with autocast:
-                losses.append(model(x, y)[1].item())
+                losses.append(raw(x, y)[1].item())
         model.train()
-        return sum(losses) / len(losses)
+        vl = sum(losses) / len(losses)
+        if ddp:  # every process looked at its own batches: report the average
+            t = torch.tensor([vl], dtype=torch.float64)
+            if kind == "cuda":
+                t = t.to(a.device)
+            dist.all_reduce(t)
+            vl = t.item() / world
+        return vl
 
     os.makedirs(a.out, exist_ok=True)
     mlog = open(os.path.join(a.out, "metrics.jsonl"), "a") if master else None

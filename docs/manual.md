@@ -191,6 +191,8 @@ The same progress shows on the command line: `python data/build_corpus.py ...` p
 
 Changing these never breaks a model you already trained: every model keeps the tokenizer it was trained with (`runs/<name>/tokenizer.json`), and its version shows under the model's name in Training → Runs ("tokenizer v1" or "v2"). The replaced tokenizer is kept as `tokenizer/bpe.prev.json`.
 
+![Data step 2: tokenizer options and the quality check](manual/06b-tokenizer-quality.png)
+
 **Quality** (under step 2, after building or after **Check quality**): bytes per token over the checked text (higher = the model reads more text per step; English books are about 3.5 to 4.5), unknown tokens (always 0), round-trip errors (text that does not decode back; always 0 unless something is broken), how much of the vocabulary is used, and encoding speed. A table per writing system shows bytes per token and tokens per word; Armenian should be near English, not 3 to 10 times higher. The *Sample* table shows how fixed sentences (English, Armenian, numbers, code, line breaks) are cut into pieces. After a rebuild, every number also shows what the previous tokenizer had on the same text (*was ...*).
 
 **Step 3 · Encode the corpus.** Turns all text into token files for fast training. *Held out for validation* is the share kept aside to measure validation loss (default 0.5%). While it runs, the *Progress* card and the Dashboard's running-job card show the percent of the corpus encoded, MB done of the total, speed, which file it is on, how many tokens so far and the time left:

@@ -169,7 +169,13 @@ const PSTATE = { running: ["good", "Downloading"], done: ["accent", "Done"], ski
 function tokQuality(q) {
   if (!q) return "";
   const prev = q.previous, pl = prev ? prev.languages || {} : {};
-  const delta = (now, before, better) => (before == null || now == null ? "" : `<span class="hint"> (was ${num(before, 2)}${now === before ? "" : (now > before) === better ? " ↑" : " ↓"})</span>`);
+  // "was" = the tokenizer this one replaced; green when the change is better, red when worse
+  const delta = (now, before, higherIsBetter) => {
+    if (before == null || now == null) return "";
+    const d = Math.round((now - before) * 100) / 100;
+    const mark = d === 0 ? "" : ` <span style="color:var(--${(d > 0) === higherIsBetter ? "good" : "bad"})">${d > 0 ? "▲" : "▼"}</span>`;
+    return `<span class="hint"> (was ${num(before, 2)}${mark})</span>`;
+  };
   const langs = Object.entries(q.languages || {});
   const rows = langs.map(([k, g]) => `<tr><td>${esc(k)}</td><td>${num(g.bytes / 1048576, 2)} MB</td><td>${num(g.bytes_per_token, 2)}${delta(g.bytes_per_token, pl[k]?.bytes_per_token, true)}</td><td>${num(g.tokens_per_word, 2)}${delta(g.tokens_per_word, pl[k]?.tokens_per_word, false)}</td></tr>`).join("");
   const probes = Object.entries(q.probes || {}).map(([k, p]) => `<tr><td>${esc(k)}</td><td>${num(p.tokens)}${prev?.probes?.[k] ? `<span class="hint"> (was ${num(prev.probes[k].tokens)})</span>` : ""}</td><td class="mono" style="white-space:normal;font-size:12px">${(p.pieces || []).slice(0, 16).map((x) => `<span style="border:1px solid var(--border);border-radius:4px;padding:0 3px;margin:1px;display:inline-block">${esc(x).replace(/ /g, "·").replace(/\n/g, "↵")}</span>`).join("")}${p.round_trip ? "" : ' <span class="pill bad">round trip failed</span>'}</td></tr>`).join("");

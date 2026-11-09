@@ -183,7 +183,7 @@ function progressCard(p, opts = {}) {
     <div class="row" style="gap:16px;align-items:center">
       ${Charts.ring((o.pct || 0) / 100)}
       <div style="flex:1;min-width:0"><b>${esc(p.title || "Download")}</b> <span class="muted">${live ? "" : "· last run"}</span>
-        <div class="muted" style="margin-top:4px">${o.done || 0} of ${o.count || 0} ${p.kind === "work" ? "steps" : "sources"} done${o.current ? ` · now: ${esc(o.current)}` : ""}</div>
+        ${p.kind === "work" && o.count === 1 ? "" : `<div class="muted" style="margin-top:4px">${o.done || 0} of ${o.count || 0} ${p.kind === "work" ? "steps" : "sources"} done${o.current ? ` · now: ${esc(o.current)}` : ""}</div>`}
         <div class="muted">${p.kind === "work" ? (live ? `ETA ${eta(o.eta)}` : "") : `${bytes(p.net_bytes)} downloaded${p.net_speed > 0 ? ` at ${bytes(p.net_speed)}/s` : ""}${live ? ` · ETA ${eta(o.eta)}` : ""}`}</div></div>
     </div>
     <div class="dl-rows">${rows}</div></div>`;

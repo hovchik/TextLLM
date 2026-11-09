@@ -136,6 +136,7 @@ function liveCard(run) {
   const r = run && run.name === j.run ? run : null;
   const dl = !r && j.progress && j.progress.tasks && j.progress.tasks.length ? j.progress : null;
   const sub = r ? `${j.kind === "cluster" ? "Round" : "Step"} ${num(r.step)} of ${num(r.max_steps)} · ETA ${dur(r.eta_sec)} · loss ${num(r.train_loss, 3)}`
+    : dl && dl.kind === "work" ? workLine(dl)
     : dl ? `${num(dl.overall.pct, 1)}% · ${dl.overall.done} of ${dl.overall.count} sources${dl.overall.current ? ` · ${esc(dl.overall.current)}` : ""} · ${bytes(dl.net_bytes)} downloaded · ETA ${eta(dl.overall.eta)}`
     : `Started ${ago(j.started)}`;
   return `<div class="card live" id="live">
@@ -156,30 +157,39 @@ const bytes = (n) => {
 };
 const eta = (s) => (s == null ? "—" : s >= 86400 ? `${Math.floor(s / 86400)}d ${Math.floor((s % 86400) / 3600)}h` : dur(s));
 const amount = (n, unit) => (unit === "bytes" ? bytes(n) : `${num(n)} ${esc(unit)}`);
+// a local step (encoding, tokenizer): the running task's amount, speed and note instead of network figures
+function workLine(p) {
+  const t = p.tasks.find((x) => x.state === "running") || p.tasks[p.tasks.length - 1];
+  const amt = t.total ? `${amount(t.done, t.unit)} of ${amount(t.total, t.unit)}` : "";
+  const sp = t.speed > 0 ? (t.unit === "bytes" ? `${bytes(t.speed)}/s` : `${num(t.speed * 60, 1)} ${esc(t.unit)}/min`) : "";
+  return [`${num(p.overall.pct, 1)}%`, esc(t.label), amt, sp, t.note ? esc(t.note) : "", `ETA ${eta(t.eta ?? p.overall.eta)}`].filter(Boolean).join(" · ");
+}
 const PSTATE = { running: ["good", "Downloading"], done: ["accent", "Done"], skipped: ["", "Skipped"], waiting: ["", "Waiting"], stopped: ["warn", "Stopped"], failed: ["bad", "Failed"] };
 function progressCard(p, opts = {}) {
   if (!p || !p.tasks || !p.tasks.length) return opts.empty ? `<div class="hint">${esc(opts.empty)}</div>` : "";
   const o = p.overall || {};
   const live = S.status?.job?.running;
   const rows = p.tasks.map((t) => {
-    const [cls, word] = PSTATE[t.state] || ["", t.state];
+    const [cls, w0] = PSTATE[t.state] || ["", t.state];
+    const word = t.state === "running" && t.verb ? t.verb : w0;
     const tot = t.total ? ` of ${amount(t.total, t.unit)}` : "";
+    const amt = t.total || t.done ? amount(t.done, t.unit) + tot : "";
     const speed = t.state === "running" && t.speed > 0 ? ` · ${t.unit === "bytes" ? bytes(t.speed) + "/s" : `${num(t.speed * 60, 1)} ${esc(t.unit)}/min`}` : "";
     return `<div class="dl-row"><div class="row" style="gap:8px;justify-content:space-between"><b>${esc(t.label)}</b><span class="row" style="gap:8px"><span class="mono">${num(t.pct, 1)}%</span><span class="pill ${cls}">${word}</span></span></div>
       <div class="bar" style="margin:6px 0 4px"><i style="width:${Math.min(100, t.pct || 0)}%"></i></div>
-      <div class="hint">${amount(t.done, t.unit)}${tot}${speed}${t.state === "running" ? ` · ETA ${eta(t.eta)}` : ""}${t.note ? ` · ${esc(t.note)}` : ""}</div></div>`;
+      <div class="hint">${[amt + speed, t.state === "running" && (t.total || t.eta != null) ? `ETA ${eta(t.eta)}` : "", t.note ? esc(t.note) : ""].filter(Boolean).join(" · ")}</div></div>`;
   }).join("");
   return `<div class="dl">
     <div class="row" style="gap:16px;align-items:center">
       ${Charts.ring((o.pct || 0) / 100)}
       <div style="flex:1;min-width:0"><b>${esc(p.title || "Download")}</b> <span class="muted">${live ? "" : "· last run"}</span>
-        <div class="muted" style="margin-top:4px">${o.done || 0} of ${o.count || 0} sources done${o.current ? ` · now: ${esc(o.current)}` : ""}</div>
-        <div class="muted">${bytes(p.net_bytes)} downloaded${p.net_speed > 0 ? ` at ${bytes(p.net_speed)}/s` : ""}${live ? ` · ETA ${eta(o.eta)}` : ""}</div></div>
+        ${p.kind === "work" && o.count === 1 ? "" : `<div class="muted" style="margin-top:4px">${o.done || 0} of ${o.count || 0} ${p.kind === "work" ? "steps" : "sources"} done${o.current ? ` · now: ${esc(o.current)}` : ""}</div>`}
+        <div class="muted">${p.kind === "work" ? (live ? `ETA ${eta(o.eta)}` : "") : `${bytes(p.net_bytes)} downloaded${p.net_speed > 0 ? ` at ${bytes(p.net_speed)}/s` : ""}${live ? ` · ETA ${eta(o.eta)}` : ""}`}</div></div>
     </div>
     <div class="dl-rows">${rows}</div></div>`;
 }
 function bindProgress(sel, kinds = ["data"]) {
-  const draw = (s) => { const el = $(sel); if (el && s.job && kinds.includes(s.job.kind)) el.innerHTML = progressCard(s.job.progress, { empty: "No download running. Progress for each source shows here while one runs." }); };
+  const draw = (s) => { const el = $(sel); if (el && s.job && kinds.includes(s.job.kind)) el.innerHTML = progressCard(s.job.progress, { empty: "Nothing running. Progress for each download source, the tokenizer and encoding shows here while they run." }); };
   const prev = S.onStatus;
   S.onStatus = (s) => { prev && prev(s); draw(s); };
 }
@@ -513,7 +523,7 @@ async function trainCopilot() {
       <li>Rate answers with ★ to teach it, like any model.</li></ul>
     <p class="hint" style="margin:0">Public code is used under its licence; the list of repositories and their licence texts are kept in <span class="mono">data/code/ATTRIBUTION.md</span>${st.attribution ? " (ready)" : ""}.</p></div></div>
   ${autoCard(st.auto)}
-  <div class="card" style="margin-top:16px"><div class="card-head"><h2>Download progress</h2></div><div id="cp-prog">${S.status.job.kind === "data" ? progressCard(S.status.job.progress, { empty: "No download running." }) : `<div class="hint">No download running.</div>`}</div></div>
+  <div class="card" style="margin-top:16px"><div class="card-head"><h2>Progress</h2></div><div id="cp-prog">${S.status.job.kind === "data" ? progressCard(S.status.job.progress, { empty: "Nothing running." }) : `<div class="hint">Nothing running.</div>`}</div></div>
   <div class="card" style="margin-top:16px"><div class="card-head"><h2>Log</h2></div><pre class="console" id="cp-log">${esc(S.status.job.kind === "data" ? S.status.job.log : "No data job yet.")}</pre></div>`;
 
   const drawDirs = () => {
@@ -588,7 +598,7 @@ async function trainCopilot() {
   S.onStatus = async (s) => {
     prev && prev(s);
     const l = $("#cp-log"); if (l && s.job.kind === "data") { l.textContent = s.job.log; l.scrollTop = 1e9; }
-    const pg = $("#cp-prog"); if (pg && s.job.kind === "data") pg.innerHTML = progressCard(s.job.progress, { empty: "No download running." });
+    const pg = $("#cp-prog"); if (pg && s.job.kind === "data") pg.innerHTML = progressCard(s.job.progress, { empty: "Nothing running." });
     if (wasRunning && !s.job.running && $("#cp-sources")) { try { drawSources((await api("/api/code")).sources); } catch {} }
     wasRunning = s.job.running;
   };
@@ -861,7 +871,7 @@ function trainData() {
       <li>Only <b>from-scratch</b> training needs steps 2 and 3. Fine-tuning uses step 4 plus a share of the downloaded books.</li>
       <li>Want your own books in the corpus? Add them under <a href="#/training/texts"><u>Your texts</u></a> → "Add to training data", then re-run steps 2–3.</li>
       <li>Progress and logs show at the top of this page while a step runs.</li></ul></div></div>
-    <div class="card" style="margin-top:16px"><div class="card-head"><h2>Download progress</h2><span class="hint">every source, live</span></div><div id="dprog">${S.status.job.kind === "data" ? progressCard(S.status.job.progress, { empty: "No download running. Progress for each source shows here while one runs." }) : `<div class="hint">No download running. Progress for each source shows here while one runs.</div>`}</div></div>
+    <div class="card" style="margin-top:16px"><div class="card-head"><h2>Progress</h2><span class="hint">download, tokenizer and encoding, live</span></div><div id="dprog">${S.status.job.kind === "data" ? progressCard(S.status.job.progress, { empty: "Nothing running. Progress for each download source, the tokenizer and encoding shows here while they run." }) : `<div class="hint">Nothing running. Progress for each download source, the tokenizer and encoding shows here while they run.</div>`}</div></div>
     <div class="card" style="margin-top:16px"><div class="card-head"><h2>Log</h2></div><pre class="console" id="dlog">${esc(S.status.job.kind === "data" ? S.status.job.log : "No data job yet.")}</pre></div>`;
   $$("[data-step]").forEach((b) => (b.onclick = async () => {
     try {

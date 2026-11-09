@@ -84,6 +84,21 @@ def has_llama_cpp():
         return False
 
 
+def gguf_gpu_layers():
+    """Layers llama.cpp puts on the GPU: all of them (-1) when the installed llama-cpp-python was
+    built with GPU support (CUDA, Vulkan or SYCL, e.g. for Intel Arc), else 0. The prebuilt wheel
+    run.py installs is CPU-only, so this is 0 unless you built it yourself. Choosing CPU in
+    Settings (TEXTLLM_DEVICE=cpu) or TEXTLLM_GGUF_GPU=0 keeps it on the CPU."""
+    if os.environ.get("TEXTLLM_GGUF_GPU") == "0" or (os.environ.get("TEXTLLM_DEVICE") or "").lower() == "cpu":
+        return 0
+    try:
+        import llama_cpp
+
+        return -1 if llama_cpp.llama_supports_gpu_offload() else 0
+    except Exception:
+        return 0
+
+
 # Anti-repetition defaults when neither the format nor the user set them. Models trained from
 # scratch here are small (a few million to ~100M weights) and, unlike Qwen, were never taught to
 # avoid loops, so they get firmer settings: without them a young model often writes one sentence
@@ -183,7 +198,7 @@ class Engine:
 
             self.gguf = g
             self.model = Llama(model_path=g, n_ctx=int(os.environ.get("TEXTLLM_CTX", 4096)),
-                               n_threads=hf.physical_cores(), verbose=False)
+                               n_threads=hf.physical_cores(), n_gpu_layers=gguf_gpu_layers(), verbose=False)
         else:
             from peft import PeftModel
 

@@ -44,9 +44,13 @@ def smoke(name):
         import torch
         x = torch.randn(64, 64, requires_grad=True)
         (x @ x).sum().backward()
-        dev = "cuda" if torch.cuda.is_available() else ("mps" if torch.backends.mps.is_available() else "cpu")
+        xpu = getattr(torch, "xpu", None)
+        dev = "cuda" if torch.cuda.is_available() else ("xpu" if xpu and xpu.is_available() else
+                                                         "mps" if torch.backends.mps.is_available() else "cpu")
         if dev == "cuda":
             return f"GPU: {torch.cuda.get_device_name(0)}"
+        if dev == "xpu":
+            return f"Intel GPU: {xpu.get_device_name(0)}"
         return f"device: {dev}"
     if name == "transformers":
         from transformers import AutoConfig  # noqa: F401

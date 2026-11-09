@@ -1384,8 +1384,8 @@ def settings(r: SettingsReq):
     kw = {k: v for k, v in r.model_dump().items() if v is not None}
     if "device" in kw:
         kw["device"] = kw["device"].strip().lower() or "auto"
-        if not re.fullmatch(r"auto|cpu|mps|xpu|cuda(:\d)?", kw["device"]):
-            err("device must be auto, cpu, cuda, cuda:N, mps or xpu")
+        if not re.fullmatch(r"auto|cpu|mps|(xpu|cuda)(:\d)?", kw["device"]):
+            err("device must be auto, cpu, cuda, cuda:N, mps, xpu or xpu:N")
     for k, lo, hi in (("feedback_epochs", 0.5, 20), ("feedback_lr", 1e-7, 1e-2), ("feedback_beta", 0.01, 2)):
         if k in kw:
             kw[k] = max(lo, min(hi, kw[k]))

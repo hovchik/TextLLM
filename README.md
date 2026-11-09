@@ -21,16 +21,24 @@ Training and chat use the GPU automatically when there is one; nothing to set in
 |---|---|
 | **NVIDIA** (GeForce GTX 10xx and newer, RTX, laptop GPUs) | `run.bat` / `run.sh` finds it with `nvidia-smi` and installs the CUDA build of PyTorch (CUDA 13 or 12.8 depending on the driver, 11.8 for very old drivers). If you installed the CPU build earlier, the next run swaps it (a ~2.5 GB download). RTX 30xx and newer train in bf16, older cards in fp16 with loss scaling. |
 | **Apple Silicon Mac** | Uses the Apple GPU (MPS) with the normal install. |
-| **Intel Arc** | `run.py --torch-index xpu` (experimental). |
-| **AMD Radeon / Intel integrated** | No PyTorch GPU support on Windows, so it trains on the CPU. On Linux, AMD works with `--torch-index rocm6.2`. |
+| **Intel Arc** (A-series, B-series, Core Ultra "Arc Graphics") | `run.bat` / `run.sh` finds it and installs the Intel (XPU) build of PyTorch; force it with `--xpu`. Trains in bf16. No 4-bit loading or Liger kernels (NVIDIA-only). See [Intel Arc GPUs](#intel-arc-gpus). |
+| **AMD Radeon / older Intel integrated (UHD, Iris Xe)** | No PyTorch GPU support on Windows, so it trains on the CPU. On Linux, AMD works with `--torch-index rocm6.2`. |
 
-If the GPU isn't used: update the NVIDIA driver (https://www.nvidia.com/Download/index.aspx), then `run.bat --reinstall`. On laptops with two GPUs, plug in the charger and set Windows *Settings → Display → Graphics* to "High performance" for Python. To force the CPU, use `run.bat --cpu` or set `TEXTLLM_DEVICE=cpu`; every script also takes `--device cuda|mps|cpu`.
+If the GPU isn't used: update the NVIDIA driver (https://www.nvidia.com/Download/index.aspx), then `run.bat --reinstall`. On laptops with two GPUs, plug in the charger and set Windows *Settings → Display → Graphics* to "High performance" for Python. To force the CPU, use `run.bat --cpu` or set `TEXTLLM_DEVICE=cpu`; every script also takes `--device cuda|xpu|mps|cpu`.
 
 **What fits in laptop GPU memory (VRAM):**
 - 4 GB: from scratch with the `cpu` size (fast, minutes per 1,000 steps); LoRA on `Qwen/Qwen3-0.6B` with batch 2, seq 512.
 - 6–8 GB: from scratch with `small` (110M) using batch 4, grad-accum 32; LoRA on Qwen3-0.6B batch 8, or Qwen3-1.7B batch 2.
 - 12 GB+: `small` with batch 8–16; LoRA on Qwen3-1.7B batch 8.
 If you see "CUDA out of memory", halve the batch and double the gradient accumulation (same tokens per step).
+
+### Intel Arc GPUs
+PyTorch runs on Intel Arc through its **XPU** backend (PyTorch 2.5+). Supported: Arc A-series (A310, A380, A580, A750, A770 and the laptop A370M–A770M), Arc B-series (B570, B580) and the "Intel Arc Graphics" built into Core Ultra laptop chips. Older Intel graphics (UHD, Iris Xe) are not supported and stay on the CPU.
+
+- **Install:** `run.bat` / `run.sh` finds an Arc card by name (Windows: the video adapter list; Linux: `lspci`) and installs the XPU build of PyTorch from download.pytorch.org. A CPU build installed earlier is swapped on the next run. Force it with `run.bat --xpu`. Only the graphics driver is needed (Windows: the Intel Arc & Iris Xe driver; Linux: Intel's client GPU packages, https://dgpu-docs.intel.com/driver/client/overview.html), no oneAPI toolkit.
+- **What runs on it:** from-scratch training (bf16 autocast), LoRA fine-tunes of Qwen (base weights in bf16), chat with both kinds of model, and cluster workers (`run.bat --join …` on an Arc PC uses the card). Cards or drivers without bf16 train in fp32.
+- **What doesn't:** 4-bit/8-bit loading (bitsandbytes) and Liger/Triton kernels are NVIDIA-only and aren't installed; fine-tunes load the base model in bf16 instead, so a 16 GB A770 still fits Qwen3-1.7B LoRA. GGUF chat (llama.cpp) runs on the CPU with the prebuilt wheel; it uses the Arc card automatically if you build llama-cpp-python yourself with Vulkan (`set CMAKE_ARGS=-DGGML_VULKAN=on` then `pip install --force-reinstall --no-binary llama-cpp-python llama-cpp-python`, needs the Vulkan SDK and a C++ compiler). Several Arc cards in one PC train with one process (multi-GPU is NVIDIA-only here); pick a card under Settings → Hardware (`xpu`, `xpu:1`).
+- **Memory:** an 8 GB A750/A580/B570 fits what the 6–8 GB line below says; a 12 GB B580 or 16 GB A770 fits the 12 GB+ line. Core Ultra laptop graphics share system RAM; how much faster they are than the CPU cores depends on the chip, so compare a few hundred steps on both.
 
 Runs move freely between GPU and CPU PCs: checkpoints load on the CPU first and then move to whatever device the new PC has, so **Resume** and **Import** work in both directions.
 
@@ -49,7 +57,7 @@ python app.py        # open http://127.0.0.1:7860
 |---|---|---|
 | `requirements.txt` | always | PyTorch, transformers, peft, accelerate, datasets, tokenizers, safetensors, the Studio and the text extractors |
 | `requirements-ai.txt` | always (skip with `--lite`) | trl, lm-eval, sentence-transformers, faiss-cpu, datasketch, rapidfuzz, gguf, tensorboard |
-| `requirements-gpu.txt` | an NVIDIA GPU is found (or `--gpu`) | bitsandbytes, liger-kernel (Linux only) |
+| `requirements-gpu.txt` | an NVIDIA GPU is found (or `--gpu`); not on Intel Arc | bitsandbytes, liger-kernel (Linux only) |
 
 Version ranges have upper bounds, so a future major release can't break a working install.
 

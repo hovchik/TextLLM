@@ -1,7 +1,12 @@
 """Pick the fastest device this PC has, and the matching precision.
 
-Order: NVIDIA GPU (CUDA, also AMD on Linux via ROCm builds), Intel GPU (XPU), Apple GPU (MPS), CPU.
-Override with --device on any script, or the TEXTLLM_DEVICE environment variable (cpu, cuda, cuda:1, mps, xpu).
+Order: NVIDIA GPU (CUDA, also AMD on Linux via ROCm builds), Intel Arc GPU (XPU), Apple GPU (MPS), CPU.
+Override with --device on any script, or the TEXTLLM_DEVICE environment variable (cpu, cuda, cuda:1, mps,
+xpu, xpu:1).
+
+Intel Arc (XPU) differs from NVIDIA in a few places, handled here: bf16 is used when the card reports
+it (Arc A/B-series do; some Core Ultra iGPUs with old drivers don't, those train in fp32), fp16 loss
+scaling uses torch.amp.GradScaler("xpu"), and several Arc cards are counted with torch.xpu.
 
 Checkpoints are always loaded with map_location="cpu" and then moved, so a run saved on a GPU
 continues on a CPU and the other way round.
@@ -21,6 +26,21 @@ def _xpu_ok(torch):
     x = getattr(torch, "xpu", None)
     try:
         return bool(x and x.is_available())
+    except Exception:
+        return False
+
+
+def _xpu_count(torch):
+    try:
+        return torch.xpu.device_count() if _xpu_ok(torch) else 0
+    except Exception:
+        return 0
+
+
+def _xpu_bf16(torch):
+    try:
+        f = getattr(torch.xpu, "is_bf16_supported", None)
+        return bool(f()) if f else True  # torch 2.5 has no check; every Arc dGPU has bf16
     except Exception:
         return False
 
@@ -57,7 +77,7 @@ def train_dtype(dev):
     if k == "cuda":
         return torch.bfloat16 if torch.cuda.is_bf16_supported() else torch.float16
     if k == "xpu":
-        return torch.bfloat16
+        return torch.bfloat16 if _xpu_bf16(torch) else torch.float32
     return torch.float32
 
 
@@ -97,7 +117,13 @@ def grad_scaler(dev, dtype):
     """A GradScaler that only does something for fp16 (bf16/fp32 don't need loss scaling)."""
     import torch
 
-    on = kind(dev) == "cuda" and dtype == torch.float16
+    k = kind(dev)
+    on = k in ("cuda", "xpu") and dtype == torch.float16
+    if k == "xpu":
+        try:
+            return torch.amp.GradScaler("xpu", enabled=on)
+        except Exception:  # torch < 2.6 has no XPU GradScaler; fp16 isn't picked on XPU anyway
+            return torch.amp.GradScaler("cpu", enabled=False)
     try:
         return torch.amp.GradScaler("cuda", enabled=on)
     except (AttributeError, TypeError):  # torch < 2.3
@@ -115,7 +141,10 @@ def describe(dev):
             p = torch.cuda.get_device_properties(i)
             return f"{p.name} ({p.total_memory / 2**30:.1f} GB)"
         if k == "xpu":
-            return torch.xpu.get_device_name(0)
+            i = torch.device(dev).index or 0
+            p = torch.xpu.get_device_properties(i)
+            mem = getattr(p, "total_memory", 0)
+            return f"{p.name} ({mem / 2**30:.1f} GB)" if mem else p.name
         if k == "mps":
             return "Apple GPU (Metal)"
     except Exception:
@@ -130,11 +159,28 @@ def info():
     except ImportError:
         return {"device": "cpu", "name": "CPU", "gpu": False, "hint": "PyTorch is not installed"}
     dev = pick()
+    xpu_build = bool(getattr(torch.version, "xpu", None))
     out = {"device": kind(dev), "name": describe(dev), "gpu": kind(dev) != "cpu", "torch": torch.__version__,
-           "cuda_build": bool(torch.version.cuda)}
+           "cuda_build": bool(torch.version.cuda), "xpu_build": xpu_build}
     if not out["gpu"] and not torch.version.cuda and _nvidia_present():
         out["hint"] = "An NVIDIA GPU is present but this PyTorch is the CPU build. Run run.bat / run.sh again to switch."
+    elif not out["gpu"] and not xpu_build:
+        arc = _arc_present()
+        if arc:
+            out["arc"] = arc
+            out["hint"] = (f"An Intel Arc GPU ({arc}) is present but this PyTorch can't use it. "
+                           "Close the Studio and run run.bat --xpu (./run.sh --xpu on Linux).")
+    elif not out["gpu"] and xpu_build:
+        out["hint"] = ("This PyTorch is the Intel Arc (XPU) build but sees no Arc GPU. "
+                       "Update the Intel graphics driver, then restart the Studio.")
+    if kind(dev) == "xpu":
+        out["notes"] = XPU_LIMITS
     return out
+
+
+XPU_LIMITS = ("On Intel Arc, 4-bit loading (bitsandbytes) and Liger kernels are NVIDIA-only and are skipped; "
+              "LoRA fine-tunes load the base model in bf16. GGUF chat (llama.cpp) runs on the CPU unless "
+              "llama-cpp-python was built with Vulkan or SYCL.")
 
 
 def available():
@@ -149,8 +195,8 @@ def available():
             out.append({"id": f"cuda:{i}" if i else "cuda", "name": describe(f"cuda:{i}")})
     except Exception:
         pass
-    if _xpu_ok(torch):
-        out.append({"id": "xpu", "name": describe("xpu")})
+    for i in range(_xpu_count(torch)):
+        out.append({"id": f"xpu:{i}" if i else "xpu", "name": describe(f"xpu:{i}")})
     if _mps_ok(torch):
         out.append({"id": "mps", "name": describe("mps")})
     return out
@@ -166,3 +212,20 @@ def _nvidia_present():
         return subprocess.run([exe, "-L"], capture_output=True, timeout=10).returncode == 0
     except Exception:
         return False
+
+
+def _arc_present():
+    """Name of the first Intel Arc GPU on this PC, or None. Cached: asking Windows takes a second."""
+    global _ARC
+    if _ARC is None:
+        try:
+            from core import gpuprobe
+
+            found = gpuprobe.intel_arc_gpus()
+        except Exception:
+            found = []
+        _ARC = found[0][0] if found else ""
+    return _ARC or None
+
+
+_ARC = None

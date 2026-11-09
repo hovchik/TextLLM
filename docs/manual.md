@@ -54,12 +54,14 @@ Useful options for `run.bat` / `run.sh` / `run.py`:
 | `--port 8000` | use another port (if 7860 is busy the next free port is used anyway) |
 | `--host 0.0.0.0` | let other devices on your network open the Studio |
 | `--no-browser` | don't open the browser |
-| `--gpu` / `--cpu` | force the CUDA (NVIDIA) or the CPU build of PyTorch |
+| `--gpu` / `--xpu` / `--cpu` | force the CUDA (NVIDIA), the Intel Arc (XPU) or the CPU build of PyTorch |
 | `--torch-index cu128` | pick an exact PyTorch build (also `xpu`, `rocm6.2`) |
 | `--reinstall` | reinstall all packages |
 | `--no-venv` | use your current Python instead of `.venv` |
 
-**GPU.** With an NVIDIA graphics card, `run.bat` finds it with `nvidia-smi` and installs the CUDA build of PyTorch automatically. Apple Silicon Macs use the Apple GPU. Everything else trains on the CPU. Which device is used is shown on the Dashboard and can be changed under Settings → Hardware (section 18).
+**GPU.** With an NVIDIA graphics card, `run.bat` finds it with `nvidia-smi` and installs the CUDA build of PyTorch automatically. With an **Intel Arc** card (A-series, B-series, or the Arc graphics in Core Ultra laptops) it installs PyTorch's Intel (XPU) build instead; only the Intel graphics driver is needed. Apple Silicon Macs use the Apple GPU. Everything else (including older Intel UHD / Iris Xe graphics) trains on the CPU.
+
+On Intel Arc, from-scratch training, LoRA fine-tunes, chat and cluster workers all use the card (bf16). Not available there: 4-bit loading (bitsandbytes) and Liger kernels, which are NVIDIA-only, so LoRA keeps the base model in bf16; and GGUF chat stays on the CPU unless llama-cpp-python is built with Vulkan. Which device is used is shown on the Dashboard and can be changed under Settings → Hardware (section 18).
 
 These installer flags are the only options that are not in the Studio itself, because they run before the Studio starts. Every other script option has a control in the web app.
 
@@ -376,7 +378,7 @@ After deleting a source, run Data step 3 (Encode) again so from-scratch training
 
 # 12. Training: Cluster (several PCs train one model)
 
-Several computers, at home or anywhere on the internet, can train **one** from-scratch model together. Every PC uses what it has: an NVIDIA GPU, an Apple GPU or just the CPU. One PC is the **coordinator**: it holds the prepared data and the model. The others are **workers**.
+Several computers, at home or anywhere on the internet, can train **one** from-scratch model together. Every PC uses what it has: an NVIDIA GPU, an Intel Arc GPU, an Apple GPU or just the CPU. One PC is the **coordinator**: it holds the prepared data and the model. The others are **workers**.
 
 ![A running cluster with three PCs](manual/12d-cluster.png)
 
@@ -388,7 +390,7 @@ Several computers, at home or anywhere on the internet, can train **one** from-s
 2. Training → **Cluster** → *Start a cluster on this PC*: name, model size, rounds, minutes per round, learning rate, port (7861). Leave **This PC trains too** on to use this PC as a worker as well, and **Let PCs on other networks join** on if any PC is somewhere else.
 3. Press **Start the cluster**. The card at the top shows the addresses and the secret, plus a ready-made command for other PCs, with a **Copy** button. Pick the address the other PC can reach: **Internet** (any network), **Tailscale** (any network, both PCs on Tailscale) or **Same network**.
 
-**Join from another PC:** either open its Studio → Training → Cluster → *Join a cluster*, paste the address and secret, and press **Join**; or, on a PC without the Studio, run `run.bat --join http://ADDRESS:7861 --secret SECRET` (`./run.sh` on Linux/macOS). The first run installs everything, including the GPU build of PyTorch when there is an NVIDIA card. The worker downloads its share of the text once (200 MB by default, resumable), then trains. **Leave** (or Ctrl+C) takes it out; it can rejoin at any time.
+**Join from another PC:** either open its Studio → Training → Cluster → *Join a cluster*, paste the address and secret, and press **Join**; or, on a PC without the Studio, run `run.bat --join http://ADDRESS:7861 --secret SECRET` (`./run.sh` on Linux/macOS). The first run installs everything, including the GPU build of PyTorch when there is an NVIDIA or Intel Arc card. The worker downloads its share of the text once (200 MB by default, resumable), then trains. **Leave** (or Ctrl+C) takes it out; it can rejoin at any time.
 
 ![This PC helping a cluster](manual/12e-cluster-join.png)
 
@@ -564,7 +566,7 @@ Each row shows the person, their role (change it in the drop-down; you can't cha
 - **Profile:** your display name.
 - **Chat defaults:** the model Chat opens with, creativity and maximum length.
 - **Password:** current password and a new one twice. Other devices get signed out.
-- **Hardware** (admins only): **Train and chat on** automatic, CPU, or a specific GPU. It applies to the next training job and reloads chat models. If you have an NVIDIA card but only the CPU build of PyTorch is installed, the hint tells you to close the Studio and run `run.bat --gpu`.
+- **Hardware** (admins only): **Train and chat on** automatic, CPU, or a specific GPU. It applies to the next training job and reloads chat models. Intel Arc cards appear as `xpu` (and `xpu:1` for a second card). If you have an NVIDIA card but only the CPU build of PyTorch is installed, the hint tells you to close the Studio and run `run.bat --gpu`; for an Intel Arc card it says `run.bat --xpu`. On an Arc card the hint also lists what runs on the CPU instead.
 - **Links** (admins only): **Allow links to the local network**. Off by default: links you give in Your texts, news sources and style imports are only read from public internet addresses, never from this PC, the router or other PCs on your network (this matters when the Studio is reachable from the internet). Turn it on to read from a NAS or an intranet site.
 - **Fast engines** (admins only): which compiled libraries are installed (llama.cpp for fast GGUF chat, the Rust tokenizer, faiss, ctranslate2, onnxruntime) and the pip command for each missing one. Everything works without them; they make parts faster.
 
@@ -617,7 +619,7 @@ See README.md for every option.
 | "Prepare the training data first" | Run Data steps 1–3 before training from scratch. |
 | Resumed model writes nonsense after a corpus change | The tokenizer was rebuilt. Restore the old one (each run keeps a copy as `runs/<name>/tokenizer.json`; copy it to `tokenizer/bpe.json`) and run Data step 3 again. Or use **Retrain** with corpus folders: it encodes them with the model's own tokenizer. |
 | Retrain: "not this model's tokenizer" | The encoded corpus was made with a different tokenizer than the model. Untick *The whole encoded corpus* and tick the corpus folders instead. |
-| The GPU isn't used | Update the NVIDIA driver, then `run.bat --reinstall` (or `--gpu`). Check Settings → Hardware. On laptops, plug in the charger and set Windows Graphics to "High performance" for Python. |
+| The GPU isn't used | Update the NVIDIA driver (Intel Arc: the Intel graphics driver), then `run.bat --reinstall` (or `--gpu` / `--xpu`). Check Settings → Hardware. On laptops, plug in the charger and set Windows Graphics to "High performance" for Python. |
 | "CUDA out of memory" | Halve the batch size and double the gradient accumulation. |
 | A PDF gives no text | It's a scan: install Tesseract OCR (see the README) or run `ocrmypdf` first. Password-protected: save it again without the password. The ✗ line in the log says which. |
 | A news source is "skipped until you confirm the rights" | Its license is copyrighted/unknown: tick that you have permission, or remove it. |

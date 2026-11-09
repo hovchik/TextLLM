@@ -1822,7 +1822,7 @@ pages.settings = async () => {
       $("#s-private").checked = !!S.status.settings?.allow_private_urls;
       const eng = dv.engines || [];
       $("#s-engines").innerHTML = eng.length ? `<div class="table-scroll"><table><thead><tr><th>Library</th><th>Speeds up</th><th>Status</th></tr></thead><tbody>${eng.map((e) => `<tr><td class="mono">${esc(e.name)}</td><td>${esc(e.speeds_up)}</td><td>${e.installed ? `<span class="pill good">installed ${esc(e.version || "")}</span>` : `<span class="pill">not installed</span> <span class="hint mono">${esc(e.install)}</span>`}</td></tr>`).join("")}</tbody></table></div>` : "No information.";
-      $("#s-devhint").innerHTML = `Now: <b>${esc(dv.name || "?")}</b>. Applies to the next training job and reloads chat models.${dv.hint ? "<br>" + esc(dv.hint) : ""}${!dv.cuda_build ? "<br>For an NVIDIA GPU this PyTorch has to be the CUDA build: close the Studio and run <span class=\"mono\">run.bat --gpu</span> (or <span class=\"mono\">./run.sh --gpu</span>)." : ""}`;
+      $("#s-devhint").innerHTML = `Now: <b>${esc(dv.name || "?")}</b>. Applies to the next training job and reloads chat models.${dv.hint ? "<br>" + esc(dv.hint) : ""}${!dv.cuda_build && !dv.xpu_build && !dv.arc ? "<br>For an NVIDIA GPU this PyTorch has to be the CUDA build: close the Studio and run <span class=\"mono\">run.bat --gpu</span> (or <span class=\"mono\">./run.sh --gpu</span>). For an Intel Arc GPU use <span class=\"mono\">run.bat --xpu</span>." : ""}${dv.notes ? "<br>" + esc(dv.notes) : ""}`;
     };
     drawDev();
     $("#s-save-dev").onclick = async () => { try { await api("/api/settings", { json: { device: $("#s-device").value } }); toast("Saved", "ok"); drawDev(); } catch (e) { fail(e); } };

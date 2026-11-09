@@ -69,7 +69,7 @@ def inner_lr_at(r, a):
 # git nor GitHub access, and always runs the same version as the coordinator.
 WORKER_FILES = ["cluster.py", "graceful.py", "netreach.py", "power.py", "devices.py", "train.py",
                 "model/__init__.py", "model/gpt.py", "writing/__init__.py", "writing/hf.py",
-                "core/__init__.py", "core/parallel.py", "core/quiet.py", "core/safeload.py"]
+                "core/__init__.py", "core/gpuprobe.py", "core/parallel.py", "core/quiet.py", "core/safeload.py"]
 _code_zip = {}
 
 
@@ -1016,7 +1016,7 @@ def main():
     w.add_argument("--secret", default=os.environ.get("TEXTLLM_CLUSTER_SECRET", ""),
                    help="the coordinator's secret (or TEXTLLM_CLUSTER_SECRET)")
     w.add_argument("--name", default=socket.gethostname()[:40])
-    w.add_argument("--device", default="auto", help="auto (GPU if there is one), cuda, cuda:1, mps, xpu or cpu")
+    w.add_argument("--device", default="auto", help="auto (GPU if there is one), cuda, cuda:1, xpu (Intel Arc), xpu:1, mps or cpu")
     w.add_argument("--batch", type=int, default=0, help="micro-batch (0 = 16 on a GPU, 8 on a CPU)")
     w.add_argument("--grad-accum", type=int, default=4)
     w.add_argument("--data", default="", help="use this PC's data folder (train.bin, same tokenizer) instead of downloading")

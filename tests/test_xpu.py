@@ -116,3 +116,16 @@ def test_gguf_stays_on_cpu_when_cpu_is_chosen(monkeypatch):
 
     monkeypatch.setenv("TEXTLLM_DEVICE", "cpu")
     assert chat_engine.gguf_gpu_layers() == 0
+
+
+def test_gguf_is_used_on_a_gpu_when_llama_cpp_can_offload(monkeypatch):
+    import sys
+    import chat_engine
+
+    monkeypatch.delenv("TEXTLLM_DEVICE", raising=False)
+    monkeypatch.delenv("TEXTLLM_GGUF_GPU", raising=False)
+    fake = types.SimpleNamespace(llama_supports_gpu_offload=lambda: True)
+    monkeypatch.setitem(sys.modules, "llama_cpp", fake)
+    assert chat_engine.gguf_gpu_layers() == -1
+    fake.llama_supports_gpu_offload = lambda: False
+    assert chat_engine.gguf_gpu_layers() == 0

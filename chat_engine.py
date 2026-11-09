@@ -182,7 +182,7 @@ class Engine:
         g = gguf_path(run_dir) if self.meta["type"] != "scratch" else None
         if backend is None:
             backend = "scratch" if self.meta["type"] == "scratch" else (
-                "gguf" if g and has_llama_cpp() and self.device == "cpu" else "hf")
+                "gguf" if g and has_llama_cpp() and (self.device == "cpu" or gguf_gpu_layers()) else "hf")
         self.backend = backend
         if backend == "scratch":
             from tokenizers import Tokenizer

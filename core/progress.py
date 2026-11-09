@@ -1,4 +1,6 @@
-"""Download progress that the Studio can show: per source and overall, with bytes, percent and ETA.
+"""Progress that the Studio can show: per source (or step) and overall, with bytes, percent and ETA.
+
+Used by the downloads and by local steps such as encoding the corpus (board.kind = "work").
 
 A data script asks for a task per source and moves it forward; the board writes everything to the
 JSON file named by $TEXTLLM_PROGRESS (the Studio sets it for every job it starts) at most once a
@@ -76,6 +78,7 @@ class Task:
         self.note = ""
         self.started = None
         self.rate = _Rate()
+        self.verb = ""                  # word the Studio shows while running; "" = "Downloading"
 
     def start(self, done=0, total=None, note=""):
         with self.b.lock:
@@ -124,7 +127,7 @@ class Task:
         eta = left / speed if self.state == "running" and speed > 0 and self.total else None
         return {"key": self.key, "label": self.label, "unit": self.unit, "state": self.state, "note": self.note,
                 "done": self.done, "total": self.total, "pct": round(100 * self.frac(), 1),
-                "speed": speed, "eta": eta}
+                "speed": speed, "eta": eta, "verb": self.verb}
 
 
 class Board:
@@ -137,6 +140,7 @@ class Board:
         self.net_bytes = 0
         self.net_rate = _Rate()
         self.title = ""
+        self.kind = "download"     # "work" for local steps (encoding, tokenizer): no network figures
         self._last = 0.0
         self._f0 = None            # overall fraction when this run began, for the overall ETA
 
@@ -184,7 +188,7 @@ class Board:
             cur = next((t for t in tasks if t["state"] == "running"), None)
             if cur and cur["eta"] is not None and len([t for t in tasks if t["state"] in ("waiting", "running")]) == 1:
                 eta = cur["eta"]       # only one source left: its own ETA is the better guess
-            return {"pid": os.getpid(), "title": self.title, "started": self.started, "updated": now,
+            return {"pid": os.getpid(), "title": self.title, "kind": self.kind, "started": self.started, "updated": now,
                     "net_bytes": self.net_bytes, "net_speed": self.net_rate.get(), "tasks": tasks,
                     "overall": {"pct": round(100 * f, 1), "eta": eta,
                                 "done": sum(t["state"] in ("done", "skipped") for t in tasks),

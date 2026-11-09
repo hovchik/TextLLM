@@ -170,7 +170,7 @@ The Data tab prepares the training corpus in four steps. Run them in order with 
 
 If the download stops, press **Run** again: every source continues where it stopped.
 
-**Download progress.** While a download runs, the *Download progress* card (above the log) shows every source you chose, in the order they are fetched, refreshed every few seconds:
+**Download progress.** While a download runs, the *Progress* card (above the log) shows every source you chose, in the order they are fetched, refreshed every few seconds:
 
 ![Download progress: overall ring, then one card per source](manual/06b-download-progress.png)
 
@@ -181,9 +181,13 @@ If the download stops, press **Run** again: every source continues where it stop
 
 The same progress shows on the command line: `python data/build_corpus.py ...` prints a bar per source and an `[overall 40% · 2/5 sources done · 1.2 GB downloaded · ETA 35m]` line before each source and at the end.
 
-**Step 2 · Build the tokenizer.** Learns the word pieces the model reads and writes. Vocabulary 8,192 for CPU models or 32,000 for GPU models; *Files used to learn it* (more is slower and slightly better).
+**Step 2 · Build the tokenizer.** Learns the word pieces the model reads and writes. Vocabulary 8,192 for CPU models or 32,000 for GPU models; *Files used to learn it* (more is slower and slightly better). While it runs, the *Progress* card shows two steps: *Reading text* (how many MB of the chosen files are read, speed and time left) and *Learning word pieces*, the last part, which has no percent and usually takes a few minutes.
 
-**Step 3 · Encode the corpus.** Turns all text into token files for fast training. *Held out for validation* is the share kept aside to measure validation loss (default 0.5%).
+**Step 3 · Encode the corpus.** Turns all text into token files for fast training. *Held out for validation* is the share kept aside to measure validation loss (default 0.5%). While it runs, the *Progress* card and the Dashboard's running-job card show the percent of the corpus encoded, MB done of the total, speed, which file it is on, how many tokens so far and the time left:
+
+![Encoding the corpus: percent, MB, speed, tokens and time left](manual/06c-encode-progress.png)
+
+Encoding uses every CPU core and works through the text a few MB at a time, so it needs well under 1 GB of memory whatever the size of the corpus. Expect roughly 5 to 15 MB of text per second on a 4-core laptop, so 10 GB of text takes about 15 to 30 minutes. On the command line `python tokenizer/train_tokenizer.py --encode` prints a bar with MB done, speed and time left.
 
 Steps 2 and 3 are only needed for from-scratch training. After you add or delete text, run **step 3 (Encode) only** if you want to keep training an existing model: a model must always read text encoded with the tokenizer it was trained with, and a new tokenizer gives the same token numbers different meanings without any error. Build a new tokenizer (step 2, then step 3) only before training a **new** model from scratch.
 

@@ -201,3 +201,115 @@ def test_concurrent_writers_leave_valid_json(tmp_path):
     b.touch(force=True)
     d = progress.read(str(path))
     assert d is not None and d["net_bytes"] == 8 * 300 * 10
+
+
+# ---------------------------------------------------------------- tokenizer and encoding (local steps)
+def _old_encode(raw, tok_path, val_frac, fim_rate=0.0, seed=0):
+    """The encoder before progress was added (one tokenizer call per shard), as the reference output."""
+    from tokenizers import Tokenizer
+
+    from coding import fim
+    from coding.langs import is_code_doc
+    from tokenizer.train_tokenizer import EOT, shards
+
+    tok = Tokenizer.from_file(tok_path)
+    eot, ids = tok.token_to_id(EOT), fim.token_ids(tok)
+    out = {"train": [], "val": []}
+    rng, frng = __import__("random").Random(0), __import__("random").Random(seed + 1)
+    for path in shards(raw):
+        docs = [d.strip() for d in open(path, encoding="utf-8").read().split(EOT) if d.strip()]
+        plan, pieces = [], []
+        for d in docs:
+            if fim_rate > 0 and is_code_doc(d) and frng.random() < fim_rate:
+                pre, mid, suf = fim.split(d, frng)
+                plan.append((len(pieces), 3))
+                pieces += [pre, suf, mid]
+            else:
+                plan.append((len(pieces), 1))
+                pieces.append(d)
+        enc = [e.ids for e in tok.encode_batch(pieces)]
+        for start, n in plan:
+            if n == 1:
+                seq = enc[start]
+            else:
+                pre, suf, mid = enc[start:start + 3]
+                seq = [ids["prefix"], *pre, ids["suffix"], *suf, ids["middle"], *mid]
+            out["val" if rng.random() < val_frac else "train"] += seq + [eot]
+    return out
+
+
+def _corpus(d, files=3, docs=60, code=False):
+    import random
+
+    r = random.Random(1)
+    for i in range(files):
+        sub = d / ("src" if i % 2 else "books")
+        sub.mkdir(parents=True, exist_ok=True)
+        parts = []
+        for j, t in enumerate(sample_text(docs, seed=i)):
+            if code and j % 2:
+                t = "def f%d(x):\n    return x + %d\n\nclass A:\n    pass\n" % (j, r.randint(0, 9)) * 3
+            parts.append(t)
+        (sub / f"shard_{i:05d}.txt").write_text("\n<|endoftext|>\n".join(parts) + "\n<|endoftext|>\n")
+
+
+@pytest.mark.parametrize("fim_rate", [0.0, 0.5])
+def test_encode_reports_progress_and_matches_the_old_output(tmp_path, monkeypatch, fim_rate):
+    import numpy as np
+
+    from tokenizer import train_tokenizer as tt
+
+    raw = tmp_path / "raw"
+    _corpus(raw, code=fim_rate > 0)
+    tok = str(tmp_path / "bpe.json")
+    tt.train(str(raw), 600, tok, 0, code=fim_rate > 0)
+    monkeypatch.setattr(tt, "BATCH_CHARS", 3000)        # many batches per shard
+    path = tmp_path / "p.json"
+    monkeypatch.setattr(progress, "_BOARD", progress.Board(str(path)))
+    tt.encode(str(raw), tok, str(tmp_path / "bin"), 0.1, fim_rate)
+    want = _old_encode(str(raw), tok, 0.1, fim_rate)
+    for split in ("train", "val"):
+        got = np.fromfile(tmp_path / "bin" / f"{split}.bin", dtype=np.uint16).tolist()
+        assert got == want[split], split
+    d = json.loads(path.read_text())
+    assert d["kind"] == "work" and d["title"] == "Encoding the corpus"
+    (t,) = d["tasks"]
+    size = sum(f.stat().st_size for f in raw.rglob("*.txt"))
+    assert (t["state"], t["pct"], t["done"], t["total"], t["verb"]) == ("done", 100.0, size, size, "Encoding")
+    assert "3 files" in t["note"] and "M tokens" in t["note"]
+
+
+def test_tokenizer_build_reports_progress_and_is_unchanged(tmp_path, monkeypatch):
+    from tokenizers import Tokenizer, decoders, models, pre_tokenizers, trainers
+
+    from tokenizer import train_tokenizer as tt
+
+    raw = tmp_path / "raw"
+    _corpus(raw)
+    path = tmp_path / "p.json"
+    monkeypatch.setattr(progress, "_BOARD", progress.Board(str(path)))
+    tt.train(str(raw), 500, str(tmp_path / "new.json"), 0)
+    # the same settings trained the old way (the library reading the files itself)
+    old = Tokenizer(models.BPE())
+    old.pre_tokenizer = pre_tokenizers.ByteLevel(add_prefix_space=False)
+    old.train(tt.shards(str(raw)), trainers.BpeTrainer(vocab_size=500, special_tokens=[tt.EOT], show_progress=False,
+                                                      initial_alphabet=pre_tokenizers.ByteLevel.alphabet()))
+    assert Tokenizer.from_file(str(tmp_path / "new.json")).get_vocab() == old.get_vocab()
+    d = json.loads(path.read_text())
+    assert d["kind"] == "work" and [t["state"] for t in d["tasks"]] == ["done", "done"]
+    assert d["tasks"][0]["done"] == d["tasks"][0]["total"] > 0 and d["overall"]["pct"] == 100
+
+
+def test_a_failed_encode_says_so(tmp_path, monkeypatch):
+    from tokenizer import train_tokenizer as tt
+
+    raw = tmp_path / "raw"
+    _corpus(raw, files=1)
+    tok = str(tmp_path / "bpe.json")
+    tt.train(str(raw), 500, tok, 0)
+    (raw / "books" / "shard_00000.txt").write_bytes(b"\xff\xfe not utf-8")
+    path = tmp_path / "p.json"
+    monkeypatch.setattr(progress, "_BOARD", progress.Board(str(path)))
+    with pytest.raises(UnicodeDecodeError):
+        tt.encode(str(raw), tok, str(tmp_path / "bin"), 0.1)
+    assert json.loads(path.read_text())["tasks"][0]["state"] == "failed"

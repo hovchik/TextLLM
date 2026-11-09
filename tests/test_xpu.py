@@ -129,3 +129,40 @@ def test_gguf_is_used_on_a_gpu_when_llama_cpp_can_offload(monkeypatch):
     assert chat_engine.gguf_gpu_layers() == -1
     fake.llama_supports_gpu_offload = lambda: False
     assert chat_engine.gguf_gpu_layers() == 0
+
+
+def test_gpu_debug_switches_are_turned_off(monkeypatch):
+    from core import quiet
+
+    env = {"ONEDNN_VERBOSE": "1", "ZE_ENABLE_LOADER_DEBUG_TRACE": "1", "PATH": "x"}
+    assert sorted(quiet.gpu_debug_off(env)) == ["ONEDNN_VERBOSE", "ZE_ENABLE_LOADER_DEBUG_TRACE"]
+    assert env == {"PATH": "x"}
+    env = {"ONEDNN_VERBOSE": "1", "TEXTLLM_GPU_DEBUG": "1"}
+    assert quiet.gpu_debug_off(env) == [] and "ONEDNN_VERBOSE" in env
+
+
+def test_slow_first_gpu_step_restarts_on_the_cpu(monkeypatch):
+    import os, subprocess, sys, threading
+    import train
+
+    calls, exited = [], threading.Event()
+    monkeypatch.setattr(sys, "argv", ["train.py", "--preset", "small", "--device", "xpu", "--gpu-wait", "0.001"])
+    monkeypatch.setattr(subprocess, "call", lambda cmd, env=None: calls.append((cmd, env["TEXTLLM_DEVICE"])) or 0)
+    monkeypatch.setattr(os, "_exit", lambda rc: exited.set())
+    done = train.first_step_watchdog(0.001)  # 0.06 s
+    assert exited.wait(5)
+    cmd, dev = calls[0]
+    assert cmd[-2:] == ["--device", "cpu"] and "xpu" not in cmd and dev == "cpu"
+    assert not done.is_set()
+
+
+def test_fast_first_gpu_step_keeps_the_gpu(monkeypatch):
+    import subprocess, time
+    import train
+
+    calls = []
+    monkeypatch.setattr(subprocess, "call", lambda *a, **k: calls.append(a) or 0)
+    done = train.first_step_watchdog(0.01)  # 0.6 s
+    done.set()
+    time.sleep(1)
+    assert calls == []

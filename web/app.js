@@ -336,6 +336,7 @@ function trainNew() {
         <label class="field">CPU threads<input class="input" id="f-threads" type="number" min="0" value="0"><span class="hint" id="f-threadshint">0 = all physical cores</span></label>
         <label class="field" id="f-procsbox">Training processes<select class="input" id="f-procs"><option value="0">Auto</option><option value="1">1</option><option value="2">2</option><option value="4">4</option><option value="8">8</option></select><span class="hint" id="f-procshint">Several processes share the cores, each on part of the batch</span></label>
         <div id="f-speedbox" style="display:flex;flex-direction:column;gap:6px;align-items:flex-start;font-size:12.5px;color:var(--muted);font-weight:500"><span>Speed test</span><button class="btn" id="f-speedtest" type="button">Find the fastest</button><span class="hint">About 1–3 minutes: trains a few steps with 1, 2 and 4 processes</span></div>
+        <label class="field" id="f-gpuwaitbox">GPU start-up limit (min)<input class="input" id="f-gpuwait" type="number" min="0" step="5" value="20"><span class="hint">If the first step takes longer on the GPU (it compiles its kernels first), the run moves to the CPU. 0 = wait</span></label>
       </div><label class="row" style="margin-top:12px"><span class="switch"><input type="checkbox" id="f-resume"><span></span></span> Resume from the last checkpoint</label></details></div>
       <div class="row end"><button class="btn primary" id="start">${I.play} Start training</button></div>
     </div>
@@ -351,7 +352,7 @@ function trainNew() {
     $$("#modes .opt").forEach((o) => o.classList.toggle("on", o.dataset.v === m));
     $("#sizebox").hidden = m !== "scratch"; $("#basebox").hidden = m === "scratch";
     $("#adv-scratch").hidden = m !== "scratch"; $("#adv-lora").hidden = m === "scratch";
-    $("#f-procsbox").hidden = m !== "scratch"; $("#f-speedbox").hidden = m !== "scratch";
+    $("#f-procsbox").hidden = m !== "scratch"; $("#f-gpuwaitbox").hidden = m !== "scratch"; $("#f-speedbox").hidden = m !== "scratch";
     Object.entries(m === "scratch" ? { steps: 20000, lr: 0.001, batch: 16, accum: 4, name: "my-writer" } : { steps: 300, lr: 0.0002, batch: 2, accum: 8, name: "my-social-writer" })
       .forEach(([k, v]) => ($("#f-" + k).value = v));
     expect();
@@ -387,7 +388,7 @@ function trainNew() {
   $("#start").onclick = async () => {
     const v = (k) => $("#f-" + k).value;
     try {
-      await api("/api/train", { json: { mode: st.mode, name: v("name"), resume: $("#f-resume").checked, preset: st.preset, vocab: +v("vocab"), steps: +v("steps"), batch: +v("batch"), accum: +v("accum"), lr: +v("lr"), base: v("base"), examples: +v("examples"), seq: +v("seq"), instructions: $("#f-inst").checked, book_share: +v("bookshare") / 100, lora_r: +v("lorar"), epochs: +v("epochs"), gguf: $("#f-gguf").checked, warmup: +v("warmup"), min_lr: +v("minlr"), weight_decay: +v("wd"), compile: $("#f-compile").checked, procs: +v("procs"), threads: +v("threads"), init_from: v("initfrom"), pairs_per_doc: +v("ppd"), min_doc_chars: +v("mindoc") } });
+      await api("/api/train", { json: { mode: st.mode, name: v("name"), resume: $("#f-resume").checked, preset: st.preset, vocab: +v("vocab"), steps: +v("steps"), batch: +v("batch"), accum: +v("accum"), lr: +v("lr"), base: v("base"), examples: +v("examples"), seq: +v("seq"), instructions: $("#f-inst").checked, book_share: +v("bookshare") / 100, lora_r: +v("lorar"), epochs: +v("epochs"), gguf: $("#f-gguf").checked, warmup: +v("warmup"), min_lr: +v("minlr"), weight_decay: +v("wd"), compile: $("#f-compile").checked, procs: +v("procs"), threads: +v("threads"), gpu_wait: +v("gpuwait"), init_from: v("initfrom"), pairs_per_doc: +v("ppd"), min_doc_chars: +v("mindoc") } });
       toast(`Training <b>${esc(v("name"))}</b> started`, "ok");
       location.hash = "#/training/runs";
       setTimeout(() => openRun(v("name")), 400);

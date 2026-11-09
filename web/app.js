@@ -925,7 +925,13 @@ function trainData() {
     try { drawMp(await api("/api/data/my-posts", { method: "POST", body: fd })); toast("Added", "ok"); } catch (x) { fail(x); } finally { e.target.value = ""; }
   };
   const prev = S.onStatus;
-  S.onStatus = (s) => { prev && prev(s); const l = $("#dlog"); if (l && s.job.kind === "data") { l.textContent = s.job.log; l.scrollTop = 1e9; } };
+  let tokSeen = d.tok_stats?.measured || "";
+  S.onStatus = (s) => {
+    prev && prev(s);
+    const l = $("#dlog"); if (l && s.job.kind === "data") { l.textContent = s.job.log; l.scrollTop = 1e9; }
+    const q = s.data?.tok_stats, box = $("#d-tokq");   // a build or "Check quality" finished: show its numbers
+    if (box && (q?.measured || "") !== tokSeen) { tokSeen = q?.measured || ""; box.innerHTML = tokQuality(q); }
+  };
   bindProgress("#dprog");
 }
 

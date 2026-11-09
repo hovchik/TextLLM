@@ -250,6 +250,10 @@ def write_meta(a, src, meta, sources, private_dir, **info):
                       "resumable": private_dir is None, **info}
     if m.get("type") == "scratch":
         m["tok"] = "tokenizer.json"
+        if not m.get("tokenizer"):    # models from before tokenizer versions: read it from the file
+            from tokenizer.quality import describe
+
+            m["tokenizer"] = describe(os.path.join(src, "tokenizer.json"))
     with open(os.path.join(a.out, "meta.json"), "w") as f:
         json.dump(m, f)
     return m

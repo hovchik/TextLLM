@@ -17,3 +17,5 @@ data/cluster/
 data/code/
 data/bin-code/
 tokenizer/bpe-code.json
+tokenizer/*.stats.json
+tokenizer/*.prev.json

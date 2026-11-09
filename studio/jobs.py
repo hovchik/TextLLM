@@ -194,6 +194,38 @@ def _vocab_size(tokp):
     return _vocab["v"]
 
 
+_tok_info = {}
+
+
+def tokenizer_info(tokp):
+    """tokenizer/quality.describe() (version, style, vocabulary), re-read only when the file changes."""
+    try:
+        st = os.stat(tokp)
+    except OSError:
+        return None
+    key = (tokp, st.st_mtime, st.st_size)
+    if key not in _tok_info:
+        from tokenizer.quality import describe
+
+        if len(_tok_info) > 64:
+            _tok_info.clear()
+        _tok_info[key] = describe(tokp)
+    return _tok_info[key]
+
+
+def tokenizer_stats(tokp):
+    """The last quality check of the tokenizer (tokenizer/bpe.stats.json), if it matches the file."""
+    from tokenizer.quality import stats_path
+
+    sp = stats_path(tokp)
+    try:
+        if os.path.getmtime(sp) < os.path.getmtime(tokp):
+            return None                       # measured an older tokenizer
+        return json.load(open(sp, encoding="utf-8"))
+    except (OSError, ValueError):
+        return None
+
+
 def data_status():
     n_raw, raw_mb, n_custom = _scan_raw()
     tb = os.path.join(ROOT, "data/bin/train.bin")
@@ -202,6 +234,7 @@ def data_status():
         "raw_files": n_raw, "raw_mb": raw_mb,
         "custom_files": n_custom,
         "tokenizer": os.path.exists(tokp), "vocab": _vocab_size(tokp),
+        "tok_info": tokenizer_info(tokp), "tok_stats": tokenizer_stats(tokp),
         "train_tokens": os.path.getsize(tb) // 2 if os.path.exists(tb) else 0,
         "instructions": _instruction_stats(),
     }
@@ -278,6 +311,7 @@ def run_summary(run_dir):
         "name": name, "type": "scratch" if scratch else "lora",
         "preset": meta.get("preset"), "base": meta.get("base"), "task": meta.get("task", "writing"),
         "retrained_from": (meta.get("retrained") or {}).get("from"),
+        "tokenizer": (meta.get("tokenizer") or tokenizer_info(os.path.join(run_dir, "tokenizer.json"))) if scratch else None,
         "ready": ready, "running": is_running,
         "step": step, "max_steps": total, "progress": (step / total) if total else 0, "eta_sec": eta,
         "train_loss": tr[-1]["loss"] if tr else None,

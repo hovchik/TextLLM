@@ -182,7 +182,19 @@ If the download stops, press **Run** again: every source continues where it stop
 
 The same progress shows on the command line: `python data/build_corpus.py ...` prints a bar per source and an `[overall 40% · 2/5 sources done · 1.2 GB downloaded · ETA 35m]` line before each source and at the end.
 
-**Step 2 · Build the tokenizer.** Learns the word pieces the model reads and writes. Vocabulary 8,192 for CPU models or 32,000 for GPU models; *Files used to learn it* (more is slower and slightly better). While it runs, the *Progress* card shows two steps: *Reading text* (how many MB of the chosen files are read, speed and time left) and *Learning word pieces*, the last part, which has no percent and usually takes a few minutes.
+**Step 2 · Build the tokenizer.** Learns the word pieces the model reads and writes. Vocabulary 8,192 for CPU models or 32,000 for GPU models; *Files used to learn it* (more is slower and slightly better). The files are taken from every source folder in turn (`gutenberg`, `fineweb`, `custom`, ...), so your own texts are always part of it. While it runs, the *Progress* card shows three steps: *Reading text* (how many MB of the chosen files are read, speed and time left), *Learning word pieces* (no percent, usually a few minutes) and *Checking quality*.
+
+**Tokenizer options** (click to open):
+
+- **Style.** *Modern, v2* (the default) works like the tokenizers of GPT-4, Llama 3 and Qwen: Unicode NFC first (the same letter is always stored the same way), word splitting that keeps numbers in groups of up to 3 digits, handles `DON'T` like `don't` and keeps line breaks and indentation as their own pieces, and 16 special tokens (end of text, padding, chat turns and spare slots, so a later chat fine-tune needs no resize). *GPT-2 style, v1* is the tokenizer every model before November 2026 used. Both are byte-level: any text, Armenian, emoji or code, is encoded with no "unknown" token and decodes back exactly.
+- **Languages.** *Balanced* (default) reads text in rarely seen writing systems (Armenian among English books, for example) several times while learning, up to 8 times, so their words get whole pieces instead of single letters. *As in the corpus* uses the text as it is.
+- **Text checked (MB).** How much of the corpus the quality check reads after building (0 = skip).
+
+Changing these never breaks a model you already trained: every model keeps the tokenizer it was trained with (`runs/<name>/tokenizer.json`), and its version shows under the model's name in Training → Runs ("tokenizer v1" or "v2"). The replaced tokenizer is kept as `tokenizer/bpe.prev.json`.
+
+![Data step 2: tokenizer options and the quality check](manual/06b-tokenizer-quality.png)
+
+**Quality** (under step 2, after building or after **Check quality**): bytes per token over the checked text (higher = the model reads more text per step; English books are about 3.5 to 4.5), unknown tokens (always 0), round-trip errors (text that does not decode back; always 0 unless something is broken), how much of the vocabulary is used, and encoding speed. A table per writing system shows bytes per token and tokens per word; Armenian should be near English, not 3 to 10 times higher. The *Sample* table shows how fixed sentences (English, Armenian, numbers, code, line breaks) are cut into pieces. After a rebuild, every number also shows what the previous tokenizer had on the same text (*was ...*).
 
 **Step 3 · Encode the corpus.** Turns all text into token files for fast training. *Held out for validation* is the share kept aside to measure validation loss (default 0.5%). While it runs, the *Progress* card and the Dashboard's running-job card show the percent of the corpus encoded, MB done of the total, speed, which file it is on, how many tokens so far and the time left:
 
@@ -327,7 +339,7 @@ Set **Code examples**, the name, steps and learning rate, and press **Start trai
 
 ![From-scratch copilot: code tokenizer and encoding](manual/12h-copilot-scratch.png)
 
-a. **Build the code tokenizer** (`tokenizer/bpe-code.json`), with the fill-in-the-middle tokens. *Also learn English from the book corpus* mixes in `data/raw` so comments and docstrings read better.
+a. **Build the code tokenizer** (`tokenizer/bpe-code.json`), with the fill-in-the-middle tokens. *Also learn English from the book corpus* mixes in `data/raw` so comments and docstrings read better. *Style* is the same choice as in Data step 2 (Modern v2 recommended).
 b. **Encode the code** (`data/bin-code/`). The fill-in-the-middle share of files is rearranged as before / after / missing part.
 
 Then pick a model size and press **Start training**. To train it on several PCs, use the **Cluster** tab and choose **Kind of model: Copilot (code)** (section 12).
@@ -586,7 +598,8 @@ python -m studio.auth add alice --admin     # add an admin (asks for a password)
 python -m studio.auth add bob               # add a regular user
 python -m studio.auth passwd bob            # new password
 python data/build_corpus.py --gutenberg-max 3000 --fineweb-gb 0.3
-python tokenizer/train_tokenizer.py --raw data/raw --vocab 8192 --out tokenizer/bpe.json
+python tokenizer/train_tokenizer.py --raw data/raw --vocab 8192 --out tokenizer/bpe.json [--style modern|gpt2] [--lang-balance 0.3] [--sample-mb 4]
+python tokenizer/train_tokenizer.py --check --tok tokenizer/bpe.json --sample-mb 8   # quality numbers
 python tokenizer/train_tokenizer.py --encode --raw data/raw --tok tokenizer/bpe.json --bin data/bin
 python train.py --preset cpu --vocab 8192 --max-steps 20000 [--resume]
 python train.py --preset cpu --vocab 8192 --procs 2 --threads 0   # 2 processes on this PC (0 = auto)
@@ -622,7 +635,7 @@ See README.md for every option.
 | Forgot the admin password | Stop the Studio and run `python -m studio.auth passwd <name>`. |
 | Download keeps disconnecting (`WinError 10054`) | Press **Run** again; every source resumes. Under *Downloading* choose "Download whole files first" and more retries. |
 | "Prepare the training data first" | Run Data steps 1–3 before training from scratch. |
-| Resumed model writes nonsense after a corpus change | The tokenizer was rebuilt. Restore the old one (each run keeps a copy as `runs/<name>/tokenizer.json`; copy it to `tokenizer/bpe.json`) and run Data step 3 again. Or use **Retrain** with corpus folders: it encodes them with the model's own tokenizer. |
+| Resumed model writes nonsense after a corpus change | The tokenizer was rebuilt. Restore the old one (each run keeps a copy as `runs/<name>/tokenizer.json`, and the last replaced one is `tokenizer/bpe.prev.json`; copy it to `tokenizer/bpe.json`) and run Data step 3 again. Or use **Retrain** with corpus folders: it encodes them with the model's own tokenizer. |
 | Retrain: "not this model's tokenizer" | The encoded corpus was made with a different tokenizer than the model. Untick *The whole encoded corpus* and tick the corpus folders instead. |
 | Training on Intel Arc shows step 0 for minutes | The first step compiles the GPU kernels: wait up to 20 minutes (the log says "still on step 1"). On Arc graphics built into a laptop chip, the Small size is slow; the CPU size trains far faster. After the GPU start-up limit the run moves to the CPU by itself. |
 | The GPU isn't used | Update the NVIDIA driver (Intel Arc: the Intel graphics driver), then `run.bat --reinstall` (or `--gpu` / `--xpu`). Check Settings → Hardware. On laptops, plug in the charger and set Windows Graphics to "High performance" for Python. |

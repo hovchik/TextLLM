@@ -165,6 +165,32 @@ function workLine(p) {
   return [`${num(p.overall.pct, 1)}%`, esc(t.label), amt, sp, t.note ? esc(t.note) : "", `ETA ${eta(t.eta ?? p.overall.eta)}`].filter(Boolean).join(" · ");
 }
 const PSTATE = { running: ["good", "Downloading"], done: ["accent", "Done"], skipped: ["", "Skipped"], waiting: ["", "Waiting"], stopped: ["warn", "Stopped"], failed: ["bad", "Failed"] };
+// Data, step 2: what the last quality check of the tokenizer measured (tokenizer/quality.py)
+function tokQuality(q) {
+  if (!q) return "";
+  const prev = q.previous, pl = prev ? prev.languages || {} : {};
+  // "was" = the tokenizer this one replaced; green when the change is better, red when worse
+  const delta = (now, before, higherIsBetter) => {
+    if (before == null || now == null) return "";
+    const d = Math.round((now - before) * 100) / 100;
+    const mark = d === 0 ? "" : ` <span style="color:var(--${(d > 0) === higherIsBetter ? "good" : "bad"})">${d > 0 ? "▲" : "▼"}</span>`;
+    return `<span class="hint"> (was ${num(before, 2)}${mark})</span>`;
+  };
+  const langs = Object.entries(q.languages || {});
+  const rows = langs.map(([k, g]) => `<tr><td>${esc(k)}</td><td>${num(g.bytes / 1048576, 2)} MB</td><td>${num(g.bytes_per_token, 2)}${delta(g.bytes_per_token, pl[k]?.bytes_per_token, true)}</td><td>${num(g.tokens_per_word, 2)}${delta(g.tokens_per_word, pl[k]?.tokens_per_word, false)}</td></tr>`).join("");
+  const probes = Object.entries(q.probes || {}).map(([k, p]) => `<tr><td>${esc(k)}</td><td>${num(p.tokens)}${prev?.probes?.[k] ? `<span class="hint"> (was ${num(prev.probes[k].tokens)})</span>` : ""}</td><td class="mono" style="white-space:normal;font-size:12px">${(p.pieces || []).slice(0, 16).map((x) => `<span style="border:1px solid var(--border);border-radius:4px;padding:0 3px;margin:1px;display:inline-block">${esc(x).replace(/ /g, "·").replace(/\n/g, "↵")}</span>`).join("")}${p.round_trip ? "" : ' <span class="pill bad">round trip failed</span>'}</td></tr>`).join("");
+  return `<details style="margin-top:8px" open><summary><b>Quality</b> <span class="hint">${esc(q.measured || "")} · ${num(q.sample_mb, 1)} MB checked</span></summary>
+    <div class="row" style="margin-top:8px;gap:18px;flex-wrap:wrap">
+      <div><div class="hint">Bytes per token</div><b>${num(q.bytes_per_token, 2)}</b>${delta(q.bytes_per_token, prev?.bytes_per_token, true)}</div>
+      <div><div class="hint">Unknown tokens</div><b>${num(q.unknown_tokens)}</b></div>
+      <div><div class="hint">Round-trip errors</div><b>${num(q.round_trip_failures)}</b><span class="hint"> of ${num(q.round_trip_checked)}</span></div>
+      <div><div class="hint">Vocabulary used</div><b>${num((q.vocab_used || 0) * 100)}%</b></div>
+      <div><div class="hint">Encoding speed</div><b>${q.encode_mb_s == null ? "—" : num(q.encode_mb_s, 1) + " MB/s"}</b></div></div>
+    ${rows ? `<div class="table-scroll" style="margin-top:8px"><table><thead><tr><th>Writing system</th><th>Text</th><th>Bytes per token</th><th>Tokens per word</th></tr></thead><tbody>${rows}</tbody></table></div>` : ""}
+    <div class="table-scroll" style="margin-top:8px"><table><thead><tr><th>Sample</th><th>Tokens</th><th>First pieces</th></tr></thead><tbody>${probes}</tbody></table></div>
+    <div class="hint" style="margin-top:6px">Higher bytes per token and fewer tokens per word mean the model reads more text per step. ${prev ? `"was" is the tokenizer this one replaced (${esc(prev.tokenizer)}, v${prev.version}), measured on the same text.` : ""}</div></details>`;
+}
+
 function progressCard(p, opts = {}) {
   if (!p || !p.tasks || !p.tasks.length) return opts.empty ? `<div class="hint">${esc(opts.empty)}</div>` : "";
   const o = p.overall || {};
@@ -488,9 +514,10 @@ async function trainCopilot() {
       <label class="row" style="flex-wrap:nowrap"><span class="switch"><input type="checkbox" id="cp-gguf" checked><span></span></span> Make a fast CPU copy (GGUF)</label>
     </div>
     <div id="cp-scratch" class="steps" hidden>
-      <div class="step ${prep.tokenizer ? "done" : ""}"><div class="num">${prep.tokenizer ? "✓" : "a"}</div><div><b>Build the code tokenizer</b><div class="hint">${prep.tokenizer ? `${num(prep.vocab)}-token vocabulary with fill-in-the-middle tokens` : "Learns the pieces of code (keywords, indentation, operators)"}</div>
+      <div class="step ${prep.tokenizer ? "done" : ""}"><div class="num">${prep.tokenizer ? "✓" : "a"}</div><div><b>Build the code tokenizer</b><div class="hint">${prep.tokenizer ? `${num(prep.vocab)}-token vocabulary with fill-in-the-middle tokens${prep.tok_info ? ` · ${prep.tok_info.style === "modern" ? "modern (v2)" : "GPT-2 style (v1)"}` : ""}` : "Learns the pieces of code (keywords, indentation, operators)"}</div>
         <div class="row" style="margin-top:8px;flex-wrap:wrap"><label class="field" style="width:170px">Vocabulary<select class="input" id="cp-vocab"><option value="16384">16,384 (CPU)</option><option value="8192">8,192 (tiny)</option><option value="32000">32,000 (GPU)</option></select></label>
           <label class="field" style="width:170px">Files used to learn it<input class="input" id="cp-sample" type="number" min="1" value="40"></label>
+          <label class="field" style="width:210px">Style<select class="input" id="cp-tokstyle"><option value="modern">Modern, v2 (recommended)</option><option value="gpt2">GPT-2 style, v1</option></select></label>
           <label class="row hint" style="align-self:center"><span class="switch"><input type="checkbox" id="cp-text"><span></span></span> Also learn English from the book corpus</label></div></div>
         <button class="btn" data-prep="tokenizer">${I.play} Run</button></div>
       <div class="step ${prep.train_tokens ? "done" : ""}"><div class="num">${prep.train_tokens ? "✓" : "b"}</div><div><b>Encode the code</b><div class="hint">${prep.train_tokens ? `${num(prep.train_tokens / 1e6, 1)}M tokens ready` : "Turns the code into token files, rearranging some files for fill-in-the-middle"}</div>
@@ -558,7 +585,7 @@ async function trainCopilot() {
     try { await api("/api/code/build", { json: { ...cfgBody(), what: b.dataset.build } }); toast("Collecting code…", "ok"); poll(); } catch (e) { fail(e); }
   }));
   $$("[data-prep]").forEach((b) => (b.onclick = async () => {
-    try { await api("/api/code/prepare", { json: { step: b.dataset.prep, vocab: +$("#cp-vocab").value, sample_files: +$("#cp-sample").value, with_text: $("#cp-text").checked, fim_rate: +$("#cp-efim").value / 100 } }); toast("Started", "ok"); poll(); } catch (e) { fail(e); }
+    try { await api("/api/code/prepare", { json: { step: b.dataset.prep, vocab: +$("#cp-vocab").value, sample_files: +$("#cp-sample").value, with_text: $("#cp-text").checked, style: $("#cp-tokstyle").value, fim_rate: +$("#cp-efim").value / 100 } }); toast("Started", "ok"); poll(); } catch (e) { fail(e); }
   }));
   const setMode = (m) => {
     mode.v = m;
@@ -839,10 +866,18 @@ function trainData() {
             <label class="row hint" style="align-self:center"><span class="switch"><input type="checkbox" id="d-keepparq"><span></span></span> Keep downloaded parquet files</label>
           </div></details></div>
         <button class="btn" data-step="download">${I.play} Run</button></div>
-      <div class="step ${d.tokenizer ? "done" : ""}"><div class="num">${d.tokenizer ? "✓" : 2}</div><div><b>Build the tokenizer</b><div class="hint">${d.tokenizer ? `${num(d.vocab)}-token vocabulary` : "Learns the word pieces the model reads and writes"}</div>
-        <div class="row" style="margin-top:8px"><label class="field" style="width:200px">Vocabulary<select class="input" id="d-vocab"><option value="8192">8,192 (CPU)</option><option value="32000">32,000 (GPU)</option></select></label>
-          <label class="field" style="width:200px">Files used to learn it<input class="input" id="d-samplefiles" type="number" min="1" value="40"><span class="hint">more = slower, slightly better</span></label></div></div>
-        <button class="btn" data-step="tokenizer">${I.play} Run</button></div>
+      <div class="step ${d.tokenizer ? "done" : ""}"><div class="num">${d.tokenizer ? "✓" : 2}</div><div><b>Build the tokenizer</b><div class="hint">${d.tokenizer ? `${num(d.vocab)}-token vocabulary${d.tok_info ? ` · ${d.tok_info.style === "modern" ? "modern (v2)" : "GPT-2 style (v1)"}` : ""}` : "Learns the word pieces the model reads and writes"}</div>
+        <div class="row" style="margin-top:8px;flex-wrap:wrap"><label class="field" style="width:200px">Vocabulary<select class="input" id="d-vocab"><option value="8192">8,192 (CPU)</option><option value="32000">32,000 (GPU)</option></select></label>
+          <label class="field" style="width:200px">Files used to learn it<input class="input" id="d-samplefiles" type="number" min="1" value="40"><span class="hint">taken from every source folder in turn</span></label></div>
+        <details style="margin-top:8px"><summary><b>Tokenizer options</b> <span class="hint">style, languages, quality check</span></summary>
+          <div class="row" style="margin-top:8px;flex-wrap:wrap">
+            <label class="field" style="width:260px">Style<select class="input" id="d-tokstyle"><option value="modern">Modern, v2 (recommended)</option><option value="gpt2">GPT-2 style, v1 (as before)</option></select><span class="hint">v2: GPT-4 / Llama 3 word splitting, numbers in groups of 3, Unicode NFC, spare special tokens</span></label>
+            <label class="field" style="width:240px">Languages<select class="input" id="d-langbal"><option value="0.3">Balanced (recommended)</option><option value="1">As in the corpus</option></select><span class="hint">Balanced gives rare scripts (Armenian in English books) whole-word pieces</span></label>
+            <label class="field" style="width:170px">Text checked (MB)<input class="input" id="d-checkmb" type="number" min="0" max="1024" step="0.5" value="4"><span class="hint">quality check after building; 0 = skip</span></label>
+          </div>
+          <div class="hint" style="margin-top:6px">Models you already trained keep their own tokenizer, so changing these never breaks them; only new from-scratch models use the new one.</div></details>
+        <div id="d-tokq">${tokQuality(d.tok_stats)}</div></div>
+        <div class="row" style="flex-direction:column;gap:6px"><button class="btn" data-step="tokenizer">${I.play} Run</button>${d.tokenizer ? `<button class="btn sm ghost" data-step="tokcheck" title="Measure the tokenizer on your corpus">Check quality</button>` : ""}</div></div>
       <div class="step ${d.train_tokens ? "done" : ""}"><div class="num">${d.train_tokens ? "✓" : 3}</div><div><b>Encode the corpus</b><div class="hint">${d.train_tokens ? `${num(d.train_tokens / 1e6, 1)}M tokens ready to train` : "Converts every text into token files for fast training"}</div>
           <div class="row" style="margin-top:8px"><label class="field" style="width:200px">Held out for validation (%)<input class="input" id="d-valfrac" type="number" min="0.01" max="50" step="0.1" value="0.5"></label></div></div>
         <button class="btn" data-step="encode">${I.play} Run</button></div>
@@ -876,7 +911,7 @@ function trainData() {
     <div class="card" style="margin-top:16px"><div class="card-head"><h2>Log</h2></div><pre class="console" id="dlog">${esc(S.status.job.kind === "data" ? S.status.job.log : "No data job yet.")}</pre></div>`;
   $$("[data-step]").forEach((b) => (b.onclick = async () => {
     try {
-      await api("/api/data", { json: { fineweb_mode: $("#d-hfmode").value, retries: +$("#d-retries").value, workers: +$("#d-workers").value, keep_parquet: $("#d-keepparq").checked, common_corpus_lang: $("#d-cclang").value, sample_files: +$("#d-samplefiles").value, val_frac: (+$("#d-valfrac").value || 0.5) / 100, inst_gutenberg: $("#d-igut").checked, inst_stories: +$("#d-istories").value, inst_essays: +$("#d-iessays").value, inst_books: +$("#d-ibooks").value, seed: +$("#d-iseed").value, inst_my_posts: $("#d-mpuse").checked, synth_model: $("#d-synth").value, synth_per_format: +$("#d-synthn").value, backtranslate: $("#d-bt").value, step: b.dataset.step, books: +$("#d-books").value, web_gb: +$("#d-web").value, gutenberg_method: $("#d-gmethod").value, pg19_books: +$("#d-pg19").value, standard_ebooks: +$("#d-se").value, common_corpus_gb: +$("#d-cc").value, archive_books: +$("#d-ia").value, cosmopedia_gb: +$("#d-cosmo").value, cosmopedia_subsets: $("#d-cosmosub").value, wikipedia_gb: +$("#d-wiki").value, wikipedia_lang: $("#d-wikilang").value, common_pile_gb: +$("#d-cp").value, common_pile_subsets: $("#d-cpsub").value, vocab: +$("#d-vocab").value, hf_sets: $("#d-hfsets").checked } });
+      await api("/api/data", { json: { fineweb_mode: $("#d-hfmode").value, retries: +$("#d-retries").value, workers: +$("#d-workers").value, keep_parquet: $("#d-keepparq").checked, common_corpus_lang: $("#d-cclang").value, sample_files: +$("#d-samplefiles").value, tok_style: $("#d-tokstyle").value, lang_balance: +$("#d-langbal").value, check_mb: $("#d-checkmb").value === "" ? 4 : +$("#d-checkmb").value, val_frac: (+$("#d-valfrac").value || 0.5) / 100, inst_gutenberg: $("#d-igut").checked, inst_stories: +$("#d-istories").value, inst_essays: +$("#d-iessays").value, inst_books: +$("#d-ibooks").value, seed: +$("#d-iseed").value, inst_my_posts: $("#d-mpuse").checked, synth_model: $("#d-synth").value, synth_per_format: +$("#d-synthn").value, backtranslate: $("#d-bt").value, step: b.dataset.step, books: +$("#d-books").value, web_gb: +$("#d-web").value, gutenberg_method: $("#d-gmethod").value, pg19_books: +$("#d-pg19").value, standard_ebooks: +$("#d-se").value, common_corpus_gb: +$("#d-cc").value, archive_books: +$("#d-ia").value, cosmopedia_gb: +$("#d-cosmo").value, cosmopedia_subsets: $("#d-cosmosub").value, wikipedia_gb: +$("#d-wiki").value, wikipedia_lang: $("#d-wikilang").value, common_pile_gb: +$("#d-cp").value, common_pile_subsets: $("#d-cpsub").value, vocab: +$("#d-vocab").value, hf_sets: $("#d-hfsets").checked } });
       toast("Started", "ok"); poll();
     } catch (e) { fail(e); }
   }));
@@ -891,7 +926,13 @@ function trainData() {
     try { drawMp(await api("/api/data/my-posts", { method: "POST", body: fd })); toast("Added", "ok"); } catch (x) { fail(x); } finally { e.target.value = ""; }
   };
   const prev = S.onStatus;
-  S.onStatus = (s) => { prev && prev(s); const l = $("#dlog"); if (l && s.job.kind === "data") { l.textContent = s.job.log; l.scrollTop = 1e9; } };
+  let tokSeen = d.tok_stats?.measured || "";
+  S.onStatus = (s) => {
+    prev && prev(s);
+    const l = $("#dlog"); if (l && s.job.kind === "data") { l.textContent = s.job.log; l.scrollTop = 1e9; }
+    const q = s.data?.tok_stats, box = $("#d-tokq");   // a build or "Check quality" finished: show its numbers
+    if (box && (q?.measured || "") !== tokSeen) { tokSeen = q?.measured || ""; box.innerHTML = tokQuality(q); }
+  };
   bindProgress("#dprog");
 }
 
@@ -1348,7 +1389,7 @@ async function openRun(name) {
       const s = d.summary;
       if (!optsDrawn && s.ready) drawOpts(s);
       $("#r-title", m).textContent = s.name;
-      $("#r-sub", m).innerHTML = `${typePill(s.type)} ${s.base ? esc(s.base) : s.preset ? esc(s.preset) + " size" : ""} ${s.retrained_from ? `<span class="hint">retrained from <b>${esc(s.retrained_from)}</b></span>` : ""} ${s.running ? '<span class="pill good">● training</span>' : ""}`;
+      $("#r-sub", m).innerHTML = `${typePill(s.type)} ${s.base ? esc(s.base) : s.preset ? esc(s.preset) + " size" : ""} ${s.retrained_from ? `<span class="hint">retrained from <b>${esc(s.retrained_from)}</b></span>` : ""} ${s.tokenizer ? `<span class="hint" title="Tokenizer this model was trained with; it always keeps it">tokenizer v${s.tokenizer.version}, ${num(s.tokenizer.vocab)}</span>` : ""} ${s.running ? '<span class="pill good">● training</span>' : ""}`;
       $("#r-btns", m).innerHTML = `${s.ready ? `<button class="btn sm primary" id="r-chat">${I.chat} Chat</button>` : ""}${s.ready && !s.running ? `<button class="btn sm" id="r-eval" title="Score it on the 60 fixed prompts">Evaluate</button><button class="btn sm ghost" id="r-quick" title="8 prompts, a few minutes">Quick check</button>` : ""}${s.type === "lora" && s.ready && !s.running ? `<button class="btn sm ${s.fast ? "ghost" : ""}" id="r-gguf" title="Merge, convert to GGUF and quantize (quality under Fast CPU copy options)">${s.fast ? "⚡ Fast copy ✓ (redo)" : "⚡ Make fast CPU copy"}</button>` : ""}${s.ready && !s.running ? `<button class="btn sm" id="r-resume" title="Continue training from the last checkpoint">${I.play} Resume</button><button class="btn sm ghost" id="r-export" title="Download as one .zip to continue on another PC">${I.download} Export</button><button class="btn sm ghost" id="r-retrain" title="Make a new model from this one that learns other data (this one stays as it is)">Retrain on new data</button>` : ""}${s.running ? `<button class="btn sm danger" id="r-stop">${I.stop} Stop</button>` : `<button class="btn sm ghost" id="r-del">${I.trash}</button>`}`;
       $("#r-stats", m).innerHTML = [
         ["Progress", `${(s.progress * 100).toFixed(0)}%`], ["Step", `${num(s.step)} / ${num(s.max_steps)}`], ["ETA", s.running ? dur(s.eta_sec) : "—"],

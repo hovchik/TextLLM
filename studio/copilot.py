@@ -146,6 +146,7 @@ def sources():
 def prepared():
     tb = os.path.join(CODE_BIN, "train.bin")
     return {"tokenizer": os.path.exists(CODE_TOK), "vocab": jobs._vocab_size(CODE_TOK) if os.path.exists(CODE_TOK) else None,
+            "tok_info": jobs.tokenizer_info(CODE_TOK),
             "train_tokens": os.path.getsize(tb) // 2 if os.path.exists(tb) else 0}
 
 
@@ -211,6 +212,7 @@ class PrepareReq(BaseModel):
     sample_files: int = 40
     fim_rate: float = 0.5
     with_text: bool = False   # also learn English from data/raw (comments, docs)
+    style: str = "modern"     # tokenizer: modern (v2) | gpt2 (v1)
     val_frac: float = 0.005
 
 
@@ -221,7 +223,8 @@ def code_prepare(r: PrepareReq):
     raw = "data/code" + (",data/raw" if r.with_text and os.path.isdir(os.path.join(ROOT, "data", "raw")) else "")
     if r.step == "tokenizer":
         cmd = [jobs.PY, "tokenizer/train_tokenizer.py", "--code", "--raw", raw, "--vocab", str(max(1000, min(65000, r.vocab))),
-               "--out", "tokenizer/bpe-code.json", "--sample-files", str(max(1, r.sample_files))]
+               "--out", "tokenizer/bpe-code.json", "--sample-files", str(max(1, r.sample_files)),
+               "--style", r.style if r.style in ("modern", "gpt2") else "modern"]
     elif r.step == "encode":
         if not os.path.exists(CODE_TOK):
             err("Build the code tokenizer first.")

@@ -416,12 +416,47 @@ python train.py --out runs/my-model --resume ...               # or finetune/fin
   copy of the repo, then resume. Older runs stored the tokenizer's full path, so also copy
   `tokenizer/bpe.json` there as `runs/<name>/tokenizer.json`.
 
+## The tokenizer
+
+`tokenizer/train_tokenizer.py` builds a byte-level BPE with the Rust `tokenizers` library. Since
+November 2026 the default is **v2 ("modern")**, in line with GPT-4, Llama 3 and Qwen:
+
+| | v1 (`--style gpt2`, before) | v2 (`--style modern`, default) |
+|---|---|---|
+| Normalization | none | Unicode NFC |
+| Word splitting | GPT-2 regex | GPT-4 / Llama 3 regex: numbers in groups of ≤3 digits, case-insensitive contractions, line breaks and indentation kept apart |
+| Special tokens | `<\|endoftext\|>` | + `<\|pad\|>`, `<\|im_start\|>`, `<\|im_end\|>`, reserved slots (16 in all; code adds FIM + `<\|file_sep\|>`) |
+| Sample for learning | `--sample-files` picked at random | picked from every source folder in turn; `--lang-balance 0.3` repeats rare writing systems (≤8x) |
+| Unknown tokens | none (byte-level) | none (byte-level) |
+
+Every from-scratch model keeps its own `runs/<name>/tokenizer.json`, and `meta.json` records its
+version, so models trained with v1 keep working (chat, resume, retrain, export) unchanged.
+
+`--check` (or the Studio's **Check quality**) writes `tokenizer/bpe.stats.json`: bytes per token, tokens per
+word per writing system, unknown tokens, round trips, vocabulary use and encoding speed, compared with the
+tokenizer it replaced (`tokenizer/bpe.prev.json`).
+
+Measured on a 4-core sandbox, 8,192 vocabulary, 2.8 MB of Gutenberg novels + 0.16 MB of Armenian
+(UD Armenian treebank, CC BY-SA 4.0), scored on held-out Armenian and the novels:
+
+| | v1, 10 random files | v2, 10 files from every folder | v1, all files | v2, all files |
+|---|---|---|---|---|
+| English: bytes per token / tokens per word | 3.70 / 1.52 | 3.54 / 1.59 | 3.74 / 1.51 | 3.65 / 1.55 |
+| Armenian: bytes per token / tokens per word | 1.00 / 13.2 | 5.52 / 2.40 | 4.26 / 3.11 | 5.33 / 2.49 |
+| Encoding speed (tokenizer alone) | — | — | 11.0 MB/s | 9.4 MB/s |
+
+The random sample missed the Armenian folder, so Armenian fell back to one token per byte. v2 always
+includes it and cuts Armenian to about 2.5 tokens per word (-20% even when v1 saw all files), for 2-4% more
+tokens on English (digits split into groups and contractions kept apart, as in GPT-4 / Llama 3). NFC and the
+longer regex cost about 15% of raw tokenizer speed; the whole `--encode` step took the same time (3.2 s v1,
+2.9 s v2 on 23 MB) because reading and writing overlap with it.
+
 ## Pipeline (GPU)
 ```bash
 # 1. Download the corpus (~10 GB of Gutenberg + N GB of FineWeb-Edu)
 python data/build_corpus.py --gutenberg-max 70000 --fineweb-gb 20
 
-# 2. Train a 32k BPE tokenizer, then encode everything into uint16 token files
+# 2. Train a 32k BPE tokenizer (modern v2 by default; see "The tokenizer" below), then encode everything into uint16 token files
 python tokenizer/train_tokenizer.py --raw data/raw --vocab 32000 --out tokenizer/bpe.json
 python tokenizer/train_tokenizer.py --encode --raw data/raw --tok tokenizer/bpe.json --bin data/bin
 

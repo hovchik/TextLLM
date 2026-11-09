@@ -317,7 +317,7 @@ def status(request: Request):
 
 
 class DataReq(BaseModel):
-    step: str            # download | tokenizer | encode
+    step: str            # download | tokenizer | tokcheck | encode | instructions
     books: int = 3000
     web_gb: float = 0.3
     # more rights-cleared sources, 0 = skip (see data/build_corpus.py for licenses)
@@ -342,6 +342,9 @@ class DataReq(BaseModel):
     common_corpus_lang: str = "en"
     # tokenizer
     sample_files: int = 40
+    tok_style: str = "modern"          # modern (v2) | gpt2 (v1, as before)
+    lang_balance: float = 0.3          # 1 = the corpus as it is
+    check_mb: float = 4.0              # MB of text the quality check reads
     val_frac: float = 0.005
     # writing instructions
     inst_gutenberg: bool = True
@@ -401,8 +404,13 @@ def data(r: DataReq):
                      "--fineweb-mode", "download" if r.fineweb_mode == "download" else "stream",
                      "--retries", str(max(0, min(1000, r.retries))), "--workers", str(max(1, min(64, r.workers)))]
                     + (["--keep-parquet"] if r.keep_parquet else []),
-        "tokenizer": [PY, "tokenizer/train_tokenizer.py", "--vocab", str(r.vocab),
-                      "--sample-files", str(max(1, r.sample_files))],
+        "tokenizer": [PY, "tokenizer/train_tokenizer.py", "--vocab", str(max(1000, min(65000, r.vocab))),
+                      "--sample-files", str(max(1, r.sample_files)),
+                      "--style", r.tok_style if r.tok_style in ("modern", "gpt2") else "modern",
+                      "--lang-balance", str(max(0.0, min(1.0, r.lang_balance))),
+                      "--sample-mb", str(max(0.0, min(1024.0, r.check_mb)))],
+        # quality numbers for the current tokenizer (and the one it replaced): Data, step 2
+        "tokcheck": [PY, "tokenizer/train_tokenizer.py", "--check", "--sample-mb", str(max(0.5, min(1024.0, r.check_mb)))],
         "encode": [PY, "tokenizer/train_tokenizer.py", "--encode", "--val-frac", str(max(0.0001, min(0.5, r.val_frac)))],
         # writing instructions for fine-tuning: posts, stories, essays (rights-cleared sources only)
         "instructions": inst,
@@ -506,13 +514,13 @@ def train(r: TrainReq):
             if not os.path.exists(src):
                 err(f"Train the tokenizer first ({where.replace('steps 1–3', 'step 2')}).")
             shutil.copyfile(src, tok_copy)
-            if code:
-                from tokenizers import Tokenizer
-
-                r.vocab = Tokenizer.from_file(src).get_vocab_size()  # the model must match the code tokenizer
+        info = jobs.tokenizer_info(tok_copy)
+        if info and info.get("vocab"):
+            r.vocab = info["vocab"]           # the model must match its tokenizer (train.py keeps a resumed run's size)
         meta_p = os.path.join(out, "meta.json")
         if not (r.resume and os.path.exists(meta_p)):
-            json.dump({"type": "scratch", "tok": "tokenizer.json", "preset": r.preset, **({"task": "code"} if code else {})},
+            json.dump({"type": "scratch", "tok": "tokenizer.json", "preset": r.preset,
+                       "tokenizer": jobs.tokenizer_info(tok_copy), **({"task": "code"} if code else {})},
                       open(meta_p, "w"))
         cmd = [PY, "train.py", "--out", out, "--data", bin_dir, "--preset", r.preset, "--vocab", str(r.vocab),
                "--max-steps", str(r.steps), "--batch", str(r.batch), "--grad-accum", str(r.accum), "--lr", str(r.lr),
@@ -706,6 +714,7 @@ def cluster_start(r: ClusterReq):
     meta_p = os.path.join(out, "meta.json")
     if not (resuming and os.path.exists(meta_p)):
         json.dump({"type": "scratch", "tok": "tokenizer.json", "preset": r.preset, "cluster": True,
+                   "tokenizer": jobs.tokenizer_info(tok_copy),
                    **({"task": "code"} if code else {})}, open(meta_p, "w"))
     secrets_p = os.path.join(CLUSTER_DIR, "secrets.json")   # run name -> secret, so a resume keeps it
     known = _read_json(secrets_p) or {}

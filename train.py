@@ -41,6 +41,9 @@ def get_args():
     ap.add_argument("--resume", action="store_true")
     ap.add_argument("--threads", type=int, default=0,
                     help="CPU threads for the whole run (0 = all physical cores, or TEXTLLM_THREADS)")
+    ap.add_argument("--gpu-wait", type=float, default=20,
+                    help="minutes the first step may take on a GPU (it compiles the GPU kernels) before the "
+                         "run restarts on the CPU; 0 = wait as long as it takes")
     ap.add_argument("--procs", type=int, default=1,
                     help="training processes on this PC, each on a slice of the batch (0 = auto; "
                          "one per GPU on multi-GPU PCs); see core/parallel.py")
@@ -215,7 +218,15 @@ def main():
             mlog.flush()
 
     x, y = train.next()
-    t0 = time.time()
+    first_done = None
+    if kind != "cpu" and master:
+        print("first step: the GPU driver compiles its kernels now"
+              + (" (on Intel GPUs this can take several minutes)" if kind == "xpu" else "")
+              + "; progress shows after step 1", flush=True)
+        if not ddp and a.gpu_wait > 0:
+            first_done = first_step_watchdog(a.gpu_wait)
+    t0 = t_start = time.time()
+    last = first_step = step
     while step < a.max_steps:
         for g in opt.param_groups:
             g["lr"] = lr_at(step, a)
@@ -233,9 +244,14 @@ def main():
         opt.zero_grad(set_to_none=True)
         step += 1
 
-        if master and step % 10 == 0:
-            dt = (time.time() - t0) / 10
-            t0 = time.time()
+        if first_done is not None and not first_done.is_set():
+            loss.item()  # wait for the GPU to really finish the step
+            first_done.set()
+            print(f"the first step took {time.time() - t_start:.0f} s (includes compiling the GPU kernels)", flush=True)
+        # every 10 steps, and at least every 30 s when steps are slow (big model on a small GPU)
+        if master and (step % 10 == 0 or step == first_step + 1 or time.time() - t0 >= 30):
+            dt = (time.time() - t0) / (step - last)
+            t0, last = time.time(), step
             tl = loss.item() * a.grad_accum
             print(f"step {step} | loss {tl:.3f} | lr {lr_at(step, a):.2e} | {dt*1000:.0f} ms/step")
             tps = a.batch * a.grad_accum * world * cfg.block_size / dt
@@ -249,6 +265,47 @@ def main():
                 save()
     if ddp:
         dist.destroy_process_group()
+
+
+def first_step_watchdog(minutes):
+    """Start a timer for the first step on a GPU. While it runs, say every few minutes that the GPU is
+    still compiling; if it takes longer than `minutes`, run the same training on the CPU instead
+    (this process waits for it, so Stop in the Studio still reaches it). Returns an Event to set
+    once the first step is done."""
+    import subprocess, threading
+
+    done = threading.Event()
+
+    def watch():
+        start = time.time()
+        while not done.wait(min(60.0, minutes * 60)):
+            mins = (time.time() - start) / 60
+            if mins >= minutes:
+                break
+            if int(mins) % 3 == 0:
+                print(f"... still on step 1 after {mins:.0f} min (the GPU is compiling or very slow); "
+                      f"switching to the CPU after {minutes:g} min", flush=True)
+        else:
+            return
+        print(f"Step 1 did not finish within {minutes:g} min on the GPU. Restarting this training on the CPU. "
+              "To keep the GPU, set 'GPU start-up limit' to 0 under Advanced (or choose a smaller size); "
+              "to skip the GPU next time choose CPU under Settings → Hardware.", flush=True)
+        argv, skip = [], False
+        for x in sys.argv[1:]:
+            if skip:
+                skip = False
+                continue
+            if x == "--device":
+                skip = True
+                continue
+            if not x.startswith("--device="):
+                argv.append(x)
+        env = {**os.environ, "TEXTLLM_DEVICE": "cpu"}
+        rc = subprocess.call([sys.executable, os.path.abspath(__file__), *argv, "--device", "cpu"], env=env)
+        os._exit(rc)
+
+    threading.Thread(target=watch, daemon=True).start()
+    return done
 
 
 if __name__ == "__main__":

@@ -478,6 +478,7 @@ class TrainReq(BaseModel):
     compile: bool = False
     procs: int = 0                # training processes on this PC (0 = auto: the speed test's pick, else 1)
     threads: int = 0              # CPU threads for the run (0 = all physical cores); also for LoRA
+    gpu_wait: float = 20          # minutes the first GPU step may take before the run moves to the CPU (0 = wait)
     # LoRA, advanced
     init_from: str = ""           # continue from this fine-tuned run's adapter (same base model)
     pairs_per_doc: int = 8
@@ -529,7 +530,7 @@ def train(r: TrainReq):
             cmd += ["--min-lr", str(min(r.min_lr, r.lr))]
         if r.compile:
             cmd.append("--compile")
-        cmd += ["--procs", str(max(0, min(64, r.procs)))]
+        cmd += ["--procs", str(max(0, min(64, r.procs))), "--gpu-wait", str(max(0.0, min(1440.0, r.gpu_wait)))]
         if r.threads > 0:
             cmd += ["--threads", str(min(1024, r.threads))]
         if r.resume:

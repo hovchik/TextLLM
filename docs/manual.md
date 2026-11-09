@@ -133,6 +133,7 @@ Once you have models it shows:
 **Speed on this PC** (also under Advanced):
 
 - **CPU threads**: how many CPU threads training uses. 0 (the default) means all physical cores, which is what training always did. Set a lower number to keep the PC usable for other work while it trains. LoRA fine-tuning uses this setting too.
+- **GPU start-up limit (min)**: on a GPU the first step also compiles the GPU's kernels, which on Intel Arc (especially the Arc graphics built into Core Ultra laptops) can take several minutes; the log says so and prints the time of step 1. If step 1 takes longer than this limit (default 20 minutes), the run restarts on the CPU by itself. 0 waits as long as it takes.
 - **Training processes**: from-scratch models can train in several processes on one PC. Each process takes part of the batch and a share of the threads, and after every step they average their gradients, so the model learns the same thing as one process with the whole batch. **Auto** uses one process until you run the speed test, and then the count the test found fastest for that model size. On a PC with several NVIDIA GPUs, Auto starts one process per GPU.
 - **Find the fastest**: a speed test that takes 1 to 3 minutes. It trains a few steps of the chosen model size on random tokens with 1, 2 and 4 processes and remembers the fastest. A count only wins if it is at least 5% faster than one process. The result shows under Training processes, for example "Auto = 2 for this size (1 → 900 ms/step, 2 → 700 ms/step)".
 
@@ -636,6 +637,7 @@ See README.md for every option.
 | "Prepare the training data first" | Run Data steps 1–3 before training from scratch. |
 | Resumed model writes nonsense after a corpus change | The tokenizer was rebuilt. Restore the old one (each run keeps a copy as `runs/<name>/tokenizer.json`, and the last replaced one is `tokenizer/bpe.prev.json`; copy it to `tokenizer/bpe.json`) and run Data step 3 again. Or use **Retrain** with corpus folders: it encodes them with the model's own tokenizer. |
 | Retrain: "not this model's tokenizer" | The encoded corpus was made with a different tokenizer than the model. Untick *The whole encoded corpus* and tick the corpus folders instead. |
+| Training on Intel Arc shows step 0 for minutes | The first step compiles the GPU kernels: wait up to 20 minutes (the log says "still on step 1"). On Arc graphics built into a laptop chip, the Small size is slow; the CPU size trains far faster. After the GPU start-up limit the run moves to the CPU by itself. |
 | The GPU isn't used | Update the NVIDIA driver (Intel Arc: the Intel graphics driver), then `run.bat --reinstall` (or `--gpu` / `--xpu`). Check Settings → Hardware. On laptops, plug in the charger and set Windows Graphics to "High performance" for Python. |
 | "CUDA out of memory" | Halve the batch size and double the gradient accumulation. |
 | A PDF gives no text | It's a scan: install Tesseract OCR (see the README) or run `ocrmypdf` first. Password-protected: save it again without the password. The ✗ line in the log says which. |

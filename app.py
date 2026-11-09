@@ -513,10 +513,9 @@ def train(r: TrainReq):
             if not os.path.exists(src):
                 err(f"Train the tokenizer first ({where.replace('steps 1–3', 'step 2')}).")
             shutil.copyfile(src, tok_copy)
-        if os.path.exists(tok_copy):
-            from tokenizers import Tokenizer
-
-            r.vocab = Tokenizer.from_file(tok_copy).get_vocab_size()  # the model must match its tokenizer
+        info = jobs.tokenizer_info(tok_copy)
+        if info and info.get("vocab"):
+            r.vocab = info["vocab"]           # the model must match its tokenizer (train.py keeps a resumed run's size)
         meta_p = os.path.join(out, "meta.json")
         if not (r.resume and os.path.exists(meta_p)):
             json.dump({"type": "scratch", "tok": "tokenizer.json", "preset": r.preset,

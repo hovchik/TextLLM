@@ -288,7 +288,7 @@ def test_tokenizer_build_reports_progress_and_is_unchanged(tmp_path, monkeypatch
     _corpus(raw)
     path = tmp_path / "p.json"
     monkeypatch.setattr(progress, "_BOARD", progress.Board(str(path)))
-    tt.train(str(raw), 500, str(tmp_path / "new.json"), 0)
+    tt.train(str(raw), 500, str(tmp_path / "new.json"), 0, style="gpt2", lang_balance=1.0, check_mb=0)
     # the same settings trained the old way (the library reading the files itself)
     old = Tokenizer(models.BPE())
     old.pre_tokenizer = pre_tokenizers.ByteLevel(add_prefix_space=False)
@@ -298,6 +298,11 @@ def test_tokenizer_build_reports_progress_and_is_unchanged(tmp_path, monkeypatch
     d = json.loads(path.read_text())
     assert d["kind"] == "work" and [t["state"] for t in d["tasks"]] == ["done", "done"]
     assert d["tasks"][0]["done"] == d["tasks"][0]["total"] > 0 and d["overall"]["pct"] == 100
+    # the default (modern) build also reports its quality check
+    monkeypatch.setattr(progress, "_BOARD", progress.Board(str(path)))
+    tt.train(str(raw), 500, str(tmp_path / "v2.json"), 0, check_mb=0.5)
+    d = json.loads(path.read_text())
+    assert [t["state"] for t in d["tasks"]] == ["done", "done", "done"] and d["overall"]["pct"] == 100
 
 
 def test_a_failed_encode_says_so(tmp_path, monkeypatch):
